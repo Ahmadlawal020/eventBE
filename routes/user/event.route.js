@@ -21,7 +21,9 @@ router.get("/my-drafts", verifyJWT, getMyDraftEvents);
 router.get("/my-events", verifyJWT, getMyEvents);
 router.get("/:id", getEventById);
 
-router.put("/:id", verifyJWT, updateEvent); // optionally protect updates
+// router.put("/:id", verifyJWT, updateEvent); // optionally protect updates
+router.patch("/:id", verifyJWT, updateEvent);
+
 router.delete("/:id", verifyJWT, deleteEvent); // optionally protect deletes
 
 module.exports = router;

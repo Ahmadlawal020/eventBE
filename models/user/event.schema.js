@@ -1,81 +1,3 @@
-// const mongoose = require("mongoose");
-
-// const eventSchema = new mongoose.Schema(
-//   {
-//     title: {
-//       type: String,
-//       trim: true,
-//       maxlength: 50,
-//     },
-//     image: {
-//       type: String,
-//     },
-
-//     description: {
-//       type: String,
-//       trim: true,
-//       maxlength: 250,
-//     },
-
-//     eventType: {
-//       type: String,
-//       enum: [
-//         "House",
-//         "Flat/Apartment",
-//         "Cabin",
-//         "Villa",
-//         "Hostel",
-//         "Hotel Room",
-//         "Studio",
-//         "Loft",
-//         "Guesthouse",
-//         "Farm Stay",
-//         "Cottage",
-//         "Treehouse",
-//         "Tent",
-//         "Boat",
-//         "Camper/RV",
-//       ],
-//     },
-
-//     ageRestriction: {
-//       minAge: {
-//         type: Number,
-//         min: 0,
-//       },
-//       maxAge: {
-//         type: Number,
-//         min: 0,
-//       },
-//     },
-
-//     schedule: {
-//       from: {
-//         type: Date,
-//       },
-//       to: {
-//         type: Date,
-//       },
-//     },
-
-//     capacity: {
-//       type: Number,
-//       min: 0,
-//     },
-//     isDraft: {
-//       type: Boolean,
-//       default: false,
-//     },
-//     createdBy: {
-//       type: mongoose.Schema.Types.ObjectId,
-//       ref: "User",
-//     },
-//   },
-//   { timestamps: true }
-// );
-
-// module.exports = mongoose.model("Event", eventSchema);
-
 const mongoose = require("mongoose");
 
 // 🔑 Enum keys + human-readable labels
@@ -132,7 +54,7 @@ const eventSchema = new mongoose.Schema(
     eventType: {
       type: String,
       enum: Object.keys(eventLabels), // e.g. "MUSIC_CONCERTS"
-      required: true,
+      // required: true,
     },
 
     ageRestriction: {
@@ -152,6 +74,57 @@ const eventSchema = new mongoose.Schema(
       },
       to: {
         type: Date,
+      },
+    },
+    location: {
+      addressString: {
+        type: String,
+        trim: true,
+      },
+
+      street: {
+        type: String,
+        trim: true,
+      },
+
+      flat: {
+        type: String,
+        trim: true,
+      },
+
+      city: {
+        type: String,
+        trim: true,
+      },
+
+      area: {
+        type: String,
+        trim: true,
+      },
+
+      postcode: {
+        type: String,
+        trim: true,
+      },
+
+      country: {
+        type: String,
+        trim: true,
+      },
+
+      coordinates: {
+        latitude: {
+          type: Number,
+        },
+        longitude: {
+          type: Number,
+        },
+      },
+
+      // Privacy toggle from UI
+      isSpecificLocation: {
+        type: Boolean,
+        default: false,
       },
     },
 
