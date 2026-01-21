@@ -1,40 +1,3 @@
-// const Event = require("../../models/user/event.schema");
-
-// const createDraftEvent = async (req, res) => {
-//   try {
-//     const { eventType } = req.body;
-
-//     if (!eventType) {
-//       return res.status(400).json({
-//         success: false,
-//         message: "eventType is required",
-//       });
-//     }
-
-//     const newEvent = new Event({
-//       eventType,
-//       isDraft: true,
-//       createdBy: req.user?.id || "68b6110236f2621324c21366",
-//     });
-
-//     const savedEvent = await newEvent.save();
-
-//     res.status(201).json({
-//       success: true,
-//       message: "Draft event created",
-//       data: savedEvent,
-//     });
-//   } catch (err) {
-//     console.error("Error creating draft event:", err);
-//     res.status(500).json({
-//       success: false,
-//       message: "Server error",
-//     });
-//   }
-// };
-
-// module.exports = { createDraftEvent };
-
 const Event = require("../../models/user/event.schema");
 
 // 📌 Create Event
@@ -135,56 +98,62 @@ const getMyDraftEvents = async (req, res) => {
     res.status(500).json({ success: false, message: "Server error" });
   }
 };
-
-// ✏️ Update Event
-// const updateEvent = async (req, res) => {
-//   const { id } = req.params;
-
-//   console.log("[UPDATE EVENT] Incoming request:");
-//   console.log("ID:", id);
-//   console.log("Body:", req.body);
-
-//   try {
-//     const prevEvent = await Event.findById(id);
-//     console.log("[UPDATE EVENT] Previous document:", prevEvent);
-
-//     const updatedEvent = await Event.findByIdAndUpdate(id, req.body, {
-//       new: true,
-//       runValidators: true,
-//     });
-
-//     console.log("[UPDATE EVENT] Updated document:", updatedEvent);
-
-//     if (!updatedEvent) {
-//       return res
-//         .status(404)
-//         .json({ success: false, message: "Event not found" });
-//     }
-
-//     res.json({
-//       success: true,
-//       message: "Event updated successfully",
-//       data: updatedEvent,
-//     });
-//   } catch (err) {
-//     console.error("[UPDATE EVENT] ERROR:", err);
-//     res.status(500).json({ success: false, message: "Server error" });
-//   }
-// };
-
+const normalizeImagePositions = (images = []) => {
+  return images
+    .sort((a, b) => a.position - b.position)
+    .map((img, index) => ({
+      ...img,
+      position: index,
+    }));
+};
+/* ================================
+   UPDATE EVENT (PATCH)
+================================ */
 const updateEvent = async (req, res) => {
   const { id } = req.params;
 
   try {
     const prevEvent = await Event.findById(id);
-    if (!prevEvent)
-      return res
-        .status(404)
-        .json({ success: false, message: "Event not found" });
+    if (!prevEvent) {
+      return res.status(404).json({
+        success: false,
+        message: "Event not found",
+      });
+    }
 
     const updatePayload = { ...req.body };
 
-    // 🔑 Ensure location is atomic
+    /* ================================
+       IMAGE POSITION MANAGEMENT
+    ================================= */
+    if (Array.isArray(updatePayload.images)) {
+      const existingImages = prevEvent.images || [];
+
+      // Determine next available position
+      const nextPosition =
+        existingImages.length > 0
+          ? Math.max(...existingImages.map((img) => img.position)) + 1
+          : 0;
+
+      // Assign positions to incoming images
+      const incomingImages = updatePayload.images.map((img, index) => ({
+        publicId: img.publicId,
+        url: img.url,
+        position: nextPosition + index,
+      }));
+
+      // Merge and normalize
+      const mergedImages = normalizeImagePositions([
+        ...existingImages,
+        ...incomingImages,
+      ]);
+
+      updatePayload.images = mergedImages;
+    }
+
+    /* ================================
+       LOCATION (ATOMIC UPDATE)
+    ================================= */
     if (updatePayload.location) {
       const loc = updatePayload.location;
 
@@ -220,8 +189,120 @@ const updateEvent = async (req, res) => {
       data: updatedEvent,
     });
   } catch (err) {
-    console.error("[UPDATE EVENT] ERROR:", err);
-    res.status(500).json({ success: false, message: "Server error" });
+    console.error("[UPDATE EVENT]", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
+  }
+};
+
+// controllers/user/event.controller.js
+
+const deleteEventImage = async (req, res) => {
+  const { id } = req.params;
+  const { publicId } = req.body;
+
+  if (!publicId) {
+    return res.status(400).json({
+      success: false,
+      message: "publicId is required",
+    });
+  }
+
+  try {
+    const event = await Event.findById(id);
+    if (!event) {
+      return res.status(404).json({
+        success: false,
+        message: "Event not found",
+      });
+    }
+
+    event.images = event.images
+      .filter((img) => img.publicId !== publicId)
+      .sort((a, b) => a.position - b.position)
+      .map((img, index) => ({
+        publicId: img.publicId,
+        url: img.url,
+        position: index,
+      }));
+
+    await event.save();
+
+    res.json({
+      success: true,
+      message: "Image deleted successfully",
+      data: event.images,
+    });
+  } catch (err) {
+    console.error("[DELETE EVENT IMAGE]", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
+  }
+};
+
+const reorderEventImages = async (req, res) => {
+  const { id } = req.params;
+  const { publicId, toPosition } = req.body;
+
+  if (!publicId || typeof toPosition !== "number") {
+    return res.status(400).json({
+      success: false,
+      message: "publicId and toPosition are required",
+    });
+  }
+
+  try {
+    const event = await Event.findById(id);
+    if (!event) {
+      return res.status(404).json({
+        success: false,
+        message: "Event not found",
+      });
+    }
+
+    // 1️⃣ Sort images by current position
+    const images = [...event.images].sort((a, b) => a.position - b.position);
+
+    // 2️⃣ Find image being moved
+    const fromIndex = images.findIndex((img) => img.publicId === publicId);
+
+    if (fromIndex === -1) {
+      return res.status(404).json({
+        success: false,
+        message: "Image not found",
+      });
+    }
+
+    // 3️⃣ Remove image from old position
+    const [movedImage] = images.splice(fromIndex, 1);
+
+    // 4️⃣ Insert image into new position
+    images.splice(toPosition, 0, movedImage);
+
+    // 5️⃣ Recalculate ALL positions
+    event.images = images.map((img, index) => ({
+      publicId: img.publicId,
+      url: img.url,
+      position: index,
+    }));
+
+    await event.save();
+
+    res.json({
+      success: true,
+      message: "Image order updated successfully",
+      data: event.images,
+    });
+  } catch (err) {
+    console.error("[REORDER EVENT IMAGES]", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
   }
 };
 
@@ -266,12 +347,167 @@ const getMyEvents = async (req, res) => {
   }
 };
 
+// 📋 Get Personal Event Listings (Lightweight)
+
+const getPersonalEventListings = async (req, res) => {
+  try {
+    console.log("[GET PUBLISHED LISTINGS] req.user:", req.user);
+
+    if (!req.user?.id) {
+      return res.status(401).json({
+        success: false,
+        message: "Authentication required",
+      });
+    }
+
+    const events = await Event.find({
+      createdBy: req.user.id,
+      // isDraft: false, // ✅ published only
+    })
+      .select({
+        title: 1,
+        images: 1,
+        isDraft: 1,
+        eventType: 1,
+        location: 1,
+      })
+      .sort({ createdAt: -1 });
+
+    const formattedEvents = events.map((event) => {
+      const obj = event.toJSON(); // keeps eventTypeLabel
+
+      return {
+        _id: obj._id,
+        title: obj.title,
+        isDraft: obj.isDraft,
+        eventTypeLabel: obj.eventTypeLabel,
+        location: obj.location || null,
+        images: obj.images || [], // ✅ FIXED
+      };
+    });
+
+    res.json({
+      success: true,
+      message: "Published event listings fetched successfully",
+      data: formattedEvents,
+    });
+  } catch (err) {
+    console.error("[GET PUBLISHED LISTINGS] ERROR:", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
+  }
+};
+
+// 🗑️ Delete Performer from Event
+const deleteEventPerformer = async (req, res) => {
+  const { id, performerId } = req.params;
+
+  if (!performerId) {
+    return res.status(400).json({
+      success: false,
+      message: "performerId is required",
+    });
+  }
+
+  try {
+    const event = await Event.findById(id);
+
+    if (!event) {
+      return res.status(404).json({
+        success: false,
+        message: "Event not found",
+      });
+    }
+
+    const initialCount = event.performers.length;
+
+    event.performers = event.performers.filter(
+      (p) => p._id.toString() !== performerId
+    );
+
+    if (event.performers.length === initialCount) {
+      return res.status(404).json({
+        success: false,
+        message: "Performer not found",
+      });
+    }
+
+    await event.save();
+
+    res.json({
+      success: true,
+      message: "Performer deleted successfully",
+      data: event.performers,
+    });
+  } catch (err) {
+    console.error("[DELETE EVENT PERFORMER]", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
+  }
+};
+
+// ✏️ Update Performer in Event
+const updateEventPerformer = async (req, res) => {
+  const { id, performerId } = req.params;
+  const { name, role, bio, image, socialLinks } = req.body;
+
+  try {
+    const event = await Event.findById(id);
+
+    if (!event) {
+      return res.status(404).json({
+        success: false,
+        message: "Event not found",
+      });
+    }
+
+    const performer = event.performers.id(performerId);
+
+    if (!performer) {
+      return res.status(404).json({
+        success: false,
+        message: "Performer not found",
+      });
+    }
+
+    // Update fields safely
+    performer.name = name ?? performer.name;
+    performer.role = role ?? performer.role;
+    performer.bio = bio ?? performer.bio;
+    performer.image = image ?? performer.image;
+    performer.socialLinks = socialLinks ?? performer.socialLinks;
+
+    await event.save();
+
+    res.json({
+      success: true,
+      message: "Performer updated successfully",
+      data: performer,
+    });
+  } catch (err) {
+    console.error("[UPDATE EVENT PERFORMER]", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
+  }
+};
+
 module.exports = {
   createEvent,
   getEvents,
   getMyEvents,
   getEventById,
   getMyDraftEvents,
+  updateEventPerformer,
   updateEvent,
   deleteEvent,
+  getPersonalEventListings,
+  reorderEventImages,
+  deleteEventImage,
+  deleteEventPerformer,
 };

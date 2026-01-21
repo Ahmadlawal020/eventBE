@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 
-// 🔑 Enum keys + human-readable labels
+/* ===================== EVENT TYPE LABELS ===================== */
+
 const eventLabels = {
   MUSIC_CONCERTS: "Music & Concerts",
   FESTIVALS_FAIRS: "Festivals & Fairs",
@@ -34,15 +35,22 @@ const eventLabels = {
   HOLIDAYS_SEASONAL: "Holidays & Seasonal",
 };
 
+/* ===================== EVENT SCHEMA ===================== */
+
 const eventSchema = new mongoose.Schema(
   {
+    /* ===== BASIC INFO ===== */
+
     title: {
       type: String,
       trim: true,
       maxlength: 50,
     },
-    image: {
+
+    shortDescription: {
       type: String,
+      trim: true,
+      maxlength: 500,
     },
     description: {
       type: String,
@@ -50,12 +58,112 @@ const eventSchema = new mongoose.Schema(
       maxlength: 250,
     },
 
-    // 🔑 Safe enum keys only
+    /* ===== IMAGES ===== */
+
+    images: [
+      {
+        publicId: {
+          type: String,
+          required: true,
+        },
+        url: {
+          type: String,
+          required: true,
+        },
+        position: {
+          type: Number,
+          required: true,
+          min: 0,
+        },
+      },
+    ],
+
+    /* ===== HIGHLIGHTS & AMENITIES ===== */
+
+    highlights: [{ type: String }],
+
+    amenities: [
+      {
+        type: String,
+        enum: [
+          "FOOD_STALLS",
+          "BAR_DRINKS",
+          "PARKING",
+          "RESTROOMS",
+          "FIRST_AID",
+          "VIP_AREA",
+          "SEATING",
+          "MERCHANDISE",
+          "WIFI",
+          "ACCESSIBILITY",
+          "PHOTOBOOTH",
+          "CHARGING_STATIONS",
+        ],
+      },
+    ],
+
+    /* ===== PERFORMERS (INLINE, EVENT-SCOPED) ===== */
+
+    performers: [
+      {
+        name: {
+          type: String,
+          required: true,
+          trim: true,
+          maxlength: 100,
+        },
+
+        role: {
+          type: String,
+          trim: true,
+          maxlength: 100,
+        },
+
+        bio: {
+          type: String,
+          trim: true,
+          maxlength: 500,
+        },
+
+        image: {
+          type: String, // Image URL
+          default: null,
+        },
+
+        socialLinks: [
+          {
+            platform: {
+              type: String,
+              required: true,
+              enum: [
+                "instagram",
+                "twitter",
+                "facebook",
+                "linkedin",
+                "youtube",
+                "tiktok",
+                "website",
+              ],
+            },
+
+            url: {
+              type: String,
+              required: true,
+              trim: true,
+            },
+          },
+        ],
+      },
+    ],
+
+    /* ===== EVENT TYPE ===== */
+
     eventType: {
       type: String,
-      enum: Object.keys(eventLabels), // e.g. "MUSIC_CONCERTS"
-      // required: true,
+      enum: Object.keys(eventLabels),
     },
+
+    /* ===== AGE RESTRICTIONS ===== */
 
     ageRestriction: {
       minAge: {
@@ -68,6 +176,8 @@ const eventSchema = new mongoose.Schema(
       },
     },
 
+    /* ===== SCHEDULE ===== */
+
     schedule: {
       from: {
         type: Date,
@@ -76,6 +186,9 @@ const eventSchema = new mongoose.Schema(
         type: Date,
       },
     },
+
+    /* ===== LOCATION ===== */
+
     location: {
       addressString: {
         type: String,
@@ -113,24 +226,58 @@ const eventSchema = new mongoose.Schema(
       },
 
       coordinates: {
-        latitude: {
-          type: Number,
-        },
-        longitude: {
-          type: Number,
-        },
+        latitude: Number,
+        longitude: Number,
       },
 
-      // Privacy toggle from UI
       isSpecificLocation: {
         type: Boolean,
         default: false,
       },
     },
 
+    /* ===== META ===== */
+
     capacity: {
       type: Number,
       min: 0,
+    },
+    /* ===== SAFETY & SECURITY ===== */
+
+    safety: {
+      securityStaff: {
+        type: Boolean,
+        default: false,
+      },
+
+      cctv: {
+        type: Boolean,
+        default: false,
+      },
+
+      bagCheck: {
+        type: Boolean,
+        default: false,
+      },
+    },
+
+    /* ===== TICKETS & ENTRY ===== */
+
+    entry: {
+      ticketRequired: {
+        type: Boolean,
+        default: false,
+      },
+
+      onSiteTickets: {
+        type: Boolean,
+        default: false,
+      },
+
+      idRequired: {
+        type: Boolean,
+        default: false,
+      },
     },
 
     isDraft: {
@@ -146,12 +293,15 @@ const eventSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// 🔎 Automatically attach human-readable label in API responses
+/* ===================== HUMAN-READABLE LABEL ===================== */
+
 eventSchema.methods.toJSON = function () {
   const obj = this.toObject();
   obj.eventTypeLabel = eventLabels[obj.eventType];
   return obj;
 };
+
+/* ===================== EXPORT ===================== */
 
 module.exports = mongoose.model("Event", eventSchema);
 module.exports.eventLabels = eventLabels;
