@@ -1,4 +1,5 @@
 const Event = require("../../models/user/event.schema");
+const mongoose = require("mongoose");
 
 // 📌 Create Event
 const createEvent = async (req, res) => {
@@ -42,7 +43,7 @@ const getEvents = async (req, res) => {
   try {
     const events = await Event.find().populate(
       "createdBy",
-      "firstName surname email"
+      "firstName surname email",
     );
     res.json({
       success: true,
@@ -62,7 +63,7 @@ const getEventById = async (req, res) => {
   try {
     const event = await Event.findById(id).populate(
       "createdBy",
-      "firstName surname email"
+      "firstName surname email",
     );
     if (!event)
       return res
@@ -111,6 +112,13 @@ const normalizeImagePositions = (images = []) => {
 ================================ */
 const updateEvent = async (req, res) => {
   const { id } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({
+      success: false,
+      message: "Invalid event ID",
+    });
+  }
 
   try {
     const prevEvent = await Event.findById(id);
@@ -424,7 +432,7 @@ const deleteEventPerformer = async (req, res) => {
     const initialCount = event.performers.length;
 
     event.performers = event.performers.filter(
-      (p) => p._id.toString() !== performerId
+      (p) => p._id.toString() !== performerId,
     );
 
     if (event.performers.length === initialCount) {
