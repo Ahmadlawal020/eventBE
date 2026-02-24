@@ -10,7 +10,7 @@
 //   deleteEvent,
 //   getMyEvents,
 //   getPersonalEventListings,
-// } = require("../../controllers/user/event.controllar");
+// } = require("../../controllers/user/event.controller");
 
 // const verifyJWT = require("../../middleware/verifyJWT");
 
@@ -46,7 +46,7 @@
 //   reorderEventImages,
 //   deleteEventImage,
 //   deleteEventPerformer,
-// } = require("../../controllers/user/event.controllar");
+// } = require("../../controllers/user/event.controller");
 
 // const verifyJWT = require("../../middleware/verifyJWT");
 
@@ -91,7 +91,7 @@ const {
   reorderEventImages,
   deleteEventImage,
   deleteEventPerformer,
-} = require("../../controllers/user/event.controllar");
+} = require("../../controllers/user/event.controller");
 
 const verifyJWT = require("../../middleware/verifyJWT");
 

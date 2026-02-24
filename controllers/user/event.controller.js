@@ -1,5 +1,7 @@
 const Event = require("../../models/user/event.schema");
+const Ticket = require("../../models/user/product.schema");
 const mongoose = require("mongoose");
+const cloudinary = require("../../utils/cloudinary");
 
 // 📌 Create Event
 const createEvent = async (req, res) => {
@@ -11,6 +13,10 @@ const createEvent = async (req, res) => {
     schedule,
     capacity,
     isDraft,
+    ticketGuide,
+    arrivalGuide,
+    performers,
+    entry,
   } = req.body;
 
   try {
@@ -23,6 +29,10 @@ const createEvent = async (req, res) => {
       capacity,
       isDraft: !!isDraft,
       createdBy: req.user?.id || "68b6110236f2621324c21366", // fallback
+      ticketGuide,
+      arrivalGuide,
+      performers,
+      entry,
     });
 
     const savedEvent = await newEvent.save();
@@ -136,15 +146,22 @@ const updateEvent = async (req, res) => {
     ================================= */
     if (Array.isArray(updatePayload.images)) {
       const existingImages = prevEvent.images || [];
+      const incomingImages = updatePayload.images;
+
+      // Filter out existing images that are being "replaced" or "re-sent"
+      const incomingPublicIds = new Set(incomingImages.map((img) => img.publicId));
+      const filteredExisting = existingImages.filter(
+        (img) => !incomingPublicIds.has(img.publicId)
+      );
 
       // Determine next available position
       const nextPosition =
-        existingImages.length > 0
-          ? Math.max(...existingImages.map((img) => img.position)) + 1
+        filteredExisting.length > 0
+          ? Math.max(...filteredExisting.map((img) => img.position)) + 1
           : 0;
 
       // Assign positions to incoming images
-      const incomingImages = updatePayload.images.map((img, index) => ({
+      const newImages = incomingImages.map((img, index) => ({
         publicId: img.publicId,
         url: img.url,
         position: nextPosition + index,
@@ -152,8 +169,8 @@ const updateEvent = async (req, res) => {
 
       // Merge and normalize
       const mergedImages = normalizeImagePositions([
-        ...existingImages,
-        ...incomingImages,
+        ...filteredExisting,
+        ...newImages,
       ]);
 
       updatePayload.images = mergedImages;
@@ -227,6 +244,16 @@ const deleteEventImage = async (req, res) => {
       });
     }
 
+    // 1️⃣ Delete from Cloudinary
+    try {
+      await cloudinary.uploader.destroy(publicId);
+    } catch (cloudinaryErr) {
+      console.error("[CLOUDINARY DELETE ERROR]", cloudinaryErr);
+      // Optional: continue even if Cloudinary fails, or abort? 
+      // Usually, we want to at least log it.
+    }
+
+    // 2️⃣ Remove from database
     event.images = event.images
       .filter((img) => img.publicId !== publicId)
       .sort((a, b) => a.position - b.position)
@@ -240,7 +267,7 @@ const deleteEventImage = async (req, res) => {
 
     res.json({
       success: true,
-      message: "Image deleted successfully",
+      message: "Image deleted successfully from database and Cloudinary",
       data: event.images,
     });
   } catch (err) {
@@ -319,19 +346,48 @@ const deleteEvent = async (req, res) => {
   const { id } = req.params;
 
   try {
-    const deletedEvent = await Event.findByIdAndDelete(id);
+    const event = await Event.findById(id);
 
-    if (!deletedEvent)
+    if (!event) {
       return res
         .status(404)
         .json({ success: false, message: "Event not found" });
+    }
+
+    // 1️⃣ Delete images from Cloudinary (if credentials are available)
+    if (event.images && event.images.length > 0) {
+      // Check if Cloudinary is properly configured
+      const hasCloudinaryConfig = 
+        process.env.CLOUDINARY_API_KEY && 
+        process.env.CLOUDINARY_API_SECRET;
+
+      if (hasCloudinaryConfig) {
+        const deletePromises = event.images.map((img) =>
+          cloudinary.uploader.destroy(img.publicId).catch((err) => {
+            console.error(`[CLOUDINARY DELETE ERROR] for ${img.publicId}:`, err);
+          })
+        );
+        await Promise.all(deletePromises);
+        console.log(`[DELETE EVENT] Deleted ${event.images.length} images from Cloudinary`);
+      } else {
+        console.warn(
+          "[DELETE EVENT] Cloudinary credentials not configured. Skipping image deletion from Cloudinary."
+        );
+      }
+    }
+
+    // 2️⃣ Delete associated tickets
+    await Ticket.deleteMany({ eventId: id });
+
+    // 3️⃣ Delete the event itself
+    await Event.findByIdAndDelete(id);
 
     res.json({
       success: true,
       message: "Event deleted successfully",
     });
   } catch (err) {
-    console.error(err);
+    console.error("[DELETE EVENT]", err);
     res.status(500).json({ success: false, message: "Server error" });
   }
 };
@@ -378,6 +434,7 @@ const getPersonalEventListings = async (req, res) => {
         isDraft: 1,
         eventType: 1,
         location: 1,
+        createdAt: 1,
       })
       .sort({ createdAt: -1 });
 
@@ -391,6 +448,7 @@ const getPersonalEventListings = async (req, res) => {
         eventTypeLabel: obj.eventTypeLabel,
         location: obj.location || null,
         images: obj.images || [], // ✅ FIXED
+        createdAt: obj.createdAt,
       };
     });
 

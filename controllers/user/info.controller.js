@@ -1,5 +1,5 @@
 const User = require("../../models/user/user.schema");
-const bcrypt = require("bcryptjs");
+const bcrypt = require("bcrypt");
 const asyncHandler = require("express-async-handler");
 
 // @desc    Get user by ID

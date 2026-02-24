@@ -1,8 +1,8 @@
 const User = require("../../models/user/user.schema");
-// const bcrypt = require("bcryptjs");
-const bcrypt = require("bcrypt"); // use bcrypt instead of bcryptjs
+const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const { OAuth2Client } = require("google-auth-library");
+const asyncHandler = require("express-async-handler");
 
 // Initialize OAuth2Client with proper credentials
 const client = new OAuth2Client(
@@ -30,27 +30,20 @@ const generateTokens = (user) => {
 };
 
 // 🔍 Check if user exists (before signup)
-const handleCheckUser = async (req, res) => {
+const handleCheckUser = asyncHandler(async (req, res) => {
   const { email } = req.body;
-  if (!email)
-    return res
-      .status(400)
-      .json({ success: false, message: "Email is required" });
+  // Input validation handled by middleware
 
-  try {
-    const foundUser = await User.findOne({ email }).exec();
-    return res.json({
-      success: true,
-      message: "Check complete",
-      data: { exists: !!foundUser },
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: "Server error" });
-  }
-};
+  const foundUser = await User.findOne({ email }).exec();
+  return res.json({
+    success: true,
+    message: "Check complete",
+    data: { exists: !!foundUser },
+  });
+});
 
 // authController.js - Update handleSignup
-const handleSignup = async (req, res) => {
+const handleSignup = asyncHandler(async (req, res) => {
   const {
     firstName,
     surname,
@@ -61,199 +54,167 @@ const handleSignup = async (req, res) => {
     authProvider = "local",
   } = req.body;
 
-  // Validate required fields based on auth provider
-  if (!firstName || !surname || !email || !dob) {
-    return res.status(400).json({
+  // Input validation handled by middleware
+
+  const existingUser = await User.findOne({ email }).exec();
+  if (existingUser) {
+    return res.status(409).json({
       success: false,
-      message: "All fields are required",
+      message: "User already exists",
     });
   }
 
-  // Password is only required for local auth
-  if (authProvider === "local" && !password) {
-    return res.status(400).json({
-      success: false,
-      message: "Password is required for email signup",
-    });
+  let hashedPassword;
+  if (authProvider === "local" && password) {
+    hashedPassword = await bcrypt.hash(password, 10);
   }
 
-  try {
-    const existingUser = await User.findOne({ email }).exec();
-    if (existingUser) {
-      return res.status(409).json({
-        success: false,
-        message: "User already exists",
-      });
-    }
+  const newUser = new User({
+    firstName,
+    surname,
+    email,
+    dob,
+    password: hashedPassword,
+    googleId: googleId || null,
+    authProvider,
+  });
 
-    let hashedPassword;
-    if (authProvider === "local") {
-      hashedPassword = await bcrypt.hash(password, 10);
-    }
+  const { accessToken, refreshToken } = generateTokens(newUser);
+  newUser.refreshToken = refreshToken;
+  await newUser.save();
 
-    const newUser = new User({
-      firstName,
-      surname,
-      email,
-      dob,
-      password: hashedPassword,
-      googleId: googleId || null,
-      authProvider,
-    });
-
-    const { accessToken, refreshToken } = generateTokens(newUser);
-    newUser.refreshToken = refreshToken;
-    await newUser.save();
-
-    res.status(201).json({
-      success: true,
-      message: "Signup successful",
-      data: {
-        user: {
-          id: newUser._id,
-          email: newUser.email,
-          firstName: newUser.firstName,
-          surname: newUser.surname,
-          roles: newUser.roles,
-          authProvider: newUser.authProvider,
-        },
-        accessToken,
-        refreshToken,
-        // Add explicit flag for frontend
-        signupCompleted: true,
+  res.status(201).json({
+    success: true,
+    message: "Signup successful",
+    data: {
+      user: {
+        id: newUser._id,
+        email: newUser.email,
+        firstName: newUser.firstName,
+        surname: newUser.surname,
+        roles: newUser.roles,
+        authProvider: newUser.authProvider,
       },
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: "Server error" });
-  }
-};
+      accessToken,
+      refreshToken,
+      signupCompleted: true,
+    },
+  });
+});
+
 // 🔑 Login
-const handleLogin = async (req, res) => {
+const handleLogin = asyncHandler(async (req, res) => {
   const { email, password } = req.body;
-  if (!email || !password) {
+  // Input validation handled by middleware
+
+  const foundUser = await User.findOne({ email }).exec();
+  if (!foundUser) {
     return res
+      .status(401)
+      .json({ success: false, message: "Invalid email or password" });
+  }
+
+  // Handle Google users who try to login via password
+  if (foundUser.authProvider === 'google' && !foundUser.password) {
+     return res
       .status(400)
-      .json({ success: false, message: "Email and password are required" });
+      .json({ success: false, message: "Please login with Google" });
   }
 
-  try {
-    const foundUser = await User.findOne({ email }).exec();
-    if (!foundUser) {
-      return res
-        .status(401)
-        .json({ success: false, message: "Invalid email or password" });
-    }
+  const match = await bcrypt.compare(password, foundUser.password);
+  if (!match)
+    return res
+      .status(401)
+      .json({ success: false, message: "Invalid email or password" });
 
-    const match = await bcrypt.compare(password, foundUser.password);
-    if (!match)
-      return res
-        .status(401)
-        .json({ success: false, message: "Invalid email or password" });
+  const { accessToken, refreshToken } = generateTokens(foundUser);
+  foundUser.refreshToken = refreshToken;
+  await foundUser.save();
 
-    const { accessToken, refreshToken } = generateTokens(foundUser);
-    foundUser.refreshToken = refreshToken;
-    await foundUser.save();
-
-    res.json({
-      success: true,
-      message: "Login successful",
-      data: {
-        user: {
-          id: foundUser._id,
-          email: foundUser.email,
-          firstName: foundUser.firstName,
-          surname: foundUser.surname,
-          roles: foundUser.roles,
-        },
-        accessToken,
-        refreshToken,
+  res.json({
+    success: true,
+    message: "Login successful",
+    data: {
+      user: {
+        id: foundUser._id,
+        email: foundUser.email,
+        firstName: foundUser.firstName,
+        surname: foundUser.surname,
+        roles: foundUser.roles,
+        authProvider: foundUser.authProvider,
+        profilePicture: foundUser.profilePicture,
       },
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: "Server error" });
-  }
-};
+      accessToken,
+      refreshToken,
+    },
+  });
+});
 
 // 🚪 Logout
-const handleLogout = async (req, res) => {
+const handleLogout = asyncHandler(async (req, res) => {
+  const cookies = req.cookies;
   const { refreshToken } = req.body;
-  if (!refreshToken) return res.json({ success: true, message: "Logged out" });
+  
+  if (!refreshToken) return res.sendStatus(204); // No content
 
-  try {
-    const foundUser = await User.findOne({ refreshToken }).exec();
-    if (!foundUser) return res.json({ success: true, message: "Logged out" });
-
-    foundUser.refreshToken = "";
-    await foundUser.save();
-
-    res.json({ success: true, message: "Logged out" });
-  } catch (err) {
-    res.status(500).json({ success: false, message: "Server error" });
+  const foundUser = await User.findOne({ refreshToken }).exec();
+  if (!foundUser) {
+      return res.sendStatus(204);
   }
-};
+
+  // Delete refreshToken in db
+  foundUser.refreshToken = '';
+  await foundUser.save();
+
+  res.status(200).json({ success: true, message: "Logged out" });
+});
 
 // 🔄 Refresh token
-const handleRefreshToken = async (req, res) => {
+const handleRefreshToken = asyncHandler(async (req, res) => {
   const { refreshToken } = req.body;
-  if (!refreshToken)
-    return res.status(401).json({ success: false, message: "Unauthorized" });
+  // Validation handled by middleware
 
-  try {
-    const foundUser = await User.findOne({ refreshToken }).exec();
-    if (!foundUser)
-      return res.status(403).json({ success: false, message: "Forbidden" });
+  const foundUser = await User.findOne({ refreshToken }).exec();
+  if (!foundUser)
+    return res.status(403).json({ success: false, message: "Forbidden" });
 
-    jwt.verify(
-      refreshToken,
-      process.env.REFRESH_TOKEN_SECRET,
-      async (err, decoded) => {
-        if (err || foundUser.email !== decoded.email)
-          return res.status(403).json({ success: false, message: "Forbidden" });
+  jwt.verify(
+    refreshToken,
+    process.env.REFRESH_TOKEN_SECRET,
+    async (err, decoded) => {
+      if (err || foundUser.email !== decoded.email)
+        return res.status(403).json({ success: false, message: "Forbidden" });
 
-        const { accessToken, refreshToken: newRefresh } =
-          generateTokens(foundUser);
+      const { accessToken, refreshToken: newRefresh } =
+        generateTokens(foundUser);
 
-        foundUser.refreshToken = newRefresh;
-        await foundUser.save();
+      foundUser.refreshToken = newRefresh;
+      await foundUser.save();
 
-        res.json({
-          success: true,
-          message: "Token refreshed",
-          data: {
-            user: {
-              id: foundUser._id,
-              email: foundUser.email,
-              firstName: foundUser.firstName,
-              surname: foundUser.surname,
-              roles: foundUser.roles,
-            },
-            accessToken,
-            refreshToken: newRefresh,
+      res.json({
+        success: true,
+        message: "Token refreshed",
+        data: {
+          user: {
+            id: foundUser._id,
+            email: foundUser.email,
+            firstName: foundUser.firstName,
+            surname: foundUser.surname,
+            roles: foundUser.roles,
+            authProvider: foundUser.authProvider,
+            profilePicture: foundUser.profilePicture,
           },
-        });
-      }
-    );
-  } catch (err) {
-    res.status(500).json({ success: false, message: "Server error" });
-  }
-};
+          accessToken,
+          refreshToken: newRefresh,
+        },
+      });
+    }
+  );
+});
 
-const handleGoogleAuth = async (req, res) => {
+const handleGoogleAuth = asyncHandler(async (req, res) => {
   const { code, codeVerifier } = req.body;
-
-  if (!code) {
-    return res.status(400).json({
-      success: false,
-      message: "Authorization code required",
-    });
-  }
-
-  if (!codeVerifier) {
-    return res.status(400).json({
-      success: false,
-      message: "Code verifier required for PKCE flow",
-    });
-  }
+  // Input validation handled by middleware
 
   // Validate environment variables
   if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
@@ -264,129 +225,105 @@ const handleGoogleAuth = async (req, res) => {
     });
   }
 
-  try {
-    console.log("Exchanging authorization code for tokens with PKCE...");
+  console.log("Exchanging authorization code for tokens with PKCE...");
 
-    // Exchange authorization code for tokens WITH code verifier
-    const { tokens } = await client.getToken({
-      code,
-      codeVerifier, // This is crucial for PKCE
-      client_id: process.env.GOOGLE_CLIENT_ID,
-      client_secret: process.env.GOOGLE_CLIENT_SECRET,
-      redirect_uri: process.env.GOOGLE_REDIRECT_URI,
-    });
+  // Exchange authorization code for tokens WITH code verifier
+  const { tokens } = await client.getToken({
+    code,
+    codeVerifier, // This is crucial for PKCE
+    client_id: process.env.GOOGLE_CLIENT_ID,
+    client_secret: process.env.GOOGLE_CLIENT_SECRET,
+    redirect_uri: process.env.GOOGLE_REDIRECT_URI,
+  });
 
-    console.log("Tokens received:", tokens ? "Yes" : "No");
-
-    if (!tokens.id_token) {
-      return res.status(400).json({
-        success: false,
-        message: "No ID token received from Google",
-      });
-    }
-
-    // Verify the ID token
-    const ticket = await client.verifyIdToken({
-      idToken: tokens.id_token,
-      audience: process.env.GOOGLE_CLIENT_ID,
-    });
-
-    const payload = ticket.getPayload();
-    const {
-      email,
-      given_name: firstName,
-      family_name: surname,
-      sub: googleId,
-      picture,
-    } = payload;
-
-    if (!email) {
-      return res.status(400).json({
-        success: false,
-        message: "Google account has no email",
-      });
-    }
-
-    console.log("Google user payload:", {
-      email,
-      firstName,
-      surname,
-      googleId,
-    });
-
-    // Check for existing user by email or googleId
-    let user = await User.findOne({
-      $or: [{ email }, { googleId }],
-    }).exec();
-
-    if (user) {
-      // ✅ EXISTING USER: Generate tokens and log them in
-      const { accessToken, refreshToken } = generateTokens(user);
-
-      // Save refresh token to user
-      user.refreshToken = refreshToken;
-      await user.save();
-
-      console.log(
-        "Google authentication successful for existing user:",
-        user.email
-      );
-
-      return res.json({
-        success: true,
-        message: "Google authentication successful",
-        data: {
-          user: {
-            id: user._id,
-            email: user.email,
-            firstName: user.firstName,
-            surname: user.surname,
-            roles: user.roles,
-            authProvider: user.authProvider,
-            profilePicture: user.profilePicture,
-          },
-          accessToken,
-          refreshToken,
-        },
-      });
-    } else {
-      // ❌ NEW USER: Return user data for signup completion
-      console.log("New Google user - redirecting to signup form");
-
-      return res.json({
-        success: true,
-        message: "Google user needs to complete signup",
-        data: {
-          needsSignup: true,
-          user: {
-            email,
-            firstName: firstName || "",
-            surname: surname || "",
-            profilePicture: picture,
-            googleId: googleId,
-          },
-        },
-      });
-    }
-  } catch (err) {
-    console.error("Google Auth Error:", err);
-
-    // More specific error messages
-    if (err.message.includes("invalid_grant")) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "Invalid authorization code or code verifier. The code may have expired. Please try signing in again.",
-      });
-    }
-
-    res.status(500).json({
+  if (!tokens.id_token) {
+    return res.status(400).json({
       success: false,
-      message: "Google authentication failed",
-      error: process.env.NODE_ENV === "development" ? err.message : undefined,
+      message: "No ID token received from Google",
     });
   }
-};
+
+  // Verify the ID token
+  const ticket = await client.verifyIdToken({
+    idToken: tokens.id_token,
+    audience: process.env.GOOGLE_CLIENT_ID,
+  });
+
+  const payload = ticket.getPayload();
+  const {
+    email,
+    given_name: firstName,
+    family_name: surname,
+    sub: googleId,
+    picture,
+  } = payload;
+
+  if (!email) {
+    return res.status(400).json({
+      success: false,
+      message: "Google account has no email",
+    });
+  }
+
+  // Check for existing user by email or googleId
+  let user = await User.findOne({
+    $or: [{ email }, { googleId }],
+  }).exec();
+
+  if (user) {
+    // ✅ EXISTING USER: Generate tokens and log them in
+    
+    // Update googleId if missing/changed (merging accounts if email matches)
+    if (!user.googleId) {
+        user.googleId = googleId;
+        user.authProvider = 'google'; // convert to google auth or hybrid
+    }
+
+    const { accessToken, refreshToken } = generateTokens(user);
+
+    // Save refresh token to user
+    user.refreshToken = refreshToken;
+    await user.save();
+
+    return res.json({
+      success: true,
+      message: "Google authentication successful",
+      data: {
+        user: {
+          id: user._id,
+          email: user.email,
+          firstName: user.firstName,
+          surname: user.surname,
+          roles: user.roles,
+          authProvider: user.authProvider,
+          profilePicture: user.profilePicture,
+        },
+        accessToken,
+        refreshToken,
+      },
+    });
+  } else {
+    // ❌ NEW USER: Return user data for signup completion
+    console.log("New Google user - redirecting to signup form");
+
+    return res.json({
+      success: true,
+      message: "Google user needs to complete signup",
+      data: {
+        needsSignup: true,
+        user: {
+          email,
+          firstName: firstName || "",
+          surname: surname || "",
+          profilePicture: picture,
+          googleId: googleId,
+          authProvider: 'google'
+        },
+      },
+    });
+  }
+});
+
 module.exports = {
   handleCheckUser,
   handleSignup,

@@ -280,6 +280,43 @@ const eventSchema = new mongoose.Schema(
       },
     },
 
+    /* ===== GUIDES ===== */
+
+    ticketGuide: {
+      description: {
+        type: String,
+        trim: true,
+        maxlength: 1000,
+      },
+      includeFees: {
+        type: Boolean,
+        default: false,
+      },
+      refundPolicy: {
+        type: String,
+        trim: true,
+        maxlength: 500,
+      },
+    },
+
+    arrivalGuide: {
+      notes: {
+        type: String,
+        trim: true,
+        maxlength: 1000,
+      },
+      parking: {
+        type: String,
+        trim: true,
+        maxlength: 500,
+      },
+      checkInInstructions: {
+        type: String,
+        trim: true,
+        maxlength: 1000,
+      },
+    },
+
     isDraft: {
       type: Boolean,
       default: false,

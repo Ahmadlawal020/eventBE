@@ -1,5 +1,13 @@
 const express = require("express");
 const router = express.Router();
+const validateRequest = require("../../middleware/validateRequest");
+const { 
+  signupSchema, 
+  loginSchema, 
+  checkUserSchema, 
+  refreshTokenSchema, 
+  googleAuthSchema 
+} = require("../../utils/validationSchemas");
 
 const {
   handleCheckUser,
@@ -11,21 +19,21 @@ const {
 } = require("../../controllers/user/auth.controller");
 
 // 🔍 Check if user exists (by email)
-router.post("/check", handleCheckUser);
+router.post("/check", validateRequest(checkUserSchema), handleCheckUser);
 
 // 📝 Signup
-router.post("/signup", handleSignup);
+router.post("/signup", validateRequest(signupSchema), handleSignup);
 
 // 🔑 Login
-router.post("/login", handleLogin);
-
-//google
-router.post("/login", handleLogin);
+router.post("/login", validateRequest(loginSchema), handleLogin);
 
 // 🚪 Logout
-router.post("/google", handleGoogleAuth);
+router.post("/logout", handleLogout);
 
 // 🔄 Refresh token
-router.post("/refresh", handleRefreshToken);
+router.post("/refresh", validateRequest(refreshTokenSchema), handleRefreshToken);
+
+// 🌐 Google Auth
+router.post("/google", validateRequest(googleAuthSchema), handleGoogleAuth);
 
 module.exports = router;
