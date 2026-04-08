@@ -234,6 +234,15 @@ const updateEventCenter = async (req, res) => {
       ]);
     }
 
+    // ===== Availability atomic update =====
+    if (updatePayload.availability) {
+      const avail = updatePayload.availability;
+      updatePayload.availability = {
+        ...prevCenter.availability,
+        ...avail,
+      };
+    }
+
     // ===== Location atomic update =====
     if (updatePayload.location) {
       const loc = updatePayload.location;

@@ -31,6 +31,8 @@ app.use("/api/auth", require("./routes/user/auth.route"));
 app.use("/api/user-info", require("./routes/user/info.route"));
 app.use("/api/events", require("./routes/user/event.route"));
 app.use("/api/event-centers", require("./routes/user/eventCenter.route"));
+app.use("/api/event-center-tickets", require("./routes/user/eventCenterTicket.route"));
+app.use("/api/payments", require("./routes/user/payment.route"));
 app.use("/api/products", require("./routes/user/product.route"));
 // 404 Handler - Catch-all for unmatched routes
 app.all("*", (req, res) => {

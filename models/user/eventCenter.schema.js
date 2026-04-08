@@ -16,7 +16,27 @@ const VENUE_TYPES = [
   "RELIGIOUS_VENUE",
   "MULTIPURPOSE_SPACE",
 ];
+/* ===================== SAFETY OPTIONS ===================== */
 
+const SAFETY_OPTIONS = [
+  "FIRE_EXTINGUISHER",
+  "EMERGENCY_EXIT",
+  "CCTV",
+  "FIRST_AID_KIT",
+  "SMOKE_DETECTOR",
+  "AED",
+  "SECURITY_STATION",
+  "EMERGENCY_LIGHTING",
+];
+const SAFETY_CONSIDERATIONS = [
+  "FIRE_SAFETY_COMPLIANCE",
+  "EMERGENCY_PLAN",
+  "CROWD_MANAGEMENT",
+  "MEDICAL_SUPPORT",
+  "STRUCTURAL_INTEGRITY",
+  "ACCESSIBILITY_SAFETY",
+  "INCIDENT_REPORTING",
+];
 const AMENITIES = [
   "FOOD_STALLS",
   "BAR_DRINKS",
@@ -193,6 +213,12 @@ const eventCenterSchema = new mongoose.Schema(
       maxDuration: { type: Number, default: 365 },
       bookingWindow: { type: Number, enum: [3, 6, 9, 12, 24], default: 12 },
       unavailableDates: [{ type: Date }],
+      customPrices: [
+        {
+          date: { type: Date, required: true },
+          amount: { type: Number, required: true },
+        },
+      ],
       advanceNotice: {
         days: { type: Number, enum: [0, 1, 2, 3, 4, 5, 6, 7], default: 0 },
         sameDayCutoffTime: { type: String, default: "00:00" },
@@ -228,7 +254,7 @@ const eventCenterSchema = new mongoose.Schema(
       },
       unit: {
         type: String,
-        enum: ["hour", "day", "event"],
+        enum: ["hour", "day"],
       },
       feeMode: {
         type: String,
@@ -251,7 +277,7 @@ const eventCenterSchema = new mongoose.Schema(
       },
       unit: {
         type: String,
-        enum: ["hour", "day", "event"],
+        enum: ["hour", "day"],
       },
       feeMode: {
         type: String,
@@ -291,51 +317,29 @@ const eventCenterSchema = new mongoose.Schema(
 
     /* ===== SAFETY ===== */
 
-    safety: {
-      securityStaff: {
-        type: Boolean,
-        default: false,
-      },
-      cctv: {
-        type: Boolean,
-        default: false,
-      },
-      bagCheck: {
-        type: Boolean,
-        default: false,
-      },
-      smokeAlarm: {
-        type: Boolean,
-        default: false,
-      },
-      carbonMonoxideAlarm: {
-        type: Boolean,
-        default: false,
-      },
-      fireExtinguisher: {
-        type: Boolean,
-        default: false,
-      },
-      firstAidKit: {
-        type: Boolean,
-        default: false,
-      },
-      safetyConsiderations: {
+    safety: [
+      {
         type: String,
-        trim: true,
+        enum: SAFETY_OPTIONS,
       },
-    },
-
+    ],
+    safetyConsiderations: [
+      {
+        type: String,
+        enum: SAFETY_CONSIDERATIONS,
+      },
+    ],
     /* ===== ARRIVAL GUIDE ===== */
 
-    checkInTime: {
-      type: String,
-      default: "09:00",
+    checkIn: {
+      isFlexible: { type: Boolean },
+      start: { type: String },
+      end: { type: String },
     },
-    checkOutTime: {
-      type: String,
-      default: "18:00",
+    checkOut: {
+      time: { type: String },
     },
+
     loadingDockDetails: {
       type: String,
       trim: true,

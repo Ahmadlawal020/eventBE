@@ -35,6 +35,25 @@ const eventLabels = {
   HOLIDAYS_SEASONAL: "Holidays & Seasonal",
 };
 
+const SAFETY_OPTIONS = [
+  "FIRE_EXTINGUISHER",
+  "EMERGENCY_EXIT",
+  "CCTV",
+  "FIRST_AID_KIT",
+  "SMOKE_DETECTOR",
+  "AED",
+  "SECURITY_STATION",
+  "EMERGENCY_LIGHTING",
+];
+const SAFETY_CONSIDERATIONS = [
+  "FIRE_SAFETY_COMPLIANCE",
+  "EMERGENCY_PLAN",
+  "CROWD_MANAGEMENT",
+  "MEDICAL_SUPPORT",
+  "STRUCTURAL_INTEGRITY",
+  "ACCESSIBILITY_SAFETY",
+  "INCIDENT_REPORTING",
+];
 /* ===================== EVENT SCHEMA ===================== */
 
 const eventSchema = new mongoose.Schema(
@@ -244,23 +263,35 @@ const eventSchema = new mongoose.Schema(
     },
     /* ===== SAFETY & SECURITY ===== */
 
-    safety: {
-      securityStaff: {
-        type: Boolean,
-        default: false,
-      },
+    // safety: {
+    //   securityStaff: {
+    //     type: Boolean,
+    //     default: false,
+    //   },
 
-      cctv: {
-        type: Boolean,
-        default: false,
-      },
+    //   cctv: {
+    //     type: Boolean,
+    //     default: false,
+    //   },
 
-      bagCheck: {
-        type: Boolean,
-        default: false,
-      },
-    },
+    //   bagCheck: {
+    //     type: Boolean,
+    //     default: false,
+    //   },
+    // },
 
+    safety: [
+      {
+        type: String,
+        enum: SAFETY_OPTIONS,
+      },
+    ],
+    safetyConsiderations: [
+      {
+        type: String,
+        enum: SAFETY_CONSIDERATIONS,
+      },
+    ],
     /* ===== TICKETS & ENTRY ===== */
 
     entry: {
@@ -327,7 +358,7 @@ const eventSchema = new mongoose.Schema(
       ref: "User",
     },
   },
-  { timestamps: true }
+  { timestamps: true },
 );
 
 /* ===================== HUMAN-READABLE LABEL ===================== */

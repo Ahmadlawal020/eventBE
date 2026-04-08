@@ -139,7 +139,8 @@ const updateEvent = async (req, res) => {
       });
     }
 
-    const updatePayload = { ...req.body };
+    // const updatePayload = { ...req.body };
+    const updatePayload = req.body;
 
     /* ================================
        IMAGE POSITION MANAGEMENT
@@ -149,9 +150,11 @@ const updateEvent = async (req, res) => {
       const incomingImages = updatePayload.images;
 
       // Filter out existing images that are being "replaced" or "re-sent"
-      const incomingPublicIds = new Set(incomingImages.map((img) => img.publicId));
+      const incomingPublicIds = new Set(
+        incomingImages.map((img) => img.publicId),
+      );
       const filteredExisting = existingImages.filter(
-        (img) => !incomingPublicIds.has(img.publicId)
+        (img) => !incomingPublicIds.has(img.publicId),
       );
 
       // Determine next available position
@@ -203,6 +206,11 @@ const updateEvent = async (req, res) => {
       };
     }
 
+    // // remove performers if undefined
+    // if (req.body.performers === undefined) {
+    //   delete req.body.performers;
+    // }
+
     const updatedEvent = await Event.findByIdAndUpdate(id, updatePayload, {
       new: true,
       runValidators: true,
@@ -249,7 +257,7 @@ const deleteEventImage = async (req, res) => {
       await cloudinary.uploader.destroy(publicId);
     } catch (cloudinaryErr) {
       console.error("[CLOUDINARY DELETE ERROR]", cloudinaryErr);
-      // Optional: continue even if Cloudinary fails, or abort? 
+      // Optional: continue even if Cloudinary fails, or abort?
       // Usually, we want to at least log it.
     }
 
@@ -357,21 +365,25 @@ const deleteEvent = async (req, res) => {
     // 1️⃣ Delete images from Cloudinary (if credentials are available)
     if (event.images && event.images.length > 0) {
       // Check if Cloudinary is properly configured
-      const hasCloudinaryConfig = 
-        process.env.CLOUDINARY_API_KEY && 
-        process.env.CLOUDINARY_API_SECRET;
+      const hasCloudinaryConfig =
+        process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET;
 
       if (hasCloudinaryConfig) {
         const deletePromises = event.images.map((img) =>
           cloudinary.uploader.destroy(img.publicId).catch((err) => {
-            console.error(`[CLOUDINARY DELETE ERROR] for ${img.publicId}:`, err);
-          })
+            console.error(
+              `[CLOUDINARY DELETE ERROR] for ${img.publicId}:`,
+              err,
+            );
+          }),
         );
         await Promise.all(deletePromises);
-        console.log(`[DELETE EVENT] Deleted ${event.images.length} images from Cloudinary`);
+        console.log(
+          `[DELETE EVENT] Deleted ${event.images.length} images from Cloudinary`,
+        );
       } else {
         console.warn(
-          "[DELETE EVENT] Cloudinary credentials not configured. Skipping image deletion from Cloudinary."
+          "[DELETE EVENT] Cloudinary credentials not configured. Skipping image deletion from Cloudinary.",
         );
       }
     }
