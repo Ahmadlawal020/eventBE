@@ -8,11 +8,17 @@ const asyncHandler = require("express-async-handler");
 const getUserById = asyncHandler(async (req, res) => {
   const { id } = req.params;
 
-  const user = await User.findById(id).select("-password -refreshToken").lean();
+  const user = await User.findById(id).lean();
 
   if (!user) {
     return res.status(404).json({ message: "User not found." });
   }
+
+  // Add hasPassword flag and remove sensitive fields
+  user.id = user._id; // Ensure ID consistency if needed, though most things use _id
+  user.hasPassword = !!user.password;
+  delete user.password;
+  delete user.refreshToken;
 
   res.json(user);
 });
@@ -22,16 +28,19 @@ const updateUser = asyncHandler(async (req, res) => {
   const {
     firstName,
     surname,
+    preferredFirstName,
     phoneNumber,
     email,
     dob,
     password,
     roles,
     residentialAddress,
-    postalAddress,
     emergencyContact,
     preferredLanguage,
     isActive,
+    isIdentityVerified,
+    isPhoneVerified,
+    phoneVerifiedAt,
   } = req.body;
 
   const user = await User.findById(id).exec();
@@ -48,6 +57,7 @@ const updateUser = asyncHandler(async (req, res) => {
 
   user.firstName = firstName ?? user.firstName;
   user.surname = surname ?? user.surname;
+  user.preferredFirstName = preferredFirstName ?? user.preferredFirstName;
   user.phoneNumber = phoneNumber ?? user.phoneNumber;
   user.dob = dob ?? user.dob;
 
@@ -57,11 +67,19 @@ const updateUser = asyncHandler(async (req, res) => {
     user.roles = Array.from(merged);
   }
 
-  user.residentialAddress = residentialAddress ?? user.residentialAddress;
-  user.postalAddress = postalAddress ?? user.postalAddress;
-  user.emergencyContact = emergencyContact ?? user.emergencyContact;
+  // Robustly update nested objects
+  if (residentialAddress) {
+    user.residentialAddress = { ...user.residentialAddress.toObject(), ...residentialAddress };
+  }
+  if (emergencyContact) {
+    user.emergencyContact = { ...user.emergencyContact.toObject(), ...emergencyContact };
+  }
+
   user.preferredLanguage = preferredLanguage ?? user.preferredLanguage;
   user.isActive = typeof isActive === "boolean" ? isActive : user.isActive;
+  user.isIdentityVerified = typeof isIdentityVerified === "boolean" ? isIdentityVerified : user.isIdentityVerified;
+  user.isPhoneVerified = typeof isPhoneVerified === "boolean" ? isPhoneVerified : user.isPhoneVerified;
+  user.phoneVerifiedAt = phoneVerifiedAt ?? user.phoneVerifiedAt;
 
   if (password) {
     user.password = await bcrypt.hash(password, 10);
@@ -76,13 +94,18 @@ const updateUser = asyncHandler(async (req, res) => {
       email: updatedUser.email,
       firstName: updatedUser.firstName,
       surname: updatedUser.surname,
+      preferredFirstName: updatedUser.preferredFirstName,
+      phoneNumber: updatedUser.phoneNumber,
       roles: updatedUser.roles,
       dob: updatedUser.dob,
       residentialAddress: updatedUser.residentialAddress,
-      postalAddress: updatedUser.postalAddress,
       emergencyContact: updatedUser.emergencyContact,
       preferredLanguage: updatedUser.preferredLanguage,
       isActive: updatedUser.isActive,
+      isIdentityVerified: updatedUser.isIdentityVerified,
+      isPhoneVerified: updatedUser.isPhoneVerified,
+      phoneVerifiedAt: updatedUser.phoneVerifiedAt,
+      hasPassword: !!updatedUser.password,
     },
   });
 });

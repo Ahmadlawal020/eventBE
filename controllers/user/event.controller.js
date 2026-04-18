@@ -1,5 +1,5 @@
 const Event = require("../../models/user/event.schema");
-const Ticket = require("../../models/user/product.schema");
+const Ticket = require("../../models/user/eventTicket.schema");
 const mongoose = require("mongoose");
 const cloudinary = require("../../utils/cloudinary");
 

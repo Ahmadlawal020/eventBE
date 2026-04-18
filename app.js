@@ -33,7 +33,11 @@ app.use("/api/events", require("./routes/user/event.route"));
 app.use("/api/event-centers", require("./routes/user/eventCenter.route"));
 app.use("/api/event-center-tickets", require("./routes/user/eventCenterTicket.route"));
 app.use("/api/payments", require("./routes/user/payment.route"));
-app.use("/api/products", require("./routes/user/product.route"));
+app.use("/api/listings", require("./routes/user/listings.route"));
+app.use("/api/event-tickets", require("./routes/user/eventTicket.route"));
+app.use("/api/user-event-tickets", require("./routes/user/userEventTicket.route"));
+app.use("/api/event-bookings", require("./routes/user/eventBooking.route"));
+app.use("/api/tickets", require("./routes/user/ticket.route"));
 // 404 Handler - Catch-all for unmatched routes
 app.all("*", (req, res) => {
   res.status(404); // Set status to 404

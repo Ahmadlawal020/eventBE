@@ -1,0 +1,49 @@
+const EventCenterTicket = require("../../models/user/eventCenterTicket.schema");
+const UserEventTicket = require("../../models/user/userEventTicket.schema");
+
+/**
+ * GET ALL TICKETS (Aggregated)
+ * Fetches both event center bookings and individual event tickets
+ */
+const getAllMyTickets = async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    // 1. Fetch Event Center Tickets (Bookings of venues)
+    const eventCenterTickets = await EventCenterTicket.find({ buyer: userId })
+      .populate("eventCenter", "venueName images location")
+      .sort({ createdAt: -1 });
+
+    const formattedEventCenterTickets = eventCenterTickets.map(ticket => ({
+      ...ticket.toObject(),
+      ticketCategory: 'EVENT_CENTER', // Indicator
+    }));
+
+    // 2. Fetch User Event Tickets (Individual tickets for events)
+    const userEventTickets = await UserEventTicket.find({ owner: userId })
+      .populate("eventId", "title coverImage startDateTime endDateTime venue location")
+      .populate("ticketTypeId", "name price")
+      .sort({ createdAt: -1 });
+
+    const formattedUserEventTickets = userEventTickets.map(ticket => ({
+      ...ticket.toObject(),
+      ticketCategory: 'USER_EVENT', // Indicator
+    }));
+
+    // 3. Combine and sort
+    const allTickets = [...formattedEventCenterTickets, ...formattedUserEventTickets]
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+    res.status(200).json({
+      success: true,
+      data: allTickets,
+    });
+  } catch (error) {
+    console.error("[GET ALL TICKETS ERROR]", error);
+    res.status(500).json({ success: false, message: "Server error aggregating tickets" });
+  }
+};
+
+module.exports = {
+  getAllMyTickets,
+};

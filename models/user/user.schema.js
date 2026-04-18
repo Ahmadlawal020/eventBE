@@ -1,5 +1,21 @@
 const mongoose = require("mongoose");
 
+const addressSchema = new mongoose.Schema({
+  country: { type: String, default: "Nigeria" },
+  street: { type: String, trim: true },
+  unit: { type: String, trim: true },
+  city: { type: String, trim: true },
+  county: { type: String, trim: true },
+  postalCode: { type: String, trim: true },
+}, { _id: false });
+
+const emergencyContactSchema = new mongoose.Schema({
+  name: { type: String, trim: true },
+  relationship: { type: String, trim: true },
+  email: { type: String, trim: true, lowercase: true },
+  phoneNumber: { type: String, trim: true },
+}, { _id: false });
+
 const userSchema = new mongoose.Schema(
   {
     firstName: {
@@ -10,6 +26,10 @@ const userSchema = new mongoose.Schema(
     surname: {
       type: String,
       required: true,
+      trim: true,
+    },
+    preferredFirstName: {
+      type: String,
       trim: true,
     },
     phoneNumber: {
@@ -68,6 +88,26 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    isPhoneVerified: {
+      type: Boolean,
+      default: false,
+    },
+    phoneVerifiedAt: {
+      type: Date,
+      default: null,
+    },
+    isIdentityVerified: {
+      type: Boolean,
+      default: false,
+    },
+    residentialAddress: {
+      type: addressSchema,
+      default: () => ({}),
+    },
+    emergencyContact: {
+      type: emergencyContactSchema,
+      default: () => ({}),
+    },
     lastLoginAt: {
       type: Date,
       default: Date.now,
@@ -80,21 +120,10 @@ const userSchema = new mongoose.Schema(
 
 // Indexes for better query performance
 userSchema.index({ authProvider: 1 });
-// Removed googleId index to prevent duplicate warning
 
 // Virtual for full name
 userSchema.virtual("fullName").get(function () {
   return `${this.firstName} ${this.surname}`.trim();
 });
-
-// Method to check if user is Google authenticated
-userSchema.methods.isGoogleUser = function () {
-  return this.authProvider === "google";
-};
-
-// Method to check if user is local (email/password) authenticated
-userSchema.methods.isLocalUser = function () {
-  return this.authProvider === "local";
-};
 
 module.exports = mongoose.model("User", userSchema);

@@ -263,22 +263,7 @@ const eventSchema = new mongoose.Schema(
     },
     /* ===== SAFETY & SECURITY ===== */
 
-    // safety: {
-    //   securityStaff: {
-    //     type: Boolean,
-    //     default: false,
-    //   },
 
-    //   cctv: {
-    //     type: Boolean,
-    //     default: false,
-    //   },
-
-    //   bagCheck: {
-    //     type: Boolean,
-    //     default: false,
-    //   },
-    // },
 
     safety: [
       {

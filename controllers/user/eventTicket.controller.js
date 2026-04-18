@@ -1,4 +1,4 @@
-const Ticket = require("../../models/user/product.schema");
+const Ticket = require("../../models/user/eventTicket.schema");
 const Event = require("../../models/user/event.schema");
 
 /* ================================
@@ -214,10 +214,69 @@ const deleteTicket = async (req, res) => {
   }
 };
 
+/* ================================
+   PURCHASE TICKET (INCREMENT SOLD)
+================================ */
+const purchaseTicket = async (req, res) => {
+  const { id } = req.params;
+  const { quantity } = req.body;
+
+  try {
+    const ticket = await Ticket.findById(id);
+    if (!ticket) {
+      return res.status(404).json({
+        success: false,
+        message: "Ticket not found",
+      });
+    }
+
+    // 🔒 Sold Out Check
+    const available = ticket.totalQuantity - ticket.soldQuantity;
+    if (available <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "This ticket is sold out",
+      });
+    }
+
+    // 🔒 Per Transaction Limit Check
+    if (quantity > ticket.perTransactionLimit.max) {
+      return res.status(400).json({
+        success: false,
+        message: `You can only purchase up to ${ticket.perTransactionLimit.max} tickets at once`,
+      });
+    }
+
+    // 🔒 Inventory Check
+    if (quantity > available) {
+      return res.status(400).json({
+        success: false,
+        message: `Only ${available} tickets left`,
+      });
+    }
+
+    ticket.soldQuantity += quantity;
+    await ticket.save();
+
+    res.json({
+      success: true,
+      message: "Ticket purchased successfully",
+      data: ticket,
+    });
+  } catch (err) {
+    console.error("[PURCHASE TICKET]", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
+  }
+};
+
 module.exports = {
   createTicket,
   getTickets,
   getTicketById,
   updateTicket,
   deleteTicket,
+  purchaseTicket,
 };

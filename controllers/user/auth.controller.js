@@ -31,8 +31,10 @@ const generateTokens = (user) => {
 
 // 🔍 Check if user exists (before signup)
 const handleCheckUser = asyncHandler(async (req, res) => {
-  const { email } = req.body;
-  // Input validation handled by middleware
+  let { email } = req.body;
+  if (!email) return res.status(400).json({ success: false, message: "Email required" });
+
+  email = email.trim().toLowerCase();
 
   const foundUser = await User.findOne({ email }).exec();
   return res.json({
@@ -44,7 +46,7 @@ const handleCheckUser = asyncHandler(async (req, res) => {
 
 // authController.js - Update handleSignup
 const handleSignup = asyncHandler(async (req, res) => {
-  const {
+  let {
     firstName,
     surname,
     email,
@@ -54,7 +56,7 @@ const handleSignup = asyncHandler(async (req, res) => {
     authProvider = "local",
   } = req.body;
 
-  // Input validation handled by middleware
+  email = email.trim().toLowerCase();
 
   const existingUser = await User.findOne({ email }).exec();
   if (existingUser) {
@@ -69,15 +71,22 @@ const handleSignup = asyncHandler(async (req, res) => {
     hashedPassword = await bcrypt.hash(password, 10);
   }
 
-  const newUser = new User({
+  const userData = {
     firstName,
     surname,
     email,
     dob,
     password: hashedPassword,
-    googleId: googleId || null,
     authProvider,
-  });
+    isEmailVerified: true,
+    emailVerifiedAt: new Date(),
+  };
+
+  if (googleId) {
+    userData.googleId = googleId;
+  }
+
+  const newUser = new User(userData);
 
   const { accessToken, refreshToken } = generateTokens(newUser);
   newUser.refreshToken = refreshToken;
@@ -87,25 +96,28 @@ const handleSignup = asyncHandler(async (req, res) => {
     success: true,
     message: "Signup successful",
     data: {
-      user: {
-        id: newUser._id,
-        email: newUser.email,
-        firstName: newUser.firstName,
-        surname: newUser.surname,
-        roles: newUser.roles,
-        authProvider: newUser.authProvider,
+        user: {
+          id: newUser._id,
+          email: newUser.email,
+          firstName: newUser.firstName,
+          surname: newUser.surname,
+          roles: newUser.roles,
+          authProvider: newUser.authProvider,
+          hasPassword: !!newUser.password,
+        },
+        accessToken,
+        refreshToken,
+        signupCompleted: true,
       },
-      accessToken,
-      refreshToken,
-      signupCompleted: true,
-    },
+    });
   });
-});
 
 // 🔑 Login
 const handleLogin = asyncHandler(async (req, res) => {
-  const { email, password } = req.body;
-  // Input validation handled by middleware
+  let { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ success: false, message: "Email and password required" });
+
+  email = email.trim().toLowerCase();
 
   const foundUser = await User.findOne({ email }).exec();
   if (!foundUser) {
@@ -143,6 +155,7 @@ const handleLogin = asyncHandler(async (req, res) => {
         roles: foundUser.roles,
         authProvider: foundUser.authProvider,
         profilePicture: foundUser.profilePicture,
+        hasPassword: !!foundUser.password,
       },
       accessToken,
       refreshToken,
@@ -203,6 +216,7 @@ const handleRefreshToken = asyncHandler(async (req, res) => {
             roles: foundUser.roles,
             authProvider: foundUser.authProvider,
             profilePicture: foundUser.profilePicture,
+            hasPassword: !!foundUser.password,
           },
           accessToken,
           refreshToken: newRefresh,
@@ -297,6 +311,7 @@ const handleGoogleAuth = asyncHandler(async (req, res) => {
           roles: user.roles,
           authProvider: user.authProvider,
           profilePicture: user.profilePicture,
+          hasPassword: !!user.password,
         },
         accessToken,
         refreshToken,
@@ -324,6 +339,92 @@ const handleGoogleAuth = asyncHandler(async (req, res) => {
   }
 });
 
+const otpService = require("../../services/otp.service");
+
+// 📧 Request OTP
+const handleRequestOTP = asyncHandler(async (req, res) => {
+  const { identifier, type } = req.body;
+  
+  await otpService.requestOTP(identifier, type);
+
+  res.json({
+    success: true,
+    message: `OTP sent to ${identifier}`,
+  });
+});
+
+// ✅ Verify OTP
+const handleVerifyOTP = asyncHandler(async (req, res) => {
+  const { identifier, code, type } = req.body;
+
+  const result = await otpService.verifyOTP(identifier, code, type);
+
+  if (!result.success) {
+    return res.status(400).json({
+      success: false,
+      message: result.message,
+    });
+  }
+
+  // If email verification, update the user record
+  if (type === "email") {
+    await User.findOneAndUpdate(
+      { email: identifier },
+      { 
+        isEmailVerified: true, 
+        emailVerifiedAt: new Date() 
+      }
+    );
+  }
+
+  res.json({
+    success: true,
+    message: "Verification successful",
+  });
+});
+
+// 🏠 Password Management
+const handleRequestPasswordOTP = asyncHandler(async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ success: false, message: "Email required" });
+
+  await otpService.requestOTP(email, "password_change");
+
+  res.json({
+    success: true,
+    message: `Verification code sent to ${email}`,
+  });
+});
+
+const handleUpdatePassword = asyncHandler(async (req, res) => {
+  const { email, code, newPassword } = req.body;
+  if (!email || !code || !newPassword) {
+    return res.status(400).json({ success: false, message: "All fields required" });
+  }
+
+  const result = await otpService.verifyOTP(email, code, "password_change");
+  if (!result.success) {
+    return res.status(400).json({ success: false, message: result.message });
+  }
+
+  const hashedPassword = await bcrypt.hash(newPassword, 10);
+  
+  const user = await User.findOneAndUpdate(
+    { email },
+    { password: hashedPassword },
+    { new: true }
+  ).exec();
+
+  if (!user) {
+    return res.status(404).json({ success: false, message: "User not found" });
+  }
+
+  res.json({
+    success: true,
+    message: "Password updated successfully",
+  });
+});
+
 module.exports = {
   handleCheckUser,
   handleSignup,
@@ -331,4 +432,8 @@ module.exports = {
   handleLogout,
   handleRefreshToken,
   handleGoogleAuth,
+  handleRequestOTP,
+  handleVerifyOTP,
+  handleRequestPasswordOTP,
+  handleUpdatePassword,
 };

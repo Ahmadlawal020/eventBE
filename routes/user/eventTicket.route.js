@@ -7,12 +7,20 @@ const {
   getTicketById,
   updateTicket,
   deleteTicket,
-} = require("../../controllers/user/product.controller");
+} = require("../../controllers/user/eventTicket.controller");
+
+const {
+  createBooking,
+  verifyBooking,
+} = require("../../controllers/user/eventBooking.controller");
 
 const verifyJWT = require("../../middleware/verifyJWT");
 
-// Protect create/update/delete with auth
+// --- BUYER ROUTES ---
+router.post("/purchase", verifyJWT, createBooking);
+router.get("/verify/:reference", verifyBooking);
 
+// --- ORGANISER ROUTES ---
 // router.post("/", verifyJWT, createTicket); // protect creation
 router.post("/", createTicket); // protect creation (toggle when ready)
 

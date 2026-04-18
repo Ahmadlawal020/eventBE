@@ -28,10 +28,35 @@ const googleAuthSchema = Joi.object({
   codeVerifier: Joi.string().required()
 });
 
+const otpRequestSchema = Joi.object({
+  identifier: Joi.string().required(),
+  type: Joi.string().valid('email', 'phone', 'password_change').required()
+});
+
+const otpVerifySchema = Joi.object({
+  identifier: Joi.string().required(),
+  code: Joi.string().length(6).required(),
+  type: Joi.string().valid('email', 'phone', 'password_change').required()
+});
+
+const passwordChangeRequestSchema = Joi.object({
+  email: Joi.string().email().required()
+});
+
+const updatePasswordSchema = Joi.object({
+  email: Joi.string().email().required(),
+  code: Joi.string().length(6).required(),
+  newPassword: Joi.string().min(6).required()
+});
+
 module.exports = {
   signupSchema,
   loginSchema,
   checkUserSchema,
   refreshTokenSchema,
-  googleAuthSchema
+  googleAuthSchema,
+  otpRequestSchema,
+  otpVerifySchema,
+  passwordChangeRequestSchema,
+  updatePasswordSchema
 };
