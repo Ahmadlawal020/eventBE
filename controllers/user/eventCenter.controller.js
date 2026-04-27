@@ -1,4 +1,5 @@
 const EventCenter = require("../../models/user/eventCenter.schema");
+const User = require("../../models/user/user.schema");
 const mongoose = require("mongoose");
 const cloudinary = require("../../utils/cloudinary");
 
@@ -46,7 +47,7 @@ const createEventCenter = async (req, res) => {
       safety,
       entry,
       location,
-      isDraft: !!isDraft,
+      status: "IN_PROGRESS",
       createdBy: req.user?.id || "68b6110236f2621324c21366",
       yourSpace,
       arrivalGuide,
@@ -114,7 +115,7 @@ const getEventCenterById = async (req, res) => {
 const getMyDraftEventCenters = async (req, res) => {
   try {
     const drafts = await EventCenter.find({
-      isDraft: true,
+      status: "IN_PROGRESS",
       createdBy: req.user.id,
     }).populate("createdBy", "firstName surname email");
 
@@ -142,39 +143,44 @@ const deleteEventCenter = async (req, res) => {
         .json({ success: false, message: "Event Center not found" });
     }
 
-    // 1️⃣ Delete images from Cloudinary (if credentials are available)
-    if (center.images && center.images.length > 0) {
-      // Check if Cloudinary is properly configured
-      const hasCloudinaryConfig =
-        process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET;
-
-      if (hasCloudinaryConfig) {
-        const deletePromises = center.images.map((img) =>
-          cloudinary.uploader.destroy(img.publicId).catch((err) => {
-            console.error(
-              `[CLOUDINARY DELETE ERROR] for ${img.publicId}:`,
-              err,
-            );
-          }),
-        );
-        await Promise.all(deletePromises);
-        console.log(
-          `[DELETE EVENT CENTER] Deleted ${center.images.length} images from Cloudinary`,
-        );
-      } else {
-        console.warn(
-          "[DELETE EVENT CENTER] Cloudinary credentials not configured. Skipping image deletion from Cloudinary.",
-        );
-      }
-    }
-
-    // 2️⃣ Delete the event center itself
+    // 1️⃣ Delete the event center itself
     await EventCenter.findByIdAndDelete(id);
 
+    // 2️⃣ Respond immediately so the client doesn't time out
     res.json({
       success: true,
       message: "Event Center deleted successfully",
     });
+
+    // 3️⃣ Clean up Cloudinary images in the background (fire-and-forget)
+    if (center.images && center.images.length > 0) {
+      const hasCloudinaryConfig =
+        process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET;
+
+      if (hasCloudinaryConfig) {
+        Promise.all(
+          center.images.map((img) =>
+            cloudinary.uploader.destroy(img.publicId).catch((err) => {
+              console.error(
+                `[CLOUDINARY DELETE ERROR] for ${img.publicId}:`,
+                err,
+              );
+            }),
+          ),
+        )
+          .then(() =>
+            console.log(
+              `[DELETE EVENT CENTER] Cleaned up ${center.images.length} images from Cloudinary`,
+            ),
+          )
+          .catch((err) =>
+            console.error(
+              "[DELETE EVENT CENTER] Cloudinary cleanup error:",
+              err,
+            ),
+          );
+      }
+    }
   } catch (err) {
     console.error("[DELETE EVENT CENTER]", err);
     res.status(500).json({ success: false, message: "Server error" });
@@ -265,6 +271,23 @@ const updateEventCenter = async (req, res) => {
             prevCenter.location.coordinates.longitude,
         },
       };
+    }
+
+    // Handle status transition if isDraft: false is passed (legacy/intent)
+    if (updatePayload.isDraft === false) {
+      const user = await User.findById(req.user.id);
+
+      // Check if user is fully verified
+      const isVerified = user.isIdentityVerified && user.isPhoneVerified;
+      updatePayload.status = isVerified ? "LISTED" : "ACTION_REQUIRED";
+
+      // Clean up legacy field if present in payload
+      delete updatePayload.isDraft;
+    } else if (updatePayload.status === "LISTED" || updatePayload.status === "ACTION_REQUIRED") {
+      // Explicit status update from frontend (new logic)
+      const user = await User.findById(req.user.id);
+      const isVerified = user.isIdentityVerified && user.isPhoneVerified;
+      updatePayload.status = isVerified ? "LISTED" : "ACTION_REQUIRED";
     }
 
     const updatedCenter = await EventCenter.findByIdAndUpdate(
@@ -375,9 +398,11 @@ const reorderEventCenterImages = async (req, res) => {
 // ===================== GET MY EVENT CENTERS =====================
 const getMyEventCenters = async (req, res) => {
   try {
+    await syncUserEventCenters(req.user.id);
+
     const centers = await EventCenter.find({
       createdBy: req.user.id,
-      isDraft: false,
+      status: { $in: ["LISTED", "ACTION_REQUIRED", "UNLISTED"] },
     }).populate("createdBy", "firstName surname email");
 
     res.json({
@@ -400,11 +425,14 @@ const getPersonalEventCenterListings = async (req, res) => {
         message: "Authentication required",
       });
 
+    // Make sure event centers reflect current user verification status before serving
+    await syncUserEventCenters(req.user.id);
+
     const centers = await EventCenter.find({ createdBy: req.user.id })
       .select({
         venueName: 1,
         images: 1,
-        isDraft: 1,
+        status: 1,
         venueType: 1,
         location: 1,
         createdAt: 1,
@@ -416,7 +444,7 @@ const getPersonalEventCenterListings = async (req, res) => {
       return {
         _id: obj._id,
         venueName: obj.venueName,
-        isDraft: obj.isDraft,
+        status: obj.status,
         venueType: obj.venueType,
         location: obj.location || null,
         images: obj.images || [],
@@ -435,6 +463,29 @@ const getPersonalEventCenterListings = async (req, res) => {
   }
 };
 
+// ===================== SYNC EVENT CENTERS ON VERIFICATION =====================
+const syncUserEventCenters = async (userId) => {
+  try {
+    const user = await User.findById(userId);
+    if (!user) return;
+
+    const isVerified = user.isIdentityVerified && user.isPhoneVerified;
+    if (isVerified) {
+      await EventCenter.updateMany(
+        { createdBy: userId, status: "ACTION_REQUIRED" },
+        { status: "LISTED" }
+      );
+    } else {
+      await EventCenter.updateMany(
+        { createdBy: userId, status: "LISTED" },
+        { status: "ACTION_REQUIRED" }
+      );
+    }
+  } catch (err) {
+    console.error("[SYNC USER EVENT CENTERS]", err);
+  }
+};
+
 module.exports = {
   createEventCenter,
   getEventCenters,
@@ -446,4 +497,5 @@ module.exports = {
   reorderEventCenterImages,
   getMyEventCenters,
   getPersonalEventCenterListings,
+  syncUserEventCenters,
 };

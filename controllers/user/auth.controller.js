@@ -96,21 +96,21 @@ const handleSignup = asyncHandler(async (req, res) => {
     success: true,
     message: "Signup successful",
     data: {
-        user: {
-          id: newUser._id,
-          email: newUser.email,
-          firstName: newUser.firstName,
-          surname: newUser.surname,
-          roles: newUser.roles,
-          authProvider: newUser.authProvider,
-          hasPassword: !!newUser.password,
-        },
-        accessToken,
-        refreshToken,
-        signupCompleted: true,
+      user: {
+        id: newUser._id,
+        email: newUser.email,
+        firstName: newUser.firstName,
+        surname: newUser.surname,
+        roles: newUser.roles,
+        authProvider: newUser.authProvider,
+        hasPassword: !!newUser.password,
       },
-    });
+      accessToken,
+      refreshToken,
+      signupCompleted: true,
+    },
   });
+});
 
 // 🔑 Login
 const handleLogin = asyncHandler(async (req, res) => {
@@ -128,7 +128,7 @@ const handleLogin = asyncHandler(async (req, res) => {
 
   // Handle Google users who try to login via password
   if (foundUser.authProvider === 'google' && !foundUser.password) {
-     return res
+    return res
       .status(400)
       .json({ success: false, message: "Please login with Google" });
   }
@@ -167,12 +167,12 @@ const handleLogin = asyncHandler(async (req, res) => {
 const handleLogout = asyncHandler(async (req, res) => {
   const cookies = req.cookies;
   const { refreshToken } = req.body;
-  
+
   if (!refreshToken) return res.sendStatus(204); // No content
 
   const foundUser = await User.findOne({ refreshToken }).exec();
   if (!foundUser) {
-      return res.sendStatus(204);
+    return res.sendStatus(204);
   }
 
   // Delete refreshToken in db
@@ -286,11 +286,11 @@ const handleGoogleAuth = asyncHandler(async (req, res) => {
 
   if (user) {
     // ✅ EXISTING USER: Generate tokens and log them in
-    
+
     // Update googleId if missing/changed (merging accounts if email matches)
     if (!user.googleId) {
-        user.googleId = googleId;
-        user.authProvider = 'google'; // convert to google auth or hybrid
+      user.googleId = googleId;
+      user.authProvider = 'google'; // convert to google auth or hybrid
     }
 
     const { accessToken, refreshToken } = generateTokens(user);
@@ -344,7 +344,7 @@ const otpService = require("../../services/otp.service");
 // 📧 Request OTP
 const handleRequestOTP = asyncHandler(async (req, res) => {
   const { identifier, type } = req.body;
-  
+
   await otpService.requestOTP(identifier, type);
 
   res.json({
@@ -366,15 +366,26 @@ const handleVerifyOTP = asyncHandler(async (req, res) => {
     });
   }
 
-  // If email verification, update the user record
-  if (type === "email") {
-    await User.findOneAndUpdate(
-      { email: identifier },
-      { 
-        isEmailVerified: true, 
-        emailVerifiedAt: new Date() 
-      }
+  // Update user record depending on type
+  if (type === "email" || type === "phone") {
+    const updateQuery = type === "email" ? { email: identifier } : { phoneNumber: identifier };
+    const updateField = type === "email" 
+          ? { isEmailVerified: true, emailVerifiedAt: new Date() }
+          : { isPhoneVerified: true, phoneVerifiedAt: new Date() };
+
+    const user = await User.findOneAndUpdate(
+      updateQuery,
+      updateField,
+      { new: true }
     );
+    
+    // Auto-sync event centers and events status on verification
+    if (user) {
+      const { syncUserEventCenters } = require("./eventCenter.controller");
+      const { syncUserEvents } = require("./event.controller");
+      await syncUserEventCenters(user._id);
+      await syncUserEvents(user._id);
+    }
   }
 
   res.json({
@@ -408,7 +419,7 @@ const handleUpdatePassword = asyncHandler(async (req, res) => {
   }
 
   const hashedPassword = await bcrypt.hash(newPassword, 10);
-  
+
   const user = await User.findOneAndUpdate(
     { email },
     { password: hashedPassword },

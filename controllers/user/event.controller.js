@@ -1,4 +1,5 @@
 const Event = require("../../models/user/event.schema");
+const User = require("../../models/user/user.schema");
 const Ticket = require("../../models/user/eventTicket.schema");
 const mongoose = require("mongoose");
 const cloudinary = require("../../utils/cloudinary");
@@ -27,7 +28,7 @@ const createEvent = async (req, res) => {
       ageRestriction,
       schedule,
       capacity,
-      isDraft: !!isDraft,
+      status: "IN_PROGRESS",
       createdBy: req.user?.id || "68b6110236f2621324c21366", // fallback
       ticketGuide,
       arrivalGuide,
@@ -95,7 +96,7 @@ const getEventById = async (req, res) => {
 const getMyDraftEvents = async (req, res) => {
   try {
     const drafts = await Event.find({
-      isDraft: true,
+      status: "IN_PROGRESS",
       createdBy: req.user.id,
     }).populate("createdBy", "firstName surname email");
 
@@ -206,10 +207,19 @@ const updateEvent = async (req, res) => {
       };
     }
 
-    // // remove performers if undefined
-    // if (req.body.performers === undefined) {
-    //   delete req.body.performers;
-    // }
+    // Handle status transition
+    if (updatePayload.isDraft === false) {
+      const user = await User.findById(req.user.id);
+
+      const isVerified = user.isIdentityVerified && user.isPhoneVerified;
+      updatePayload.status = isVerified ? "LISTED" : "ACTION_REQUIRED";
+
+      delete updatePayload.isDraft;
+    } else if (updatePayload.status === "LISTED" || updatePayload.status === "ACTION_REQUIRED") {
+      const user = await User.findById(req.user.id);
+      const isVerified = user.isIdentityVerified && user.isPhoneVerified;
+      updatePayload.status = isVerified ? "LISTED" : "ACTION_REQUIRED";
+    }
 
     const updatedEvent = await Event.findByIdAndUpdate(id, updatePayload, {
       new: true,
@@ -362,42 +372,44 @@ const deleteEvent = async (req, res) => {
         .json({ success: false, message: "Event not found" });
     }
 
-    // 1️⃣ Delete images from Cloudinary (if credentials are available)
-    if (event.images && event.images.length > 0) {
-      // Check if Cloudinary is properly configured
-      const hasCloudinaryConfig =
-        process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET;
-
-      if (hasCloudinaryConfig) {
-        const deletePromises = event.images.map((img) =>
-          cloudinary.uploader.destroy(img.publicId).catch((err) => {
-            console.error(
-              `[CLOUDINARY DELETE ERROR] for ${img.publicId}:`,
-              err,
-            );
-          }),
-        );
-        await Promise.all(deletePromises);
-        console.log(
-          `[DELETE EVENT] Deleted ${event.images.length} images from Cloudinary`,
-        );
-      } else {
-        console.warn(
-          "[DELETE EVENT] Cloudinary credentials not configured. Skipping image deletion from Cloudinary.",
-        );
-      }
-    }
-
-    // 2️⃣ Delete associated tickets
+    // 1️⃣ Delete associated tickets
     await Ticket.deleteMany({ eventId: id });
 
-    // 3️⃣ Delete the event itself
+    // 2️⃣ Delete the event itself
     await Event.findByIdAndDelete(id);
 
+    // 3️⃣ Respond immediately so the client doesn't time out
     res.json({
       success: true,
       message: "Event deleted successfully",
     });
+
+    // 4️⃣ Clean up Cloudinary images in the background (fire-and-forget)
+    if (event.images && event.images.length > 0) {
+      const hasCloudinaryConfig =
+        process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET;
+
+      if (hasCloudinaryConfig) {
+        Promise.all(
+          event.images.map((img) =>
+            cloudinary.uploader.destroy(img.publicId).catch((err) => {
+              console.error(
+                `[CLOUDINARY DELETE ERROR] for ${img.publicId}:`,
+                err,
+              );
+            }),
+          ),
+        )
+          .then(() =>
+            console.log(
+              `[DELETE EVENT] Cleaned up ${event.images.length} images from Cloudinary`,
+            ),
+          )
+          .catch((err) =>
+            console.error("[DELETE EVENT] Cloudinary cleanup error:", err),
+          );
+      }
+    }
   } catch (err) {
     console.error("[DELETE EVENT]", err);
     res.status(500).json({ success: false, message: "Server error" });
@@ -407,8 +419,10 @@ const deleteEvent = async (req, res) => {
 // 📋 Get All NON-DRAFT Events for the Logged-in User
 const getMyEvents = async (req, res) => {
   try {
+    await syncUserEvents(req.user.id);
+
     const events = await Event.find({
-      isDraft: false,
+      status: { $in: ["LISTED", "ACTION_REQUIRED", "UNLISTED"] },
       createdBy: req.user.id,
     }).populate("createdBy", "firstName surname email");
 
@@ -436,14 +450,15 @@ const getPersonalEventListings = async (req, res) => {
       });
     }
 
+    await syncUserEvents(req.user.id);
+
     const events = await Event.find({
       createdBy: req.user.id,
-      // isDraft: false, // ✅ published only
     })
       .select({
         title: 1,
         images: 1,
-        isDraft: 1,
+        status: 1,
         eventType: 1,
         location: 1,
         createdAt: 1,
@@ -456,7 +471,7 @@ const getPersonalEventListings = async (req, res) => {
       return {
         _id: obj._id,
         title: obj.title,
-        isDraft: obj.isDraft,
+        status: obj.status,
         eventTypeLabel: obj.eventTypeLabel,
         location: obj.location || null,
         images: obj.images || [], // ✅ FIXED
@@ -575,6 +590,29 @@ const updateEventPerformer = async (req, res) => {
   }
 };
 
+// ===================== SYNC EVENTS ON VERIFICATION =====================
+const syncUserEvents = async (userId) => {
+  try {
+    const user = await User.findById(userId);
+    if (!user) return;
+
+    const isVerified = user.isIdentityVerified && user.isPhoneVerified;
+    if (isVerified) {
+      await Event.updateMany(
+        { createdBy: userId, status: "ACTION_REQUIRED" },
+        { status: "LISTED" }
+      );
+    } else {
+      await Event.updateMany(
+        { createdBy: userId, status: "LISTED" },
+        { status: "ACTION_REQUIRED" }
+      );
+    }
+  } catch (err) {
+    console.error("[SYNC USER EVENTS]", err);
+  }
+};
+
 module.exports = {
   createEvent,
   getEvents,
@@ -588,4 +626,5 @@ module.exports = {
   reorderEventImages,
   deleteEventImage,
   deleteEventPerformer,
+  syncUserEvents,
 };

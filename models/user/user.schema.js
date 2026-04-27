@@ -98,7 +98,7 @@ const userSchema = new mongoose.Schema(
     },
     isIdentityVerified: {
       type: Boolean,
-      default: false,
+      default: true,
     },
     residentialAddress: {
       type: addressSchema,

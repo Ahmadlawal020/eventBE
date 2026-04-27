@@ -6,7 +6,7 @@ const EventCenter = require("../../models/user/eventCenter.schema");
 const getListings = async (req, res) => {
   try {
     // 1️⃣ Fetch Published Events
-    const events = await Event.find({ isDraft: false }).lean();
+    const events = await Event.find({ status: { $in: ["LISTED", "PUBLISHED"] } }).lean();
     
     // 2️⃣ Enrich Events with Lowest Ticket Price
     const enrichedEvents = await Promise.all(
@@ -53,7 +53,7 @@ const getListings = async (req, res) => {
     );
 
     // 3️⃣ Fetch Published Event Centers
-    const eventCenters = await EventCenter.find({ isDraft: false }).lean();
+    const eventCenters = await EventCenter.find({ status: "LISTED" }).lean();
 
     // 4️⃣ Enrich Event Centers with Lowest Price
     const enrichedEventCenters = eventCenters.map((center) => {

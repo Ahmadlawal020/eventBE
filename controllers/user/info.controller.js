@@ -87,6 +87,12 @@ const updateUser = asyncHandler(async (req, res) => {
 
   const updatedUser = await user.save();
 
+  // Sync event centers status if verification status changed
+  const { syncUserEventCenters } = require("./eventCenter.controller");
+  const { syncUserEvents } = require("./event.controller");
+  await syncUserEventCenters(updatedUser._id);
+  await syncUserEvents(updatedUser._id);
+
   res.json({
     message: `User ${updatedUser.firstName} ${updatedUser.surname} updated successfully.`,
     user: {

@@ -44,6 +44,48 @@ const getAllMyTickets = async (req, res) => {
   }
 };
 
+const getTicketDetails = async (req, res) => {
+  const ticketId = req.params.id;
+  const userId = req.user.id;
+
+  try {
+    // Check if it's an Event Center Ticket
+    const eventCenterTicket = await EventCenterTicket.findOne({ _id: ticketId, buyer: userId })
+      .populate("eventCenter");
+      
+    if (eventCenterTicket) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          ...eventCenterTicket.toObject(),
+          ticketCategory: 'EVENT_CENTER',
+        }
+      });
+    }
+
+    // Check if it's a User Event Ticket
+    const userEventTicket = await UserEventTicket.findOne({ _id: ticketId, owner: userId })
+      .populate("eventId")
+      .populate("ticketTypeId");
+
+    if (userEventTicket) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          ...userEventTicket.toObject(),
+          ticketCategory: 'USER_EVENT',
+        }
+      });
+    }
+
+    return res.status(404).json({ success: false, message: "Ticket not found" });
+  } catch (error) {
+    console.error("[GET TICKET DETAILS ERROR]", error);
+    res.status(500).json({ success: false, message: "Server error fetching ticket details" });
+  }
+};
+
 module.exports = {
   getAllMyTickets,
+  getTicketDetails,
 };

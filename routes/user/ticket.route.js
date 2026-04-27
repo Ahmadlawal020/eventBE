@@ -7,5 +7,6 @@ const verifyJWT = require("../../middleware/verifyJWT");
 router.use(verifyJWT);
 
 router.get("/my-tickets", ticketController.getAllMyTickets);
+router.get("/my-tickets/:id", ticketController.getTicketDetails);
 
 module.exports = router;

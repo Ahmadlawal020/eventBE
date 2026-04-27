@@ -333,9 +333,10 @@ const eventSchema = new mongoose.Schema(
       },
     },
 
-    isDraft: {
-      type: Boolean,
-      default: false,
+    status: {
+      type: String,
+      enum: ["IN_PROGRESS", "ACTION_REQUIRED", "LISTED", "UNLISTED"],
+      default: "IN_PROGRESS",
     },
 
     createdBy: {

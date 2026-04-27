@@ -212,7 +212,29 @@ const eventCenterSchema = new mongoose.Schema(
       minDuration: { type: Number, default: 1 },
       maxDuration: { type: Number, default: 365 },
       bookingWindow: { type: Number, enum: [3, 6, 9, 12, 24], default: 12 },
-      unavailableDates: [{ type: Date }],
+      unavailableDates: [
+        {
+          date: { type: Date, required: true },
+          type: { type: String, enum: ["BLOCKED", "MANUAL"], default: "BLOCKED" },
+          clientName: String,
+          clientPhone: String,
+          clientEmail: String,
+          totalPrice: Number,
+          depositAmount: Number,
+          paymentStatus: {
+            type: String,
+            enum: ["pending", "partially_paid", "paid"],
+            default: "pending",
+          },
+        },
+      ],
+      unavailableSlots: [
+        {
+          date: { type: Date, required: true },
+          startTime: { type: String, required: true },
+          endTime: { type: String, required: true },
+        },
+      ],
       customPrices: [
         {
           date: { type: Date, required: true },
@@ -224,6 +246,10 @@ const eventCenterSchema = new mongoose.Schema(
         sameDayCutoffTime: { type: String, default: "00:00" },
       },
       preparationTime: { type: Number, enum: [0, 1, 2], default: 0 },
+      operationalHours: {
+        open: { type: String, default: "06:00" },
+        close: { type: String, default: "00:00" },
+      },
     },
 
     /* ===== CAPACITY ===== */
@@ -351,9 +377,10 @@ const eventCenterSchema = new mongoose.Schema(
 
     /* ===== META ===== */
 
-    isDraft: {
-      type: Boolean,
-      default: false,
+    status: {
+      type: String,
+      enum: ["IN_PROGRESS", "ACTION_REQUIRED", "LISTED", "UNLISTED"],
+      default: "IN_PROGRESS",
     },
 
     createdBy: {

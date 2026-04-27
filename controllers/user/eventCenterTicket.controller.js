@@ -168,23 +168,34 @@ const verifyPayment = async (req, res) => {
     // 4. Update Event Center availability to prevent double-booking
     const eventCenter = await EventCenter.findById(ticket.eventCenter);
     if (eventCenter) {
+      if (!eventCenter.availability) {
+        eventCenter.availability = {
+          unavailableDates: [],
+          unavailableSlots: []
+        };
+      }
+
       if (ticket.bookingUnit === "day") {
         // Mark whole days as unavailable
         const datesToMark = (ticket.selectedDates || []).map((d) =>
           new Date(d.date).toISOString().split("T")[0]
         );
 
+        // Extract existing date strings from the objects
         const currentUnavailableStrings = (
-          eventCenter.availability?.unavailableDates || []
-        ).map((d) => new Date(d).toISOString().split("T")[0]);
+          eventCenter.availability.unavailableDates || []
+        ).map((d) => new Date(d.date).toISOString().split("T")[0]);
 
-        const updatedUnavailableStrings = [
-          ...new Set([...currentUnavailableStrings, ...datesToMark]),
-        ];
+        // Filter out dates that are already marked
+        const newDateStrings = datesToMark.filter(d => !currentUnavailableStrings.includes(d));
 
-        eventCenter.availability.unavailableDates = updatedUnavailableStrings.map(
-          (d) => new Date(d)
-        );
+        // Add new dates as objects matching the schema
+        newDateStrings.forEach(dateStr => {
+          eventCenter.availability.unavailableDates.push({
+            date: new Date(dateStr),
+            type: "BLOCKED"
+          });
+        });
       } else if (ticket.bookingUnit === "hour") {
         // Mark specific time slots as unavailable
         const newSlots = (ticket.selectedDates || []).map((slot) => ({
