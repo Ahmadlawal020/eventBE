@@ -3,16 +3,72 @@ const Ticket = require("../../models/user/eventTicket.schema");
 const Event = require("../../models/user/event.schema");
 const crypto = require("crypto");
 
+// ============================================================================
+// QR PAYLOAD SIGNING — Tamper-proof ticket verification
+// ============================================================================
+const QR_SECRET = process.env.QR_SIGNING_SECRET || "mnb-default-secret-change-in-production";
+
 /**
- * Helper to generate a unique ticket number
+ * Generate a cryptographically unique ticket number.
+ * Format: MNB-XXXXXXXX-XXXX (16 hex chars = 8 bytes = 2^64 combinations)
+ * 
+ * At 1 million tickets/day, collision probability stays near zero
+ * for centuries (birthday paradox threshold ~4 billion for 64-bit).
+ * The DB unique index is a safety net regardless.
  */
 const generateTicketNumber = () => {
-  return "MNB-" + crypto.randomBytes(4).toString("hex").toUpperCase();
+  const hex = crypto.randomBytes(8).toString("hex").toUpperCase();
+  return `MNB-${hex.slice(0, 8)}-${hex.slice(8)}`;
 };
 
 /**
- * GET MY TICKETS
+ * Generate a HMAC-signed QR payload for tamper-proof verification.
+ * The QR code encodes this JSON string; scanners verify the signature
+ * before hitting the network, enabling offline-first validation.
  */
+const generateQRPayload = (ticketNumber, eventId) => {
+  const payload = {
+    tn: ticketNumber,      // ticket number
+    eid: eventId.toString(), // event ID
+    ts: Date.now(),        // timestamp of generation
+    v: 1,                  // payload version for future compat
+    type: "EVENT",         // distinguish from event center tickets
+  };
+
+  const dataString = JSON.stringify(payload);
+  const signature = crypto
+    .createHmac("sha256", QR_SECRET)
+    .update(dataString)
+    .digest("hex")
+    .slice(0, 12); // 12-char signature (48-bit) — sufficient for mobile QR
+
+  return JSON.stringify({ ...payload, sig: signature });
+};
+
+/**
+ * Verify the HMAC signature of a scanned QR payload.
+ * Returns { valid, data } — can be used offline on the scanner device.
+ */
+const verifyQRPayload = (qrString) => {
+  try {
+    const parsed = JSON.parse(qrString);
+    const { sig, ...data } = parsed;
+
+    const expectedSig = crypto
+      .createHmac("sha256", QR_SECRET)
+      .update(JSON.stringify(data))
+      .digest("hex")
+      .slice(0, 12);
+
+    return { valid: sig === expectedSig, data: parsed };
+  } catch {
+    return { valid: false, data: null };
+  }
+};
+
+// ============================================================================
+// GET MY TICKETS
+// ============================================================================
 const getMyTickets = async (req, res) => {
   const userId = req.user.id;
 
@@ -20,7 +76,8 @@ const getMyTickets = async (req, res) => {
     const tickets = await UserEventTicket.find({ owner: userId })
       .populate("eventId", "title coverImage startDateTime endDateTime venue")
       .populate("ticketTypeId", "name price")
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean(); // .lean() for read-only performance
 
     res.status(200).json({
       success: true,
@@ -32,9 +89,9 @@ const getMyTickets = async (req, res) => {
   }
 };
 
-/**
- * GET TICKET DETAILS
- */
+// ============================================================================
+// GET TICKET DETAILS
+// ============================================================================
 const getTicketDetails = async (req, res) => {
   const { id } = req.params;
   const userId = req.user.id;
@@ -59,16 +116,19 @@ const getTicketDetails = async (req, res) => {
   }
 };
 
-/**
- * TRIGGER: CREATE TICKETS FOR BOOKING
- * This is called from the booking controller after successful payment
- */
+// ============================================================================
+// CREATE TICKETS FOR BOOKING
+// Called internally after successful payment verification.
+// Designed for high throughput — batches DB writes, minimizes round trips.
+// ============================================================================
 const createTicketsForBooking = async (booking) => {
   try {
     const userEventTickets = [];
 
-    // 1. Fetch Event for Snapshot
-    const event = await Event.findById(booking.eventId).populate("createdBy", "firstName surname email phoneNumber");
+    // 1. Fetch Event for Snapshot (single DB call)
+    const event = await Event.findById(booking.eventId)
+      .populate("createdBy", "firstName surname email phoneNumber")
+      .lean();
     if (!event) throw new Error("Event not found for snapshotting");
 
     const eventSnapshot = {
@@ -102,14 +162,27 @@ const createTicketsForBooking = async (booking) => {
       },
     };
 
+    // 2. Batch-fetch all ticket types in one query (avoids N+1)
+    const ticketTypeIds = booking.items.map((item) => item.ticketId);
+    const ticketTypes = await Ticket.find({ _id: { $in: ticketTypeIds } }).lean();
+    const ticketTypeMap = {};
+    ticketTypes.forEach((tt) => {
+      ticketTypeMap[tt._id.toString()] = tt;
+    });
+
+    // 3. Build all ticket documents + inventory updates
+    const inventoryUpdates = [];
+
     for (const item of booking.items) {
-      // 2. Fetch Ticket Type for Snapshot
-      const ticketType = await Ticket.findById(item.ticketId);
+      const ticketType = ticketTypeMap[item.ticketId.toString()];
       if (!ticketType) continue;
 
-      // Update Inventory
-      await Ticket.findByIdAndUpdate(item.ticketId, {
-        $inc: { soldQuantity: item.quantity }
+      // Queue inventory update (batched below)
+      inventoryUpdates.push({
+        updateOne: {
+          filter: { _id: item.ticketId },
+          update: { $inc: { soldQuantity: item.quantity } },
+        },
       });
 
       const ticketSnapshot = {
@@ -118,7 +191,7 @@ const createTicketsForBooking = async (booking) => {
         additionalInstruction: ticketType.additionalInstruction,
         ticketType: ticketType.ticketType,
         price: {
-          amount: (ticketType.price?.amountCents || 0) / 100,
+          amount: (item.pricePerUnit || 0) / 100,
           currency: ticketType.currency?.code || "NGN",
           symbol: ticketType.currency?.symbol || "₦",
         },
@@ -126,13 +199,17 @@ const createTicketsForBooking = async (booking) => {
 
       // Create N individual tickets based on quantity
       for (let i = 0; i < item.quantity; i++) {
+        const ticketNumber = generateTicketNumber();
+        const qrPayload = generateQRPayload(ticketNumber, booking.eventId);
+
         userEventTickets.push({
           bookingId: booking._id,
           eventId: booking.eventId,
           ticketTypeId: item.ticketId,
           owner: booking.buyer,
           ticketName: item.name,
-          ticketNumber: generateTicketNumber(),
+          ticketNumber,
+          qrPayload,
           status: "UNREDEEMED",
           eventSnapshot,
           ticketSnapshot,
@@ -140,15 +217,216 @@ const createTicketsForBooking = async (booking) => {
       }
     }
 
-    if (userEventTickets.length > 0) {
-      const savedTickets = await UserEventTicket.insertMany(userEventTickets);
-      return savedTickets;
-    }
+    // 4. Execute bulk operations in parallel for maximum throughput
+    const [savedTickets] = await Promise.all([
+      userEventTickets.length > 0
+        ? UserEventTicket.insertMany(userEventTickets, { ordered: false })
+        : Promise.resolve([]),
+      inventoryUpdates.length > 0
+        ? Ticket.bulkWrite(inventoryUpdates)
+        : Promise.resolve(),
+    ]);
 
-    return [];
+    return savedTickets;
   } catch (error) {
     console.error("[CREATE TICKETS FOR BOOKING ERROR]", error);
     throw error;
+  }
+};
+
+// ============================================================================
+// VALIDATE TICKET (FOR ENTRY CONTROL)
+// Uses atomic findOneAndUpdate to prevent race conditions when
+// multiple scanners hit the same ticket simultaneously.
+// Supports both QR payload (signed) and plain ticket number (manual).
+// ============================================================================
+const validateTicket = async (req, res) => {
+  const { ticketNumber, qrPayload } = req.body;
+  const staffId = req.user.id;
+
+  try {
+    let lookupTicketNumber = ticketNumber;
+
+    // If QR payload is provided, verify signature first (tamper-proofing)
+    if (qrPayload) {
+      const { valid, data } = verifyQRPayload(qrPayload);
+      if (!valid) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid or tampered QR code. This ticket may be forged.",
+        });
+      }
+      lookupTicketNumber = data.tn;
+    }
+
+    if (!lookupTicketNumber) {
+      return res.status(400).json({
+        success: false,
+        message: "Ticket number or QR payload is required.",
+      });
+    }
+
+    // Atomic update: find UNREDEEMED ticket and mark as REDEEMED in one operation.
+    // This prevents race conditions — only the first scanner wins.
+    const ticket = await UserEventTicket.findOneAndUpdate(
+      {
+        ticketNumber: lookupTicketNumber,
+        status: "UNREDEEMED",
+      },
+      {
+        $set: {
+          status: "REDEEMED",
+          redeemedAt: new Date(),
+          redeemedBy: staffId,
+          "checkIn.isCheckedIn": true,
+          "checkIn.checkedInAt": new Date(),
+          "checkIn.checkedInBy": staffId,
+          "checkIn.method": qrPayload ? "QR" : "MANUAL",
+        },
+      },
+      { new: true }
+    ).populate("owner", "firstName surname email");
+
+    if (!ticket) {
+      // Check why it failed — ticket doesn't exist, or already redeemed?
+      const existingTicket = await UserEventTicket.findOne({
+        ticketNumber: lookupTicketNumber,
+      }).select("status redeemedAt ticketName").lean();
+
+      if (!existingTicket) {
+        return res.status(404).json({
+          success: false,
+          message: "Ticket not found. Please check the code and try again.",
+        });
+      }
+
+      if (existingTicket.status === "REDEEMED") {
+        return res.status(409).json({
+          success: false,
+          message: "⚠️ DUPLICATE ENTRY — This ticket has already been used.",
+          data: {
+            redeemedAt: existingTicket.redeemedAt,
+            ticketName: existingTicket.ticketName,
+          },
+        });
+      }
+
+      if (existingTicket.status === "CANCELLED") {
+        return res.status(400).json({
+          success: false,
+          message: "This ticket has been cancelled and cannot be used for entry.",
+        });
+      }
+
+      return res.status(400).json({
+        success: false,
+        message: `Ticket status: ${existingTicket.status}`,
+      });
+    }
+
+    // Success — entry granted
+    res.status(200).json({
+      success: true,
+      message: "✅ Ticket validated — Welcome to the event!",
+      data: {
+        ticketNumber: ticket.ticketNumber,
+        ticketName: ticket.ticketName,
+        ownerName: ticket.owner
+          ? `${ticket.owner.firstName} ${ticket.owner.surname}`
+          : "Guest",
+        eventTitle: ticket.eventSnapshot?.title,
+        checkedInAt: ticket.checkIn?.checkedInAt,
+      },
+    });
+  } catch (error) {
+    console.error("[VALIDATE TICKET ERROR]", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error during ticket validation.",
+    });
+  }
+};
+
+// ============================================================================
+// GET EVENT CHECK-IN STATS (Analytics for organisers)
+// ============================================================================
+const getEventCheckInStats = async (req, res) => {
+  const { eventId } = req.params;
+
+  try {
+    const [total, redeemed, unredeemed, cancelled] = await Promise.all([
+      UserEventTicket.countDocuments({ eventId }),
+      UserEventTicket.countDocuments({ eventId, status: "REDEEMED" }),
+      UserEventTicket.countDocuments({ eventId, status: "UNREDEEMED" }),
+      UserEventTicket.countDocuments({ eventId, status: "CANCELLED" }),
+    ]);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        total,
+        redeemed,
+        unredeemed,
+        cancelled,
+        checkInRate: total > 0 ? ((redeemed / total) * 100).toFixed(1) + "%" : "0%",
+      },
+    });
+  } catch (error) {
+    console.error("[CHECK-IN STATS ERROR]", error);
+    res.status(500).json({ success: false, message: "Server error fetching stats" });
+  }
+};
+
+/**
+ * VERIFY TICKET (NON-DESTRUCTIVE LOOKUP)
+ * Returns ticket info without marking it as redeemed.
+ */
+const verifyTicket = async (req, res) => {
+  const { ticketNumber, qrPayload } = req.body;
+
+  try {
+    let lookupTicketNumber = ticketNumber;
+
+    if (qrPayload) {
+      const { valid, data } = verifyQRPayload(qrPayload);
+      if (!valid) {
+        return res.status(400).json({ success: false, message: "Invalid or tampered QR code." });
+      }
+      lookupTicketNumber = data.tn;
+    }
+
+    if (!lookupTicketNumber) {
+      return res.status(400).json({ success: false, message: "Ticket number required." });
+    }
+
+    const ticket = await UserEventTicket.findOne({ ticketNumber: lookupTicketNumber })
+      .populate("owner", "firstName surname email phoneNumber")
+      .populate("eventId", "title coverImage startDateTime venue location")
+      .populate("ticketTypeId", "name price");
+
+    if (!ticket) {
+      return res.status(404).json({ success: false, message: "Ticket not found." });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        ticketNumber: ticket.ticketNumber,
+        ticketName: ticket.ticketName,
+        guestName: ticket.owner ? `${ticket.owner.firstName} ${ticket.owner.surname}` : "Guest",
+        guestEmail: ticket.owner?.email,
+        guestPhone: ticket.owner?.phoneNumber,
+        eventTitle: ticket.eventSnapshot?.title || ticket.eventId?.title,
+        status: ticket.status,
+        isCheckedIn: ticket.checkIn?.isCheckedIn,
+        checkedInAt: ticket.checkIn?.checkedInAt,
+        price: ticket.ticketSnapshot?.price || ticket.ticketTypeId?.price,
+        type: "EVENT"
+      }
+    });
+  } catch (error) {
+    console.error("[VERIFY TICKET ERROR]", error);
+    res.status(500).json({ success: false, message: "Server error during verification." });
   }
 };
 
@@ -156,4 +434,7 @@ module.exports = {
   getMyTickets,
   getTicketDetails,
   createTicketsForBooking,
+  validateTicket,
+  verifyTicket,
+  getEventCheckInStats,
 };

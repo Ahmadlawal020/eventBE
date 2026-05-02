@@ -48,14 +48,36 @@ const createBooking = async (req, res) => {
         return res.status(400).json({ success: false, message: `Not enough tickets available for ${ticketType.name}` });
       }
 
-      const itemTotal = ticketType.price.amountCents * item.quantity;
+      let pricePerUnit = 0;
+      if (ticketType.ticketType === "FREE") {
+        pricePerUnit = 0;
+      } else if (ticketType.ticketType === "DONATION") {
+        // Use the price provided by the user
+        pricePerUnit = Number(item.pricePerUnit || 0);
+        
+        // Validate donation range
+        if (ticketType.donationRange) {
+          if (pricePerUnit < ticketType.donationRange.minCents || 
+              pricePerUnit > ticketType.donationRange.maxCents) {
+            return res.status(400).json({ 
+              success: false, 
+              message: `Donation for ${ticketType.name} must be between ${ticketType.currency.symbol}${ticketType.donationRange.minCents/100} and ${ticketType.currency.symbol}${ticketType.donationRange.maxCents/100}` 
+            });
+          }
+        }
+      } else {
+        // PAID ticket
+        pricePerUnit = ticketType.price?.amountCents || 0;
+      }
+
+      const itemTotal = pricePerUnit * item.quantity;
       calculatedTotal += itemTotal;
 
       processedItems.push({
         ticketId: ticketType._id,
         name: ticketType.name,
         quantity: item.quantity,
-        pricePerUnit: ticketType.price.amountCents,
+        pricePerUnit: pricePerUnit,
         totalPrice: itemTotal,
       });
     }

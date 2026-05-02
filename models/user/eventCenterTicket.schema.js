@@ -6,6 +6,7 @@ const eventCenterTicketSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
+      index: true,
     },
     guestDetails: {
       fullName: { type: String },
@@ -21,6 +22,7 @@ const eventCenterTicketSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "EventCenter",
       required: true,
+      index: true,
     },
     selectedDates: [
       {
@@ -40,7 +42,7 @@ const eventCenterTicketSchema = new mongoose.Schema(
     },
     totalPrice: {
       amount: { type: Number, required: true },
-      currency: { type: String, default: "NGN" }, // Paystack usually NGN
+      currency: { type: String, default: "NGN" },
     },
     paymentStatus: {
       type: String,
@@ -57,8 +59,45 @@ const eventCenterTicketSchema = new mongoose.Schema(
       enum: ["ACTIVE", "CANCELLED", "COMPLETED"],
       default: "ACTIVE",
     },
+
+    // ============================================================
+    // QR CODE & ENTRY CONTROL (same pattern as event tickets)
+    // ============================================================
+    ticketNumber: {
+      type: String,
+      unique: true,
+      sparse: true, // Allow null for legacy tickets before this feature
+    },
+    qrPayload: { type: String }, // HMAC-signed JSON for tamper-proof scanning
+
+    // CHECK-IN TRACKING
+    checkIn: {
+      isCheckedIn: { type: Boolean, default: false },
+      checkedInAt: Date,
+      checkedInBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+      method: {
+        type: String,
+        enum: ["QR", "MANUAL"],
+      },
+    },
   },
   { timestamps: true }
 );
+
+// ============================================================================
+// INDEXES FOR MILLION-SCALE OPERATIONS
+// ============================================================================
+
+// Fast ticket lookup by number (for scanning)
+// ticketNumber already has a unique index from schema definition
+
+// Compound index: buyer + eventCenter for "my bookings for this venue"
+eventCenterTicketSchema.index({ buyer: 1, eventCenter: 1 });
+
+// Compound index: eventCenter + status for venue analytics
+eventCenterTicketSchema.index({ eventCenter: 1, status: 1 });
+
+// Fast payment reference lookup
+eventCenterTicketSchema.index({ paystackReference: 1 });
 
 module.exports = mongoose.model("EventCenterTicket", eventCenterTicketSchema);

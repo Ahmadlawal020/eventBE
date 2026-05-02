@@ -31,7 +31,8 @@ const userEventTicketSchema = new Schema(
       unique: true,
       required: true,
     },
-    qrCode: { type: String }, // Optional: link to stored QR code or raw data
+    // Signed QR payload for tamper-proof scanning
+    qrPayload: { type: String },
     status: {
       type: String,
       enum: ["UNREDEEMED", "REDEEMED", "CANCELLED"],
@@ -104,5 +105,20 @@ const userEventTicketSchema = new Schema(
   { timestamps: true }
 );
 
-module.exports = model("UserEventTicket", userEventTicketSchema);
+// ============================================================================
+// INDEXES FOR MILLION-SCALE OPERATIONS
+// ============================================================================
 
+// Primary scan lookup — used by validateTicket (sub-millisecond at any scale)
+// ticketNumber already has a unique index from the schema definition
+
+// Compound index: fast event-scoped queries (check-in stats, analytics)
+userEventTicketSchema.index({ eventId: 1, status: 1 });
+
+// Compound index: fast "my tickets for event" lookups
+userEventTicketSchema.index({ owner: 1, eventId: 1 });
+
+// Index for booking-scoped queries (find all tickets from a booking)
+userEventTicketSchema.index({ bookingId: 1 });
+
+module.exports = model("UserEventTicket", userEventTicketSchema);

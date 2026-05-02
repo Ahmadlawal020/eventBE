@@ -12,22 +12,24 @@ const getAllMyTickets = async (req, res) => {
     // 1. Fetch Event Center Tickets (Bookings of venues)
     const eventCenterTickets = await EventCenterTicket.find({ buyer: userId })
       .populate("eventCenter", "venueName images location")
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
 
     const formattedEventCenterTickets = eventCenterTickets.map(ticket => ({
-      ...ticket.toObject(),
-      ticketCategory: 'EVENT_CENTER', // Indicator
+      ...ticket,
+      ticketCategory: 'EVENT_CENTER',
     }));
 
     // 2. Fetch User Event Tickets (Individual tickets for events)
     const userEventTickets = await UserEventTicket.find({ owner: userId })
       .populate("eventId", "title coverImage startDateTime endDateTime venue location")
       .populate("ticketTypeId", "name price")
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
 
     const formattedUserEventTickets = userEventTickets.map(ticket => ({
-      ...ticket.toObject(),
-      ticketCategory: 'USER_EVENT', // Indicator
+      ...ticket,
+      ticketCategory: 'USER_EVENT',
     }));
 
     // 3. Combine and sort
