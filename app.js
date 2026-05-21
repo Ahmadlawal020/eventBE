@@ -39,6 +39,19 @@ app.use("/api/event-tickets", require("./routes/user/eventTicket.route"));
 app.use("/api/user-event-tickets", require("./routes/user/userEventTicket.route"));
 app.use("/api/event-bookings", require("./routes/user/eventBooking.route"));
 app.use("/api/tickets", require("./routes/user/ticket.route"));
+app.use("/api/wishlist", require("./routes/user/wishlist.route"));
+app.use("/api/co-hosts", require("./routes/user/coHost.route"));
+app.use("/api/staff", require("./routes/user/staff.route"));
+app.use("/api/notifications", require("./routes/user/notification.route"));
+app.use("/api/messages", require("./routes/user/message.route"));
+app.use("/api/analytics", require("./routes/user/analytics.route"));
+app.use("/api/ticket-dashboard", require("./routes/user/ticketDashboard.route"));
+app.use("/api/listing-dashboard", require("./routes/user/listingDashboard.route"));
+app.use("/api/booking-dashboard", require("./routes/user/bookingDashboard.route"));
+app.use("/api/finance-dashboard", require("./routes/user/financeDashboard.route"));
+
+
+
 // 404 Handler - Catch-all for unmatched routes
 app.all("*", (req, res) => {
   res.status(404); // Set status to 404

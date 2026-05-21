@@ -78,19 +78,29 @@ const createTicket = async (req, res) => {
         const phoneNumber = user.phoneNumber || "Not Provided";
         const email = user.email;
 
-        // 2. Initialize logic based on payment method
+        // 2. Fetch Event Center details to verify owner and prevent request body tampering
+        const eventCenter = await EventCenter.findById(eventCenterId);
+        if (!eventCenter) {
+            return res.status(404).json({ success: false, message: "Event Center not found." });
+        }
+
+        // 3. Initialize logic based on payment method
         const reference = `MNS-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
         const { paymentMethod } = req.body;
 
         if (paymentMethod === 'paystack' || !paymentMethod) {
+            // Get the authentic event center owner's subaccount details
+            const owner = await User.findById(eventCenter.createdBy).select("paystackSubaccountCode");
+
             // Initialize Paystack Transaction via Service
             const paystackData = await paystackService.initializeTransaction({
                 email,
                 amount: totalPrice.amount,
                 reference,
+                subaccount: owner?.paystackSubaccountCode || undefined,
                 metadata: {
                     eventCenterId,
-                    organiserId,
+                    organiserId: eventCenter.createdBy.toString(), // Securely bind the database owner ID
                     buyerId,
                     selectedDates,
                     bookingUnit,

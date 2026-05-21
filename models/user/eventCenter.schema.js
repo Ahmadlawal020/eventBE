@@ -121,7 +121,6 @@ const eventCenterSchema = new mongoose.Schema(
       trim: true,
       maxlength: 250,
     },
-
     description: {
       type: String,
       trim: true,
@@ -144,6 +143,41 @@ const eventCenterSchema = new mongoose.Schema(
       trim: true,
     },
     otherDetailsDescription: {
+      type: String,
+      trim: true,
+    },
+    oneLiner: {
+      type: String,
+      trim: true,
+      maxlength: 250,
+    },
+    theSpace: {
+      type: String,
+      trim: true,
+      maxlength: 1000,
+    },
+    yourProperty: {
+      type: String,
+      trim: true,
+      maxlength: 1000,
+    },
+    guestAccess: {
+      type: String,
+      trim: true,
+    },
+    interaction: {
+      type: String,
+      trim: true,
+    },
+    neighborhood: {
+      type: String,
+      trim: true,
+    },
+    transit: {
+      type: String,
+      trim: true,
+    },
+    otherDetails: {
       type: String,
       trim: true,
     },
@@ -387,6 +421,33 @@ const eventCenterSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
+    },
+
+    coHosts: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+      },
+    ],
+    staff: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+      },
+    ],
+    /* ===== PERFORMANCE & ANALYTICS ===== */
+    performance: {
+      views: { type: Number, default: 0 },
+      clicks: { type: Number, default: 0 },
+      wishlists: { type: Number, default: 0 },
+      reach: { type: Number, default: 0 },
+      engagement: { type: Number, default: 0 },
+      messages: { type: Number, default: 0 },
+      pendingInquiries: { type: Number, default: 0 },
+      responseRate: { type: Number, default: 0 },
+      shares: { type: Number, default: 0 },
+      bookings: { type: Number, default: 0 },
+      revenue: { type: Number, default: 0 },
     },
   },
   { timestamps: true },

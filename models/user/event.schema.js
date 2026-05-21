@@ -343,6 +343,33 @@ const eventSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
     },
+
+    coHosts: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+      },
+    ],
+    staff: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+      },
+    ],
+    /* ===== PERFORMANCE & ANALYTICS ===== */
+    performance: {
+      views: { type: Number, default: 0 },
+      clicks: { type: Number, default: 0 },
+      wishlists: { type: Number, default: 0 },
+      reach: { type: Number, default: 0 },
+      engagement: { type: Number, default: 0 },
+      messages: { type: Number, default: 0 },
+      pendingInquiries: { type: Number, default: 0 },
+      responseRate: { type: Number, default: 0 },
+      shares: { type: Number, default: 0 },
+      ticketSales: { type: Number, default: 0 },
+      revenue: { type: Number, default: 0 },
+    },
   },
   { timestamps: true },
 );

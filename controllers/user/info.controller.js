@@ -1,6 +1,7 @@
 const User = require("../../models/user/user.schema");
 const bcrypt = require("bcrypt");
 const asyncHandler = require("express-async-handler");
+const cloudinary = require("../../utils/cloudinary");
 
 // @desc    Get user by ID
 // @route   GET /api/users/:id
@@ -41,6 +42,7 @@ const updateUser = asyncHandler(async (req, res) => {
     isIdentityVerified,
     isPhoneVerified,
     phoneVerifiedAt,
+    profilePicture,
   } = req.body;
 
   const user = await User.findById(id).exec();
@@ -60,6 +62,22 @@ const updateUser = asyncHandler(async (req, res) => {
   user.preferredFirstName = preferredFirstName ?? user.preferredFirstName;
   user.phoneNumber = phoneNumber ?? user.phoneNumber;
   user.dob = dob ?? user.dob;
+
+  // Handle Profile Picture update and Cloudinary cleanup
+  if (profilePicture && typeof profilePicture === 'object') {
+    // Delete old image if it exists
+    if (user.profilePicture?.publicId) {
+      try {
+        await cloudinary.uploader.destroy(user.profilePicture.publicId);
+      } catch (err) {
+        console.error("[CLOUDINARY DELETE ERROR]", err);
+      }
+    }
+    user.profilePicture = {
+      url: profilePicture.url || null,
+      publicId: profilePicture.publicId || null
+    };
+  }
 
   // ✅ Fix: merge roles instead of replacing
   if (roles?.length) {
@@ -104,6 +122,7 @@ const updateUser = asyncHandler(async (req, res) => {
       phoneNumber: updatedUser.phoneNumber,
       roles: updatedUser.roles,
       dob: updatedUser.dob,
+      profilePicture: updatedUser.profilePicture,
       residentialAddress: updatedUser.residentialAddress,
       emergencyContact: updatedUser.emergencyContact,
       preferredLanguage: updatedUser.preferredLanguage,

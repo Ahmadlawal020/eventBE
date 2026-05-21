@@ -6,7 +6,6 @@ const userEventTicketSchema = new Schema(
       type: Schema.Types.ObjectId,
       ref: "EventBooking",
       required: true,
-      index: true,
     },
     eventId: {
       type: Schema.Types.ObjectId,

@@ -2,6 +2,7 @@ const Event = require("../../models/user/event.schema");
 const User = require("../../models/user/user.schema");
 const Ticket = require("../../models/user/eventTicket.schema");
 const mongoose = require("mongoose");
+const CoHostInvitation = require("../../models/user/coHostInvitation.schema");
 const cloudinary = require("../../utils/cloudinary");
 
 // 📌 Create Event
@@ -72,10 +73,10 @@ const getEventById = async (req, res) => {
   const { id } = req.params;
 
   try {
-    const event = await Event.findById(id).populate(
-      "createdBy",
-      "firstName surname email",
-    );
+    const event = await Event.findById(id)
+      .populate("createdBy", "firstName surname email profilePicture")
+      .populate("coHosts", "firstName surname email profilePicture")
+      .populate("staff", "firstName surname email profilePicture");
     if (!event)
       return res
         .status(404)
@@ -97,7 +98,7 @@ const getMyDraftEvents = async (req, res) => {
   try {
     const drafts = await Event.find({
       status: "IN_PROGRESS",
-      createdBy: req.user.id,
+      $or: [{ createdBy: req.user.id }, { coHosts: req.user.id }],
     }).populate("createdBy", "firstName surname email");
 
     res.json({
@@ -140,7 +141,23 @@ const updateEvent = async (req, res) => {
       });
     }
 
-    // const updatePayload = { ...req.body };
+    // Permission check: co-hosts need MANAGE_LISTING
+    const isOwner = prevEvent.createdBy?.toString() === req.user.id;
+    if (!isOwner) {
+      const coHostInvite = await CoHostInvitation.findOne({
+        coHost: req.user.id,
+        status: "ACCEPTED",
+        "listings.listingId": id,
+      }).lean();
+      const perms = coHostInvite?.permissions || [];
+      if (!perms.includes("MANAGE_LISTING") && !perms.includes("ALL_ACCESS")) {
+        return res.status(403).json({
+          success: false,
+          message: "You do not have permission to manage this listing",
+        });
+      }
+    }
+
     const updatePayload = req.body;
 
     /* ================================
@@ -372,6 +389,13 @@ const deleteEvent = async (req, res) => {
         .json({ success: false, message: "Event not found" });
     }
 
+    // Only the original creator can delete an event
+    if (event.createdBy.toString() !== req.user.id.toString()) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Only the original host can remove this listing" });
+    }
+
     // 1️⃣ Delete associated tickets
     await Ticket.deleteMany({ eventId: id });
 
@@ -423,7 +447,7 @@ const getMyEvents = async (req, res) => {
 
     const events = await Event.find({
       status: { $in: ["LISTED", "ACTION_REQUIRED", "UNLISTED"] },
-      createdBy: req.user.id,
+      $or: [{ createdBy: req.user.id }, { coHosts: req.user.id }],
     }).populate("createdBy", "firstName surname email");
 
     res.json({
@@ -453,7 +477,7 @@ const getPersonalEventListings = async (req, res) => {
     await syncUserEvents(req.user.id);
 
     const events = await Event.find({
-      createdBy: req.user.id,
+      $or: [{ createdBy: req.user.id }, { coHosts: req.user.id }],
     })
       .select({
         title: 1,
@@ -462,9 +486,11 @@ const getPersonalEventListings = async (req, res) => {
         eventType: 1,
         location: 1,
         createdAt: 1,
+        createdBy: 1,
       })
       .sort({ createdAt: -1 });
 
+    const userId = req.user.id;
     const formattedEvents = events.map((event) => {
       const obj = event.toJSON(); // keeps eventTypeLabel
 
@@ -476,6 +502,7 @@ const getPersonalEventListings = async (req, res) => {
         location: obj.location || null,
         images: obj.images || [], // ✅ FIXED
         createdAt: obj.createdAt,
+        isCoHost: obj.createdBy?.toString() !== userId,
       };
     });
 

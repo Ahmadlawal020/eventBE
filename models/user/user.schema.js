@@ -68,8 +68,8 @@ const userSchema = new mongoose.Schema(
       default: "local",
     },
     profilePicture: {
-      type: String,
-      default: null,
+      url: { type: String, default: null },
+      publicId: { type: String, default: null },
     },
     roles: {
       type: [String],
@@ -111,6 +111,38 @@ const userSchema = new mongoose.Schema(
     lastLoginAt: {
       type: Date,
       default: Date.now,
+    },
+    isActive: {
+      type: Boolean,
+      default: true,
+    },
+    preferredLanguage: {
+      type: String,
+      default: "en",
+    },
+    wishlistEvents: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Event",
+      },
+    ],
+    wishlistEventCenters: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "EventCenter",
+      },
+    ],
+    // Finance / Payout fields
+    paystackSubaccountCode: {
+      type: String,
+      default: null,
+      index: true, // Enable sub-millisecond lookups for webhooks and finance audits
+    },
+    bankDetails: {
+      accountName: { type: String, trim: true },
+      accountNumber: { type: String, trim: true },
+      bankName: { type: String, trim: true },
+      bankCode: { type: String, trim: true },
     },
   },
   {

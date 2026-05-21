@@ -2,6 +2,7 @@ const EventCenter = require("../../models/user/eventCenter.schema");
 const User = require("../../models/user/user.schema");
 const mongoose = require("mongoose");
 const cloudinary = require("../../utils/cloudinary");
+const CoHostInvitation = require("../../models/user/coHostInvitation.schema");
 
 // ===================== CREATE EVENT CENTER =====================
 const createEventCenter = async (req, res) => {
@@ -90,10 +91,10 @@ const getEventCenterById = async (req, res) => {
   const { id } = req.params;
 
   try {
-    const center = await EventCenter.findById(id).populate(
-      "createdBy",
-      "firstName surname email",
-    );
+    const center = await EventCenter.findById(id)
+      .populate("createdBy", "firstName surname email profilePicture")
+      .populate("coHosts", "firstName surname email profilePicture")
+      .populate("staff", "firstName surname email profilePicture");
 
     if (!center)
       return res
@@ -116,7 +117,7 @@ const getMyDraftEventCenters = async (req, res) => {
   try {
     const drafts = await EventCenter.find({
       status: "IN_PROGRESS",
-      createdBy: req.user.id,
+      $or: [{ createdBy: req.user.id }, { coHosts: req.user.id }],
     }).populate("createdBy", "firstName surname email");
 
     res.json({
@@ -141,6 +142,13 @@ const deleteEventCenter = async (req, res) => {
       return res
         .status(404)
         .json({ success: false, message: "Event Center not found" });
+    }
+
+    // Verify that only the original host (createdBy) can delete the event center
+    if (center.createdBy.toString() !== req.user.id.toString()) {
+      return res
+        .status(403)
+        .json({ success: false, message: "Only the original host can remove this listing" });
     }
 
     // 1️⃣ Delete the event center itself
@@ -207,6 +215,48 @@ const updateEventCenter = async (req, res) => {
       return res
         .status(404)
         .json({ success: false, message: "Event Center not found" });
+
+    // Permission check: co-hosts need MANAGE_LISTING, staff need MANAGE_CALENDAR (or ALL_ACCESS)
+    const isOwner = prevCenter.createdBy?.toString() === req.user.id;
+    if (!isOwner) {
+      let hasAccess = false;
+
+      // 1. Check Co-Host permissions
+      const coHostInvite = await CoHostInvitation.findOne({
+        coHost: req.user.id,
+        status: "ACCEPTED",
+        "listings.listingId": id,
+      }).lean();
+      const coHostPerms = coHostInvite?.permissions || [];
+      if (coHostPerms.includes("MANAGE_LISTING") || coHostPerms.includes("ALL_ACCESS")) {
+        hasAccess = true;
+      }
+
+      // 2. Check Staff permissions if not a co-host
+      if (!hasAccess) {
+        const StaffInvitation = require("../../models/user/staffInvitation.schema");
+        const staffInvite = await StaffInvitation.findOne({
+          staff: req.user.id,
+          status: "ACCEPTED",
+          "listings.listingId": id,
+        }).lean();
+        const staffPerms = staffInvite?.permissions || [];
+        
+        // Staff can only update if they have MANAGE_CALENDAR or ALL_ACCESS, 
+        // AND if the payload only touches allowed fields (like availability).
+        if (staffPerms.includes("MANAGE_CALENDAR") || staffPerms.includes("ALL_ACCESS")) {
+          // For simplicity, if they have MANAGE_CALENDAR, they can update availability.
+          hasAccess = true;
+        }
+      }
+
+      if (!hasAccess) {
+        return res.status(403).json({
+          success: false,
+          message: "You do not have permission to manage this listing",
+        });
+      }
+    }
 
     const updatePayload = { ...req.body };
 
@@ -401,7 +451,7 @@ const getMyEventCenters = async (req, res) => {
     await syncUserEventCenters(req.user.id);
 
     const centers = await EventCenter.find({
-      createdBy: req.user.id,
+      $or: [{ createdBy: req.user.id }, { coHosts: req.user.id }],
       status: { $in: ["LISTED", "ACTION_REQUIRED", "UNLISTED"] },
     }).populate("createdBy", "firstName surname email");
 
@@ -428,7 +478,9 @@ const getPersonalEventCenterListings = async (req, res) => {
     // Make sure event centers reflect current user verification status before serving
     await syncUserEventCenters(req.user.id);
 
-    const centers = await EventCenter.find({ createdBy: req.user.id })
+    const centers = await EventCenter.find({
+      $or: [{ createdBy: req.user.id }, { coHosts: req.user.id }],
+    })
       .select({
         venueName: 1,
         images: 1,
@@ -436,9 +488,11 @@ const getPersonalEventCenterListings = async (req, res) => {
         venueType: 1,
         location: 1,
         createdAt: 1,
+        createdBy: 1,
       })
       .sort({ createdAt: -1 });
 
+    const userId = req.user.id;
     const formattedCenters = centers.map((center) => {
       const obj = center.toJSON();
       return {
@@ -449,6 +503,7 @@ const getPersonalEventCenterListings = async (req, res) => {
         location: obj.location || null,
         images: obj.images || [],
         createdAt: obj.createdAt,
+        isCoHost: obj.createdBy?.toString() !== userId,
       };
     });
 

@@ -30,8 +30,8 @@ class OTPService {
    */
   async sendEmailOTP(email, code, type = "email") {
     const isPasswordChange = type === "password_change";
-    const subject = isPasswordChange 
-      ? "Password Reset Code for Munasaba" 
+    const subject = isPasswordChange
+      ? "Password Reset Code for Munasaba"
       : "Verification Code for Munasaba";
     const actionText = isPasswordChange
       ? "changing your password"
@@ -71,7 +71,7 @@ class OTPService {
    */
   async requestOTP(identifier, type) {
     const code = this.generateOTP();
-    
+
     // Delete any existing OTP for this identifier to avoid clutter
     await OTP.deleteMany({ identifier, type });
 
@@ -90,7 +90,7 @@ class OTPService {
       console.log(`[SMS PIPE] Redirecting to SMS provider for: ${identifier} with code: ${code}`);
       return true; // We assume the SMS will be handled by the frontend/bridge
     }
-    
+
     throw new Error("Invalid OTP type");
   }
 

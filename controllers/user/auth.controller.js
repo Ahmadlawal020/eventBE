@@ -163,7 +163,7 @@ const handleLogin = asyncHandler(async (req, res) => {
   });
 });
 
-// 🚪 Logout
+//  Logout
 const handleLogout = asyncHandler(async (req, res) => {
   const cookies = req.cookies;
   const { refreshToken } = req.body;
@@ -182,7 +182,7 @@ const handleLogout = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, message: "Logged out" });
 });
 
-// 🔄 Refresh token
+//  Refresh token
 const handleRefreshToken = asyncHandler(async (req, res) => {
   const { refreshToken } = req.body;
   // Validation handled by middleware
@@ -369,16 +369,16 @@ const handleVerifyOTP = asyncHandler(async (req, res) => {
   // Update user record depending on type
   if (type === "email" || type === "phone") {
     const updateQuery = type === "email" ? { email: identifier } : { phoneNumber: identifier };
-    const updateField = type === "email" 
-          ? { isEmailVerified: true, emailVerifiedAt: new Date() }
-          : { isPhoneVerified: true, phoneVerifiedAt: new Date() };
+    const updateField = type === "email"
+      ? { isEmailVerified: true, emailVerifiedAt: new Date() }
+      : { isPhoneVerified: true, phoneVerifiedAt: new Date() };
 
     const user = await User.findOneAndUpdate(
       updateQuery,
       updateField,
       { new: true }
     );
-    
+
     // Auto-sync event centers and events status on verification
     if (user) {
       const { syncUserEventCenters } = require("./eventCenter.controller");

@@ -54,7 +54,7 @@ const getTicketDetails = async (req, res) => {
     // Check if it's an Event Center Ticket
     const eventCenterTicket = await EventCenterTicket.findOne({ _id: ticketId, buyer: userId })
       .populate("eventCenter");
-      
+
     if (eventCenterTicket) {
       return res.status(200).json({
         success: true,

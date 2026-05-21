@@ -17,6 +17,7 @@ const eventCenterTicketSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
+      index: true, // Speed up organiser-scoped ticket queries
     },
     eventCenter: {
       type: mongoose.Schema.Types.ObjectId,
@@ -97,7 +98,5 @@ eventCenterTicketSchema.index({ buyer: 1, eventCenter: 1 });
 // Compound index: eventCenter + status for venue analytics
 eventCenterTicketSchema.index({ eventCenter: 1, status: 1 });
 
-// Fast payment reference lookup
-eventCenterTicketSchema.index({ paystackReference: 1 });
 
 module.exports = mongoose.model("EventCenterTicket", eventCenterTicketSchema);

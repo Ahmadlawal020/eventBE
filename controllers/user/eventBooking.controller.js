@@ -108,11 +108,15 @@ const createBooking = async (req, res) => {
 
     // 4. Handle Payment Flow
     if (paymentMethod === "PAYSTACK" && calculatedTotal > 0) {
+      // Get the event owner's subaccount details
+      const organiser = await User.findById(event.createdBy).select("paystackSubaccountCode");
+
       // Initialize Paystack with full booking details in metadata
       const paystackData = await initializeTransaction({
         email: email,
         amount: calculatedTotal / 100, // Service expects Naira
         reference: reference,
+        subaccount: organiser?.paystackSubaccountCode || undefined,
         metadata: {
           eventId,
           buyerId,
