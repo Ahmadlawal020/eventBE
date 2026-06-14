@@ -1,5 +1,25 @@
 const Ticket = require("../../models/user/eventTicket.schema");
 const Event = require("../../models/user/event.schema");
+const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
+
+const canManageEventTickets = async (event, userId) => {
+  if (event.createdBy?.toString() === userId.toString()) {
+    return true;
+  }
+
+  const coHostInvite = await CoHostInvitation.findOne({
+    coHost: userId,
+    status: "ACCEPTED",
+    "listings.listingId": event._id,
+  }).lean();
+
+  const permissions = coHostInvite?.permissions || [];
+  return (
+    permissions.includes("MANAGE_LISTING") ||
+    permissions.includes("MANAGE_TICKETS") ||
+    permissions.includes("ALL_ACCESS")
+  );
+};
 
 /* ================================
    CREATE TICKET
@@ -30,6 +50,14 @@ const createTicket = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: "Event not found",
+      });
+    }
+
+    const hasAccess = await canManageEventTickets(event, req.user.id);
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: "You do not have permission to manage tickets for this event",
       });
     }
 
@@ -143,6 +171,22 @@ const updateTicket = async (req, res) => {
       });
     }
 
+    const event = await Event.findById(prevTicket.eventId);
+    if (!event) {
+      return res.status(404).json({
+        success: false,
+        message: "Event not found",
+      });
+    }
+
+    const hasAccess = await canManageEventTickets(event, req.user.id);
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: "You do not have permission to manage tickets for this event",
+      });
+    }
+
     const updatePayload = { ...req.body };
 
     // 🔐 Prevent negative inventory updates
@@ -188,6 +232,22 @@ const deleteTicket = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: "Ticket not found",
+      });
+    }
+
+    const event = await Event.findById(ticket.eventId);
+    if (!event) {
+      return res.status(404).json({
+        success: false,
+        message: "Event not found",
+      });
+    }
+
+    const hasAccess = await canManageEventTickets(event, req.user.id);
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: "You do not have permission to manage tickets for this event",
       });
     }
 

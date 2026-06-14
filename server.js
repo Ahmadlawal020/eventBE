@@ -5,6 +5,8 @@ const PORT = process.env.PORT || 5001;
 
 mongoose.connection.once("open", () => {
   console.log("connected to MongoDB");
+  // Initialize cron jobs
+  require("./jobs/notificationTrigger.job");
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });

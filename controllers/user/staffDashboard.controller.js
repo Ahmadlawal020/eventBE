@@ -161,7 +161,7 @@ exports.updateStaffAccess = async (req, res) => {
     const organiserId = req.user.id;
 
     // Verify user has authority (owner or co-host with MANAGE_STAFF/ALL_ACCESS) for all requested listings
-    const CoHostInvitation = require("../../models/user/coHostInvitation.schema");
+    const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
     
     for (const item of listings) {
       let listingObj;

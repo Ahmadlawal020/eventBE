@@ -1,7 +1,7 @@
 const EventCenter = require("../../models/user/eventCenter.schema");
 const EventCenterTicket = require("../../models/user/eventCenterTicket.schema");
 const mongoose = require("mongoose");
-const CoHostInvitation = require("../../models/user/coHostInvitation.schema");
+const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
 
 /**
@@ -13,13 +13,13 @@ const getOrganiserBookingStats = async (req, res) => {
   const organiserId = req.user.id;
 
   try {
-    // 1. Find all event centers managed by this organiser
+    // 1. Find all event centers managed by this organiser (Created or Co-hosted, NOT where user is staff)
     const venuesRaw = await EventCenter.find({
       $or: [
         { createdBy: organiserId },
         { coHosts: organiserId },
-        { staff: organiserId },
       ],
+      staff: { $ne: organiserId },
     })
       .select("_id venueName status location images venueType performance createdBy")
       .sort({ createdAt: -1 })

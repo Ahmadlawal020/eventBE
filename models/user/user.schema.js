@@ -147,6 +147,8 @@ const userSchema = new mongoose.Schema(
   },
   {
     timestamps: true, // Adds createdAt and updatedAt automatically
+    toJSON: { virtuals: true },
+    toObject: { virtuals: true },
   },
 );
 
@@ -156,6 +158,43 @@ userSchema.index({ authProvider: 1 });
 // Virtual for full name
 userSchema.virtual("fullName").get(function () {
   return `${this.firstName} ${this.surname}`.trim();
+});
+
+// Virtual populates for events and venues
+userSchema.virtual("createdEvents", {
+  ref: "Event",
+  localField: "_id",
+  foreignField: "createdBy",
+});
+
+userSchema.virtual("coHostedEvents", {
+  ref: "Event",
+  localField: "_id",
+  foreignField: "coHosts",
+});
+
+userSchema.virtual("staffedEvents", {
+  ref: "Event",
+  localField: "_id",
+  foreignField: "staff",
+});
+
+userSchema.virtual("createdEventCenters", {
+  ref: "EventCenter",
+  localField: "_id",
+  foreignField: "createdBy",
+});
+
+userSchema.virtual("coHostedEventCenters", {
+  ref: "EventCenter",
+  localField: "_id",
+  foreignField: "coHosts",
+});
+
+userSchema.virtual("staffedEventCenters", {
+  ref: "EventCenter",
+  localField: "_id",
+  foreignField: "staff",
 });
 
 module.exports = mongoose.model("User", userSchema);

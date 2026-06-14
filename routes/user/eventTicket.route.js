@@ -21,15 +21,13 @@ router.post("/purchase", verifyJWT, createBooking);
 router.get("/verify/:reference", verifyBooking);
 
 // --- ORGANISER ROUTES ---
-// router.post("/", verifyJWT, createTicket); // protect creation
-router.post("/", createTicket); // protect creation (toggle when ready)
+router.post("/", verifyJWT, createTicket);
 
 router.get("/", getTickets);
 router.get("/:id", getTicketById);
 
-// router.put("/:id", verifyJWT, updateTicket); // optionally protect updates
 router.patch("/:id", verifyJWT, updateTicket);
 
-router.delete("/:id", verifyJWT, deleteTicket); // optionally protect deletes
+router.delete("/:id", verifyJWT, deleteTicket);
 
 module.exports = router;

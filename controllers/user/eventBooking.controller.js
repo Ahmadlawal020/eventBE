@@ -43,6 +43,28 @@ const createBooking = async (req, res) => {
         return res.status(404).json({ success: false, message: `Ticket type ${item.product} not found` });
       }
 
+      if (ticketType.eventId.toString() !== eventId.toString()) {
+        return res.status(400).json({
+          success: false,
+          message: `Ticket type ${item.product} does not belong to this event`,
+        });
+      }
+
+      // Validate Sales Window
+      const now = new Date();
+      if (ticketType.salesStartAt && now < new Date(ticketType.salesStartAt)) {
+        return res.status(400).json({
+          success: false,
+          message: `Ticket "${ticketType.name}" is not on sale yet.`,
+        });
+      }
+      if (ticketType.salesEndAt && now > new Date(ticketType.salesEndAt)) {
+        return res.status(400).json({
+          success: false,
+          message: `Ticket sales for "${ticketType.name}" have ended.`,
+        });
+      }
+
       const available = ticketType.totalQuantity - ticketType.soldQuantity;
       if (available < item.quantity) {
         return res.status(400).json({ success: false, message: `Not enough tickets available for ${ticketType.name}` });

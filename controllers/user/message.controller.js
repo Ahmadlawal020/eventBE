@@ -3,7 +3,7 @@ const Conversation = require("../../models/user/conversation.schema");
 const Event = require("../../models/user/event.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
-const CoHostInvitation = require("../../models/user/coHostInvitation.schema");
+const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const mongoose = require("mongoose");
 
 // Helper function to check if a user is an authorized representative (Owner, Co-Host, or Staff with CUSTOMER_CARE permission)
@@ -79,15 +79,15 @@ const sendMessage = async (req, res) => {
     }
 
     const organiserId = context.createdBy.toString();
-    
+
     // Verify if sender has representative support/customer care access
     const isSenderRepresentative = await checkCustomerCareAccess(senderId, finalContextId, finalContextType);
 
     if (conversationId) {
       receiverId = conversation.participants.find(p => p && p.toString() !== senderId.toString());
       if (!receiverId && conversation.participants.length === 2) {
-        receiverId = conversation.participants[0].toString() === senderId.toString() 
-          ? conversation.participants[1] 
+        receiverId = conversation.participants[0].toString() === senderId.toString()
+          ? conversation.participants[1]
           : conversation.participants[0];
       }
     } else {
@@ -128,10 +128,10 @@ const sendMessage = async (req, res) => {
       if (!conversation.isReplied) {
         conversation.isReplied = true;
         context.performance.pendingInquiries = Math.max(0, (context.performance.pendingInquiries || 0) - 1);
-        context.performance.responseRate = 100; 
+        context.performance.responseRate = 100;
       }
     }
-    
+
     await context.save();
 
     // 3. Create Message
@@ -150,7 +150,7 @@ const sendMessage = async (req, res) => {
     conversation.lastMessage = savedMessage._id;
     const currentUnread = conversation.unreadCount.get(receiverId.toString()) || 0;
     conversation.unreadCount.set(receiverId.toString(), currentUnread + 1);
-    
+
     await conversation.save();
 
     res.status(201).json({
@@ -176,7 +176,7 @@ const getConversations = async (req, res) => {
       status: "ACCEPTED",
       permissions: "CUSTOMER_CARE"
     }).select("listings.listingId");
-    
+
     // Find all listing IDs where this user has CUSTOMER_CARE permission as Co-Host
     const coHostInvites = await CoHostInvitation.find({
       coHost: userId,
@@ -219,11 +219,11 @@ const getConversations = async (req, res) => {
     if (role === 'organiser') {
       filteredConversations = conversations.filter(conv => {
         if (!conv.contextId) return false;
-        
+
         // Owner check
         const isOwner = conv.contextId.createdBy && conv.contextId.createdBy.toString() === userId.toString();
         if (isOwner) return true;
-        
+
         // Staff/Co-Host agent check
         const isAgent = agentListingIds.some(id => id.toString() === conv.contextId._id.toString());
         return isAgent;
@@ -231,7 +231,7 @@ const getConversations = async (req, res) => {
     } else if (role === 'user') {
       filteredConversations = conversations.filter(conv => {
         if (!conv.contextId) return false;
-        
+
         // Ensure they are a participant but NOT the owner or an agent for this listing
         const isOwner = conv.contextId.createdBy && conv.contextId.createdBy.toString() === userId.toString();
         const isAgent = agentListingIds.some(id => id.toString() === conv.contextId._id.toString());

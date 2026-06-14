@@ -11,7 +11,9 @@ const connectDB = require("./config/dbConn");
 
 console.log(process.env.NODE_ENV);
 
-connectDB();
+connectDB().catch(() => {
+  process.exit(1);
+});
 
 const helmet = require("helmet");
 
@@ -40,7 +42,7 @@ app.use("/api/user-event-tickets", require("./routes/user/userEventTicket.route"
 app.use("/api/event-bookings", require("./routes/user/eventBooking.route"));
 app.use("/api/tickets", require("./routes/user/ticket.route"));
 app.use("/api/wishlist", require("./routes/user/wishlist.route"));
-app.use("/api/co-hosts", require("./routes/user/coHost.route"));
+app.use("/api/co-hosts", require("./routes/user/coOrganiser.route"));
 app.use("/api/staff", require("./routes/user/staff.route"));
 app.use("/api/notifications", require("./routes/user/notification.route"));
 app.use("/api/messages", require("./routes/user/message.route"));
@@ -49,6 +51,22 @@ app.use("/api/ticket-dashboard", require("./routes/user/ticketDashboard.route"))
 app.use("/api/listing-dashboard", require("./routes/user/listingDashboard.route"));
 app.use("/api/booking-dashboard", require("./routes/user/bookingDashboard.route"));
 app.use("/api/finance-dashboard", require("./routes/user/financeDashboard.route"));
+app.use("/api/platform-fees", require("./routes/user/platformFees.route"));
+app.use("/api/kyc", require("./routes/user/kyc.route"));
+
+// Mount admin routes
+app.use("/api/admin/auth", require("./routes/admin/auth.route"));
+app.use("/api/admin/dashboard", require("./routes/admin/dashboard.route"));
+app.use("/api/admin/users", require("./routes/admin/users.route"));
+app.use("/api/admin/listings", require("./routes/admin/listings.route"));
+app.use("/api/admin/bookings", require("./routes/admin/bookings.route"));
+app.use("/api/admin/payments", require("./routes/admin/payments.route"));
+app.use("/api/admin/tickets", require("./routes/admin/tickets.route"));
+app.use("/api/admin/audit-logs", require("./routes/admin/audit.route"));
+app.use("/api/admin/platform-fees", require("./routes/admin/platformFees.route"));
+app.use("/api/admin/staff", require("./routes/admin/staff.route"));
+app.use("/api/admin/kyc", require("./routes/admin/kyc.route"));
+app.use("/api/admin/settings", require("./routes/admin/settings.route"));
 
 
 

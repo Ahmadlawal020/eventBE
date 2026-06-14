@@ -2,7 +2,7 @@ const Event = require("../../models/user/event.schema");
 const Ticket = require("../../models/user/eventTicket.schema");
 const UserEventTicket = require("../../models/user/userEventTicket.schema");
 const EventBooking = require("../../models/user/eventBooking.schema");
-const CoHostInvitation = require("../../models/user/coHostInvitation.schema");
+const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
 
 /**
@@ -14,13 +14,13 @@ const getOrganiserTicketStats = async (req, res) => {
   const organiserId = req.user.id;
 
   try {
-    // 1. Find all events managed by this organiser
+    // 1. Find all events managed by this organiser (Created or Co-hosted, NOT where user is staff)
     const eventsRaw = await Event.find({
       $or: [
         { createdBy: organiserId },
         { coHosts: organiserId },
-        { staff: organiserId },
       ],
+      staff: { $ne: organiserId },
     })
       .select("_id title status schedule location performance images createdBy")
       .sort({ "schedule.from": -1 })

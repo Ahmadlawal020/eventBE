@@ -47,7 +47,7 @@ const staffInvitationSchema = new mongoose.Schema(
     ],
     status: {
       type: String,
-      enum: ["PENDING", "ACCEPTED", "DECLINED"],
+      enum: ["PENDING", "ACCEPTED", "DECLINED", "LEFT"],
       default: "PENDING",
     },
   },

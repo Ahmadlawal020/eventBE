@@ -1,5 +1,5 @@
 const User = require("../../models/user/user.schema");
-const CoHostInvitation = require("../../models/user/coHostInvitation.schema");
+const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const Notification = require("../../models/user/notification.schema");
 
 /**
@@ -39,7 +39,7 @@ const inviteCoHost = async (req, res) => {
     if (!coHostEmail || !listings || !permissions) {
       return res.status(400).json({
         success: false,
-        message: "Co-host email, listings, and permissions are required",
+        message: "Co-organiser email, listings, and permissions are required",
       });
     }
 
@@ -53,7 +53,7 @@ const inviteCoHost = async (req, res) => {
     if (existingInvitation) {
       return res.status(400).json({
         success: false,
-        message: "An active pending invitation already exists for this co-host email.",
+        message: "An active pending invitation already exists for this co-organiser email.",
       });
     }
 
@@ -94,15 +94,15 @@ const inviteCoHost = async (req, res) => {
         recipient: coHost._id,
         sender: hostId,
         type: "COHOST_INVITATION",
-        title: "New Co-Host Invitation",
-        message: "You have been invited to be a co-host for one or more listings.",
+        title: "New Co-organiser Invitation",
+        message: "You have been invited to be a co-organiser for one or more listings.",
         referenceId: invitation._id,
       });
     }
 
     res.status(201).json({
       success: true,
-      message: "Co-host invitation sent successfully",
+      message: "Co-organiser invitation sent successfully",
       data: invitation,
     });
   } catch (error) {
@@ -114,7 +114,7 @@ const inviteCoHost = async (req, res) => {
 /**
  * 📜 Get Co-Host Invitations (for the Host)
  */
-const getMyCoHostInvitations = async (req, res) => {
+const getMyCoOrganiserInvitations = async (req, res) => {
   try {
     const hostId = req.user.id;
     const invitations = await CoHostInvitation.find({ host: hostId })
@@ -210,7 +210,7 @@ const respondToInvitation = async (req, res) => {
 /**
  * 🗑️ Remove a Co-Host from a listing
  */
-const removeCoHost = async (req, res) => {
+const removeCoOrganiser = async (req, res) => {
   try {
     const { listingId, listingType, coHostId } = req.body;
     const hostId = req.user.id;
@@ -296,7 +296,7 @@ const removeCoHost = async (req, res) => {
 
     res.json({
       success: true,
-      message: isRemovingSelf ? "You have successfully left the listing" : "Co-host removed successfully",
+      message: isRemovingSelf ? "You have successfully left the listing" : "Co-organiser removed successfully",
     });
   } catch (error) {
     console.error("[REMOVE CO-HOST] ERROR:", error);
@@ -307,7 +307,7 @@ const removeCoHost = async (req, res) => {
 /**
  * 🛠️ Update Co-Host Permissions
  */
-const updateCoHostPermissions = async (req, res) => {
+const updateCoOrganiserPermissions = async (req, res) => {
   try {
     const { listingId, coHostId, permissions } = req.body;
     const hostId = req.user.id;
@@ -409,11 +409,11 @@ const getReceivedInvitations = async (req, res) => {
 module.exports = {
   checkUserByEmail,
   inviteCoHost,
-  getMyCoHostInvitations,
+  getMyCoOrganiserInvitations,
   getInvitationById,
   respondToInvitation,
-  removeCoHost,
-  updateCoHostPermissions,
+  removeCoOrganiser,
+  updateCoOrganiserPermissions,
   getReceivedInvitations,
   cancelInvitation,
 };

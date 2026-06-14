@@ -11,22 +11,22 @@ const getOrganiserListingStats = async (req, res) => {
   const organiserId = req.user.id;
 
   try {
-    // 1. Fetch Organiser's Events
+    // 1. Fetch Organiser's Events (Created or Co-hosted, NOT where user is staff)
     const events = await Event.find({
       $or: [
         { createdBy: organiserId },
         { coHosts: organiserId },
-        { staff: organiserId },
       ],
+      staff: { $ne: organiserId },
     }).select("performance status").lean();
 
-    // 2. Fetch Organiser's Event Centers
+    // 2. Fetch Organiser's Event Centers (Created or Co-hosted, NOT where user is staff)
     const eventCenters = await EventCenter.find({
       $or: [
         { createdBy: organiserId },
         { coHosts: organiserId },
-        { staff: organiserId },
       ],
+      staff: { $ne: organiserId },
     }).select("performance status").lean();
 
     const allListings = [...events, ...eventCenters];

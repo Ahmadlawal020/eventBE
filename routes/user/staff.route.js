@@ -21,6 +21,7 @@ router.delete("/cancel/:id", staffController.cancelInvitation);
 router.get("/dashboard-stats", staffController.getStaffDashboardStats);
 router.get("/all-staff", staffController.getAllStaff);
 router.post("/remove", staffController.removeStaff);
+router.post("/leave/:invitationId", staffController.leaveStaff);
 
 // --- Dashboard & Profile Management ---
 router.get("/dashboard/stats", staffDashboardController.getOrganiserStaffStats);

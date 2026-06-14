@@ -335,7 +335,7 @@ const eventSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ["IN_PROGRESS", "ACTION_REQUIRED", "LISTED", "UNLISTED"],
+      enum: ["IN_PROGRESS", "ACTION_REQUIRED", "LISTED", "UNLISTED", "COMPLETED"],
       default: "IN_PROGRESS",
     },
 
@@ -373,6 +373,23 @@ const eventSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+
+/* ===================== AUTO-UNLIST PAST EVENTS ===================== */
+
+eventSchema.pre(/^find/, async function (next) {
+  try {
+    await mongoose.model("Event").updateMany(
+      {
+        status: { $in: ["LISTED", "ACTION_REQUIRED", "UNLISTED"] },
+        "schedule.to": { $lt: new Date() },
+      },
+      { $set: { status: "COMPLETED" } }
+    );
+  } catch (err) {
+    console.error("Error in event pre-find hook to mark completed:", err);
+  }
+  next();
+});
 
 /* ===================== HUMAN-READABLE LABEL ===================== */
 

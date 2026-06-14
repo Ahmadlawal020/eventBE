@@ -2,7 +2,7 @@ const EventCenter = require("../../models/user/eventCenter.schema");
 const User = require("../../models/user/user.schema");
 const mongoose = require("mongoose");
 const cloudinary = require("../../utils/cloudinary");
-const CoHostInvitation = require("../../models/user/coHostInvitation.schema");
+const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
 
 // ===================== CREATE EVENT CENTER =====================
 const createEventCenter = async (req, res) => {
@@ -49,7 +49,7 @@ const createEventCenter = async (req, res) => {
       entry,
       location,
       status: "IN_PROGRESS",
-      createdBy: req.user?.id || "68b6110236f2621324c21366",
+      createdBy: req.user.id,
       yourSpace,
       arrivalGuide,
     });
@@ -259,6 +259,27 @@ const updateEventCenter = async (req, res) => {
     }
 
     const updatePayload = { ...req.body };
+
+    // ===== Price unit consistency synchronization =====
+    if (updatePayload.basePrice && updatePayload.basePrice.unit) {
+      const newUnit = updatePayload.basePrice.unit;
+      if (updatePayload.weekendPrice) {
+        updatePayload.weekendPrice.unit = newUnit;
+      } else if (prevCenter.weekendPrice) {
+        updatePayload.weekendPrice = {
+          amount: prevCenter.weekendPrice.amount,
+          currency: prevCenter.weekendPrice.currency,
+          feeMode: prevCenter.weekendPrice.feeMode,
+          minDuration: prevCenter.weekendPrice.minDuration,
+          unit: newUnit,
+        };
+      }
+    } else if (updatePayload.weekendPrice) {
+      const targetUnit = prevCenter.basePrice?.unit;
+      if (targetUnit) {
+        updatePayload.weekendPrice.unit = targetUnit;
+      }
+    }
 
     // ===== Image handling =====
     if (Array.isArray(updatePayload.images)) {

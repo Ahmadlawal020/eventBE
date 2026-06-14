@@ -1,6 +1,6 @@
 const Event = require("../../models/user/event.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
-const CoHostInvitation = require("../../models/user/coHostInvitation.schema");
+const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
 
 /**
  * 📋 Get Aggregated Organiser Listings (My Events and My Event Centers)
@@ -41,9 +41,10 @@ const getOrganiserListings = async (req, res) => {
       return perms.includes("MANAGE_LISTING") || perms.includes("ALL_ACCESS");
     };
 
-    // 1️⃣ Fetch Organiser's Events (Created or Co-hosted)
+    // 1️⃣ Fetch Organiser's Events (Created or Co-hosted, but NOT where user is staff)
     const events = await Event.find({
       $or: [{ createdBy: userId }, { coHosts: userId }],
+      staff: { $ne: userId },
     })
       .select({
         title: 1,
@@ -83,9 +84,10 @@ const getOrganiserListings = async (req, res) => {
         };
       });
 
-    // 2️⃣ Fetch Organiser's Event Centers (Created or Co-hosted)
+    // 2️⃣ Fetch Organiser's Event Centers (Created or Co-hosted, but NOT where user is staff)
     const eventCenters = await EventCenter.find({
       $or: [{ createdBy: userId }, { coHosts: userId }],
+      staff: { $ne: userId },
     })
       .select({
         venueName: 1,

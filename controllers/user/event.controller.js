@@ -2,7 +2,7 @@ const Event = require("../../models/user/event.schema");
 const User = require("../../models/user/user.schema");
 const Ticket = require("../../models/user/eventTicket.schema");
 const mongoose = require("mongoose");
-const CoHostInvitation = require("../../models/user/coHostInvitation.schema");
+const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const cloudinary = require("../../utils/cloudinary");
 
 // 📌 Create Event
@@ -30,7 +30,7 @@ const createEvent = async (req, res) => {
       schedule,
       capacity,
       status: "IN_PROGRESS",
-      createdBy: req.user?.id || "68b6110236f2621324c21366", // fallback
+      createdBy: req.user.id,
       ticketGuide,
       arrivalGuide,
       performers,
@@ -236,6 +236,13 @@ const updateEvent = async (req, res) => {
       const user = await User.findById(req.user.id);
       const isVerified = user.isIdentityVerified && user.isPhoneVerified;
       updatePayload.status = isVerified ? "LISTED" : "ACTION_REQUIRED";
+    } else if (prevEvent.status === "COMPLETED" && updatePayload.schedule?.to) {
+      const newToDate = new Date(updatePayload.schedule.to);
+      if (newToDate > new Date()) {
+        const user = await User.findById(req.user.id);
+        const isVerified = user.isIdentityVerified && user.isPhoneVerified;
+        updatePayload.status = isVerified ? "LISTED" : "ACTION_REQUIRED";
+      }
     }
 
     const updatedEvent = await Event.findByIdAndUpdate(id, updatePayload, {

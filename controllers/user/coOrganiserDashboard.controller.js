@@ -1,5 +1,5 @@
 const User = require("../../models/user/user.schema");
-const CoHostInvitation = require("../../models/user/coHostInvitation.schema");
+const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const Event = require("../../models/user/event.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
 const mongoose = require("mongoose");
@@ -65,7 +65,7 @@ exports.getOrganiserCoHostStats = async (req, res) => {
 /**
  * 👥 Get All Co-Hosts
  */
-exports.getAllCoHosts = async (req, res) => {
+exports.getAllCoOrganisers = async (req, res) => {
   try {
     const organiserId = req.user.id;
 
@@ -115,7 +115,7 @@ exports.getAllCoHosts = async (req, res) => {
 /**
  * 👤 Get Detailed Co-Host Profile
  */
-exports.getCoHostDetailedProfile = async (req, res) => {
+exports.getCoOrganiserDetailedProfile = async (req, res) => {
   try {
     const { coHostId } = req.params;
     const organiserId = req.user.id;

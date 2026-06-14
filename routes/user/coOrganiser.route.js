@@ -4,15 +4,15 @@ const verifyJWT = require("../../middleware/verifyJWT");
 const {
   checkUserByEmail,
   inviteCoHost,
-  getMyCoHostInvitations,
+  getMyCoOrganiserInvitations,
   getInvitationById,
   respondToInvitation,
-  removeCoHost,
-  updateCoHostPermissions,
+  removeCoOrganiser,
+  updateCoOrganiserPermissions,
   getReceivedInvitations,
   cancelInvitation,
-} = require("../../controllers/user/coHost.controller");
-const coHostDashboardController = require("../../controllers/user/coHostDashboard.controller");
+} = require("../../controllers/user/coOrganiser.controller");
+const coOrganiserDashboardController = require("../../controllers/user/coOrganiserDashboard.controller");
 
 // All co-host routes require authentication
 router.use(verifyJWT);
@@ -36,7 +36,7 @@ router.post("/invite", inviteCoHost);
  * @desc    Get invitations sent by the host
  * @access  Private
  */
-router.get("/my-invitations", getMyCoHostInvitations);
+router.get("/my-invitations", getMyCoOrganiserInvitations);
 
 /**
  * @route   GET /api/co-hosts/received-invitations
@@ -71,20 +71,20 @@ router.delete("/invitations/:id", cancelInvitation);
  * @desc    Remove a co-host from a listing
  * @access  Private
  */
-router.delete("/remove", removeCoHost);
+router.delete("/remove", removeCoOrganiser);
 
 /**
  * @route   PATCH /api/co-hosts/permissions
  * @desc    Update permissions for an existing co-host
  * @access  Private
  */
-router.patch("/permissions", updateCoHostPermissions);
+router.patch("/permissions", updateCoOrganiserPermissions);
 
 // ==========================================
 // 📊 DASHBOARD & PROFILE
 // ==========================================
-router.get("/dashboard/stats", coHostDashboardController.getOrganiserCoHostStats);
-router.get("/all", coHostDashboardController.getAllCoHosts);
-router.get("/profile/:coHostId", coHostDashboardController.getCoHostDetailedProfile);
+router.get("/dashboard/stats", coOrganiserDashboardController.getOrganiserCoHostStats);
+router.get("/all", coOrganiserDashboardController.getAllCoOrganisers);
+router.get("/profile/:coHostId", coOrganiserDashboardController.getCoOrganiserDetailedProfile);
 
 module.exports = router;

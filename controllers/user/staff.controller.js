@@ -1,7 +1,7 @@
 const User = require("../../models/user/user.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
 const Notification = require("../../models/user/notification.schema");
-const CoHostInvitation = require("../../models/user/coHostInvitation.schema");
+const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const Event = require("../../models/user/event.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
 
@@ -279,7 +279,7 @@ const removeStaff = async (req, res) => {
     const { listingId, listingType, staffId } = req.body;
     const organiserId = req.user.id;
 
-    const CoHostInvitation = require("../../models/user/coHostInvitation.schema");
+    const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
     const Event = require("../../models/user/event.schema");
     const EventCenter = require("../../models/user/eventCenter.schema");
 
@@ -531,6 +531,78 @@ const getAllStaff = async (req, res) => {
   }
 };
 
+/**
+ * 🚪 Leave Staff — Staff member removes themselves
+ */
+const leaveStaff = async (req, res) => {
+  try {
+    const { invitationId } = req.params;
+    const userId = req.user.id;
+
+    const invitation = await StaffInvitation.findOne({
+      _id: invitationId,
+      staff: userId,
+      status: "ACCEPTED",
+    });
+
+    if (!invitation) {
+      return res.status(404).json({
+        success: false,
+        message: "Invitation not found or you are not the staff member",
+      });
+    }
+
+    // Remove the user from every listing in this invitation
+    for (const item of invitation.listings) {
+      if (item.listingType === "Event") {
+        await Event.findByIdAndUpdate(item.listingId, {
+          $pull: { staff: userId },
+        });
+      } else if (item.listingType === "EventCenter") {
+        await EventCenter.findByIdAndUpdate(item.listingId, {
+          $pull: { staff: userId },
+        });
+      }
+    }
+
+    // Mark invitation as LEFT
+    invitation.status = "LEFT";
+    await invitation.save();
+
+    // If the user has no other ACCEPTED staff invitations, remove the staff role
+    const otherActive = await StaffInvitation.countDocuments({
+      staff: userId,
+      status: "ACCEPTED",
+    });
+
+    if (otherActive === 0) {
+      const user = await User.findById(userId).select("roles");
+      if (user && user.roles.includes("staff")) {
+        user.roles = user.roles.filter((r) => r !== "staff");
+        await user.save();
+      }
+    }
+
+    // Notify the organiser
+    await Notification.create({
+      recipient: invitation.organiser,
+      sender: userId,
+      type: "STAFF_INVITATION",
+      title: "Staff Member Left",
+      message: "A staff member has opted out of their role.",
+      referenceId: invitation._id,
+    });
+
+    res.json({
+      success: true,
+      message: "You have successfully left the staff role",
+    });
+  } catch (error) {
+    console.error("[LEAVE STAFF] ERROR:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
 module.exports = {
   checkUserByEmail,
   inviteStaff,
@@ -540,6 +612,7 @@ module.exports = {
   respondToInvitation,
   cancelInvitation,
   removeStaff,
+  leaveStaff,
   getStaffDashboardStats,
   getAllStaff,
 };

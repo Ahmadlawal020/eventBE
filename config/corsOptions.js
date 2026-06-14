@@ -1,21 +1,21 @@
-// const allowedOrigins = require("./allowedOrigins");
+const defaultAllowedOrigins = require("./allowedOrigins");
 
-// const corsOptions = {
-//   origin: (origin, callback) => {
-//     if (allowedOrigins.indexOf(origin) !== -1 || !origin) {
-//       callback(null, true);
-//     } else {
-//       callback(new Error("Not allowed by CORS"));
-//     }
-//   },
-//   credentials: true,
-//   optionsSuccessStatus: 200,
-// };
+const envOrigins = (process.env.CORS_ALLOWED_ORIGINS || "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
-// module.exports = corsOptions;
+const allowedOrigins = [...new Set([...defaultAllowedOrigins, ...envOrigins])];
+
 const corsOptions = {
-  origin: true, // allow all origins
-  credentials: true, // allow cookies/auth headers
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    return callback(new Error("Not allowed by CORS"));
+  },
+  credentials: true,
   optionsSuccessStatus: 200,
 };
 
