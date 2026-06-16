@@ -300,7 +300,7 @@ const eventCenterSchema = new mongoose.Schema(
     bookingSettings: {
       type: String,
       enum: ["REVIEW", "INSTANT"],
-      default: "REVIEW",
+      default: "INSTANT",
     },
 
     basePrice: {
@@ -310,7 +310,7 @@ const eventCenterSchema = new mongoose.Schema(
       },
       currency: {
         type: String,
-        default: "USD",
+        default: "NGN",
       },
       unit: {
         type: String,
@@ -333,7 +333,7 @@ const eventCenterSchema = new mongoose.Schema(
       },
       currency: {
         type: String,
-        default: "USD",
+        default: "NGN",
       },
       unit: {
         type: String,
