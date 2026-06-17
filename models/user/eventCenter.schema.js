@@ -249,7 +249,8 @@ const eventCenterSchema = new mongoose.Schema(
       unavailableDates: [
         {
           date: { type: Date, required: true },
-          type: { type: String, enum: ["BLOCKED", "MANUAL"], default: "BLOCKED" },
+          type: { type: String, enum: ["BLOCKED", "MANUAL", "BOOKED"], default: "BLOCKED" },
+          bookingId: { type: String },
           clientName: String,
           clientPhone: String,
           clientEmail: String,
@@ -267,6 +268,18 @@ const eventCenterSchema = new mongoose.Schema(
           date: { type: Date, required: true },
           startTime: { type: String, required: true },
           endTime: { type: String, required: true },
+          type: { type: String, enum: ["BLOCKED", "MANUAL", "BOOKED"], default: "BLOCKED" },
+          bookingId: { type: String },
+          clientName: String,
+          clientPhone: String,
+          clientEmail: String,
+          totalPrice: Number,
+          depositAmount: Number,
+          paymentStatus: {
+            type: String,
+            enum: ["pending", "partially_paid", "paid"],
+            default: "pending",
+          },
         },
       ],
       customPrices: [

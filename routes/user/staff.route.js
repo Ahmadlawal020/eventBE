@@ -48,6 +48,7 @@ router.get("/bookings/details/:bookingId", staffBookingController.getBookingDeta
 router.get("/bookings/:eventCenterId", staffBookingController.getEventCenterBookings);
 router.post("/bookings/:bookingId/check-in", staffBookingController.manualCheckIn);
 router.post("/bookings/:bookingId/cancel", staffBookingController.cancelBooking);
+router.patch("/bookings/:bookingId/reschedule", staffBookingController.rescheduleBooking);
 
 // --- Staff Event Ticket Management ---
 router.get("/tickets/search/:eventId", staffTicketController.searchStaffTickets);

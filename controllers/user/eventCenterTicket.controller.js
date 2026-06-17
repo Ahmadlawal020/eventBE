@@ -5,6 +5,27 @@ const mongoose = require("mongoose");
 const paystackService = require("../../services/paystack.service");
 const crypto = require("crypto");
 
+/**
+ * Check if a proposed hourly slot overlaps with existing booked slots
+ * @param {Object} newSlot - { date, startTime, endTime }
+ * @param {Array} existingSlots - array of existing unavailableSlots entries
+ * @param {String} excludeBookingId - bookingId to exclude from conflict check
+ * @returns {Boolean} true if conflict found
+ */
+function hasSlotConflict(newSlot, existingSlots, excludeBookingId) {
+  const newDateStr = new Date(newSlot.date).toISOString().split("T")[0];
+  const newStart = newSlot.startTime;
+  const newEnd = newSlot.endTime;
+
+  return existingSlots.some((existing) => {
+    const existingDateStr = new Date(existing.date).toISOString().split("T")[0];
+    if (existingDateStr !== newDateStr) return false;
+    if (excludeBookingId && String(existing.bookingId) === String(excludeBookingId)) return false;
+    if (existing.type !== "BOOKED" && existing.type !== "MANUAL") return false;
+    return newStart < existing.endTime && newEnd > existing.startTime;
+  });
+}
+
 // ============================================================================
 // QR PAYLOAD SIGNING — Same pattern as event tickets
 // ============================================================================
@@ -157,6 +178,72 @@ const createTicket = async (req, res) => {
 
       const savedTicket = await newTicket.save();
 
+      // Update event center availability for transfer bookings
+      const eventCenterDoc = await EventCenter.findById(eventCenterId);
+      if (eventCenterDoc) {
+        if (!eventCenterDoc.availability) {
+          eventCenterDoc.availability = {
+            unavailableDates: [],
+            unavailableSlots: [],
+          };
+        }
+
+        if (bookingUnit === "day") {
+          const datesToMark = (selectedDates || []).map(
+            (d) => new Date(d.date).toISOString().split("T")[0]
+          );
+          const currentUnavailableStrings = (
+            eventCenterDoc.availability.unavailableDates || []
+          ).map((d) => new Date(d.date).toISOString().split("T")[0]);
+
+          const newDateStrings = datesToMark.filter(
+            (d) => !currentUnavailableStrings.includes(d)
+          );
+
+          newDateStrings.forEach((dateStr) => {
+            eventCenterDoc.availability.unavailableDates.push({
+              date: new Date(dateStr),
+              type: "BOOKED",
+              bookingId: String(savedTicket._id),
+              clientName: fullName || savedTicket.guestDetails?.fullName || "",
+              clientPhone: phoneNumber || savedTicket.guestDetails?.phoneNumber || "",
+              clientEmail: savedTicket.guestDetails?.email || "",
+            });
+          });
+        } else if (bookingUnit === "hour") {
+          // Check for overlapping slots before adding
+          const existingSlots = eventCenterDoc.availability.unavailableSlots || [];
+          const conflictingSlots = (selectedDates || []).filter((slot) =>
+            hasSlotConflict(slot, existingSlots, null)
+          );
+
+          if (conflictingSlots.length > 0) {
+            return res.status(400).json({
+              success: false,
+              message: "One or more time slots conflict with an existing booking",
+            });
+          }
+
+          const newSlots = (selectedDates || []).map((slot) => ({
+            date: new Date(slot.date),
+            startTime: slot.startTime,
+            endTime: slot.endTime,
+            type: "BOOKED",
+            bookingId: String(savedTicket._id),
+            clientName: fullName || savedTicket.guestDetails?.fullName || "",
+            clientPhone: phoneNumber || savedTicket.guestDetails?.phoneNumber || "",
+            clientEmail: savedTicket.guestDetails?.email || "",
+          }));
+
+          if (!eventCenterDoc.availability.unavailableSlots) {
+            eventCenterDoc.availability.unavailableSlots = [];
+          }
+          eventCenterDoc.availability.unavailableSlots.push(...newSlots);
+        }
+
+        await eventCenterDoc.save();
+      }
+
       return res.status(201).json({
         success: true,
         message: "Booking request submitted (Manual transfer)",
@@ -293,14 +380,36 @@ const verifyPayment = async (req, res) => {
         newDateStrings.forEach((dateStr) => {
           eventCenter.availability.unavailableDates.push({
             date: new Date(dateStr),
-            type: "BLOCKED",
+            type: "BOOKED",
+            bookingId: String(ticket._id),
+            clientName: fullName || ticket.guestDetails?.fullName || "",
+            clientPhone: phoneNumber || ticket.guestDetails?.phoneNumber || "",
+            clientEmail: ticket.guestDetails?.email || paystackData?.customer?.email || "",
           });
         });
       } else if (ticket.bookingUnit === "hour") {
+        // Check for overlapping slots before adding
+        const existingSlots = eventCenter.availability.unavailableSlots || [];
+        const conflictingSlots = (ticket.selectedDates || []).filter((slot) =>
+          hasSlotConflict(slot, existingSlots, null)
+        );
+
+        if (conflictingSlots.length > 0) {
+          return res.status(400).json({
+            success: false,
+            message: "One or more time slots conflict with an existing booking",
+          });
+        }
+
         const newSlots = (ticket.selectedDates || []).map((slot) => ({
           date: new Date(slot.date),
           startTime: slot.startTime,
           endTime: slot.endTime,
+          type: "BOOKED",
+          bookingId: String(ticket._id),
+          clientName: fullName || ticket.guestDetails?.fullName || "",
+          clientPhone: phoneNumber || ticket.guestDetails?.phoneNumber || "",
+          clientEmail: ticket.guestDetails?.email || paystackData?.customer?.email || "",
         }));
 
         if (!eventCenter.availability.unavailableSlots) {
