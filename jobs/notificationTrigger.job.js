@@ -1,5 +1,5 @@
 const { CronJob } = require("cron");
-const Ticket = require("../models/user/eventTicket.schema");
+const Ticket = require("../models/user/eventTicketType.schema");
 const Event = require("../models/user/event.schema");
 const Notification = require("../models/user/notification.schema");
 

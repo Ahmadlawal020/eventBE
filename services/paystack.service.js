@@ -1,114 +1,56 @@
-const axios = require("axios");
+/**
+ * @deprecated Use `require("../../services/payment").getPaymentGateway()` instead.
+ *
+ * This file is a backward-compatible wrapper around the new payment adapter layer.
+ * All new code should import from `services/payment` instead.
+ */
+const { getPaymentGateway } = require("./payment");
 
-const initializeTransaction = async (data) => {
-  if (!process.env.PAYSTACK_SECRET_KEY) {
-    throw new Error("PAYSTACK_SECRET_KEY is not set in environment variables.");
-  }
+const gateway = getPaymentGateway("paystack");
 
-  const response = await axios.post(
-    "https://api.paystack.co/transaction/initialize",
-    {
-      email: data.email,
-      amount: Math.round(data.amount * 100), // Convert to kobo
-      reference: data.reference,
-      callback_url: data.callback_url,
-      metadata: data.metadata,
-      subaccount: data.subaccount,
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-        "Content-Type": "application/json",
-      },
-    }
-  );
-
-  if (!response.data.status) {
-    throw new Error(response.data.message || "Paystack initialization failed.");
-  }
-
-  return response.data.data;
-};
-
-const verifyTransaction = async (reference) => {
-  if (!process.env.PAYSTACK_SECRET_KEY) {
-    throw new Error("PAYSTACK_SECRET_KEY is not set in environment variables.");
-  }
-
-  const response = await axios.get(
-    `https://api.paystack.co/transaction/verify/${reference}`,
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-      },
-    }
-  );
-
-  if (!response.data.status) {
-    throw new Error(response.data.message || "Payment verification failed.");
-  }
-
-  // Return full transaction data (status can be 'success', 'abandoned', 'pending', etc.)
-  return response.data.data;
-};
-
-// Subaccounts and Bank Transfer methods
-const createSubaccount = async (data) => {
-  if (!process.env.PAYSTACK_SECRET_KEY) throw new Error("PAYSTACK_SECRET_KEY missing");
-  const response = await axios.post(
-    "https://api.paystack.co/subaccount",
-    {
-      business_name: data.business_name,
-      settlement_bank: data.settlement_bank,
-      account_number: data.account_number,
-      percentage_charge: data.percentage_charge || 10, // Default 10% platform fee
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-        "Content-Type": "application/json",
-      },
-    }
-  );
-  if (!response.data.status) throw new Error(response.data.message || "Subaccount creation failed.");
-  return response.data.data;
-};
-
-const getBanks = async () => {
-  if (!process.env.PAYSTACK_SECRET_KEY) throw new Error("PAYSTACK_SECRET_KEY missing");
-  const response = await axios.get("https://api.paystack.co/bank?country=nigeria", {
-    headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` },
+const initializeTransaction = (data) => {
+  return gateway.initializePayment({
+    email: data.email,
+    amount: data.amount,
+    reference: data.reference,
+    callbackUrl: data.callback_url,
+    metadata: data.metadata,
+    subaccount: data.subaccount,
   });
-  return response.data.data;
 };
 
-const resolveAccountNumber = async (account_number, bank_code) => {
-  if (!process.env.PAYSTACK_SECRET_KEY) throw new Error("PAYSTACK_SECRET_KEY missing");
-  const response = await axios.get(
-    `https://api.paystack.co/bank/resolve?account_number=${account_number}&bank_code=${bank_code}`,
-    {
-      headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` },
-    }
-  );
-  return response.data.data;
+const verifyTransaction = (reference) => {
+  return gateway.verifyPayment(reference);
 };
 
-const deactivateSubaccount = async (subaccountCode) => {
-  if (!process.env.PAYSTACK_SECRET_KEY) throw new Error("PAYSTACK_SECRET_KEY missing");
-  const response = await axios.put(
-    `https://api.paystack.co/subaccount/${subaccountCode}`,
-    {
-      active: false,
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-        "Content-Type": "application/json",
-      },
-    }
-  );
-  if (!response.data.status) throw new Error(response.data.message || "Subaccount deactivation failed.");
-  return response.data.data;
+const createSubaccount = (data) => {
+  return gateway.createVendorAccount({
+    businessName: data.business_name,
+    bankCode: data.settlement_bank,
+    accountNumber: data.account_number,
+    platformFeePercent: data.percentage_charge || 10,
+  });
+};
+
+const getBanks = () => {
+  return gateway.getBanks("nigeria");
+};
+
+const resolveAccountNumber = (account_number, bank_code) => {
+  return gateway.resolveBankAccount(account_number, bank_code);
+};
+
+const deactivateSubaccount = (subaccountCode) => {
+  return gateway.deactivateVendorAccount(subaccountCode);
+};
+
+const refundTransaction = (reference) => {
+  return gateway.refundPayment(reference);
+};
+
+const initiateTransfer = ({ amount, recipient, reference, reason }) => {
+  // Not yet implemented in adapter — kept for backward compat
+  throw new Error("initiateTransfer is not yet implemented in the payment adapter.");
 };
 
 module.exports = {
@@ -118,4 +60,6 @@ module.exports = {
   getBanks,
   resolveAccountNumber,
   deactivateSubaccount,
+  refundTransaction,
+  initiateTransfer,
 };

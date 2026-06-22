@@ -1,5 +1,5 @@
 const EventBooking = require("../../models/user/eventBooking.schema");
-const EventCenterTicket = require("../../models/user/eventCenterTicket.schema");
+const EventCenterBooking = require("../../models/user/eventCenterBooking.schema");
 const { recordAdminAction } = require("../../services/admin/adminAudit.service");
 
 const getBookings = async (req, res) => {
@@ -28,7 +28,7 @@ const getBookings = async (req, res) => {
 
     if (type === "all" || type === "event-center") {
       tasks.push(
-        EventCenterTicket.find(query)
+        EventCenterBooking.find(query)
           .populate("buyer", "firstName surname email")
           .populate("organiser", "firstName surname email")
           .populate("eventCenter", "venueName createdBy")
@@ -42,7 +42,7 @@ const getBookings = async (req, res) => {
 
     const [eventCount, venueCount, ...bookingGroups] = await Promise.all([
       type === "event-center" ? 0 : EventBooking.countDocuments(query),
-      type === "event" ? 0 : EventCenterTicket.countDocuments(query),
+      type === "event" ? 0 : EventCenterBooking.countDocuments(query),
       ...tasks,
     ]);
 
@@ -70,8 +70,8 @@ const updateBookingStatus = async (req, res) => {
   try {
     const { type, id } = req.params;
     const { status, paymentStatus, reason } = req.body;
-    const Model = type === "event-center" ? EventCenterTicket : EventBooking;
-    const targetType = type === "event-center" ? "EventCenterTicket" : "EventBooking";
+    const Model = type === "event-center" ? EventCenterBooking : EventBooking;
+    const targetType = type === "event-center" ? "EventCenterBooking" : "EventBooking";
 
     const booking = await Model.findById(id);
     if (!booking) {
@@ -112,8 +112,8 @@ const updateBookingStatus = async (req, res) => {
 const getBookingDetail = async (req, res) => {
   try {
     const { type, id } = req.params;
-    const Model = type === "event-center" ? EventCenterTicket : EventBooking;
-    const targetType = type === "event-center" ? "EventCenterTicket" : "EventBooking";
+    const Model = type === "event-center" ? EventCenterBooking : EventBooking;
+    const targetType = type === "event-center" ? "EventCenterBooking" : "EventBooking";
 
     const booking = await Model.findById(id)
       .populate("buyer", "firstName surname email phoneNumber profilePicture")

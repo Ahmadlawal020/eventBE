@@ -249,12 +249,33 @@ const eventCenterSchema = new mongoose.Schema(
       unavailableDates: [
         {
           date: { type: Date, required: true },
-          type: { type: String, enum: ["BLOCKED", "MANUAL", "BOOKED"], default: "BLOCKED" },
+          type: {
+            type: String,
+            enum: ["BLOCKED", "MANUAL", "BOOKED"],
+            default: "BLOCKED",
+          },
           bookingId: { type: String },
-          clientName: String,
+          clientName: {
+            type: String,
+            validate: {
+              validator: function (v) {
+                return this.type !== "MANUAL" || (v && v.trim().length > 0);
+              },
+              message: "clientName is required for manual bookings",
+            },
+          },
           clientPhone: String,
           clientEmail: String,
-          totalPrice: Number,
+          totalPrice: {
+            type: Number,
+            validate: {
+              validator: function (v) {
+                return this.type !== "MANUAL" || (v != null && v > 0);
+              },
+              message:
+                "totalPrice must be a positive number for manual bookings",
+            },
+          },
           depositAmount: Number,
           paymentStatus: {
             type: String,
@@ -268,12 +289,33 @@ const eventCenterSchema = new mongoose.Schema(
           date: { type: Date, required: true },
           startTime: { type: String, required: true },
           endTime: { type: String, required: true },
-          type: { type: String, enum: ["BLOCKED", "MANUAL", "BOOKED"], default: "BLOCKED" },
+          type: {
+            type: String,
+            enum: ["BLOCKED", "MANUAL", "BOOKED"],
+            default: "BLOCKED",
+          },
           bookingId: { type: String },
-          clientName: String,
+          clientName: {
+            type: String,
+            validate: {
+              validator: function (v) {
+                return this.type !== "MANUAL" || (v && v.trim().length > 0);
+              },
+              message: "clientName is required for manual bookings",
+            },
+          },
           clientPhone: String,
           clientEmail: String,
-          totalPrice: Number,
+          totalPrice: {
+            type: Number,
+            validate: {
+              validator: function (v) {
+                return this.type !== "MANUAL" || (v != null && v > 0);
+              },
+              message:
+                "totalPrice must be a positive number for manual bookings",
+            },
+          },
           depositAmount: Number,
           paymentStatus: {
             type: String,
@@ -290,12 +332,12 @@ const eventCenterSchema = new mongoose.Schema(
       ],
       advanceNotice: {
         days: { type: Number, enum: [0, 1, 2, 3, 4, 5, 6, 7], default: 0 },
-        sameDayCutoffTime: { type: String, default: "00:00" },
+        sameDayCutoffTime: { type: String },
       },
-      preparationTime: { type: Number, enum: [0, 1, 2], default: 0 },
+      preparationTime: { type: Number, enum: [0, 1, 2, 3], default: 0 },
       operationalHours: {
-        open: { type: String, default: "06:00" },
-        close: { type: String, default: "00:00" },
+        open: { type: String },
+        close: { type: String },
       },
     },
 

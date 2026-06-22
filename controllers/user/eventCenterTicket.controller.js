@@ -1,88 +1,50 @@
-const EventCenterTicket = require("../../models/user/eventCenterTicket.schema");
+const EventCenterBooking = require("../../models/user/eventCenterBooking.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
 const User = require("../../models/user/user.schema");
+const Notification = require("../../models/user/notification.schema");
+const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
+const StaffInvitation = require("../../models/user/staffInvitation.schema");
 const mongoose = require("mongoose");
-const paystackService = require("../../services/paystack.service");
 const crypto = require("crypto");
+const { getPaymentGateway } = require("../../services/payment");
+const { generateTicketNumber, generateQRPayload, verifyQRPayload } = require("../../utils/qr");
+const { hasSlotConflict } = require("../../utils/slotConflict");
+const { logBookingHistory } = require("./bookingHistory.controller");
+
+const gateway = getPaymentGateway();
 
 /**
- * Check if a proposed hourly slot overlaps with existing booked slots
- * @param {Object} newSlot - { date, startTime, endTime }
- * @param {Array} existingSlots - array of existing unavailableSlots entries
- * @param {String} excludeBookingId - bookingId to exclude from conflict check
- * @returns {Boolean} true if conflict found
+ * Check if a user is authorized to scan/verify tickets for an event center.
+ * Owner: always has access
+ * Co-organiser: SCAN_TICKET or ALL_ACCESS
+ * Staff: SCAN_TICKET
  */
-function hasSlotConflict(newSlot, existingSlots, excludeBookingId) {
-  const newDateStr = new Date(newSlot.date).toISOString().split("T")[0];
-  const newStart = newSlot.startTime;
-  const newEnd = newSlot.endTime;
+async function authorizeScanAccess(userId, eventCenterId) {
+  const eventCenter = await EventCenter.findById(eventCenterId).select("createdBy").lean();
+  if (!eventCenter) return { authorized: false, error: "Event center not found." };
 
-  return existingSlots.some((existing) => {
-    const existingDateStr = new Date(existing.date).toISOString().split("T")[0];
-    if (existingDateStr !== newDateStr) return false;
-    if (excludeBookingId && String(existing.bookingId) === String(excludeBookingId)) return false;
-    if (existing.type !== "BOOKED" && existing.type !== "MANUAL") return false;
-    return newStart < existing.endTime && newEnd > existing.startTime;
-  });
+  if (String(eventCenter.createdBy) === userId) return { authorized: true };
+
+  const coHostInvite = await CoHostInvitation.findOne({
+    coHost: userId,
+    host: eventCenter.createdBy,
+    status: "ACCEPTED",
+    "listings.listingId": eventCenter._id,
+    permissions: { $in: ["SCAN_TICKET", "ALL_ACCESS"] },
+  }).lean();
+  if (coHostInvite) return { authorized: true };
+
+  const staffInvite = await StaffInvitation.findOne({
+    staff: userId,
+    organiser: eventCenter.createdBy,
+    status: "ACCEPTED",
+    "listings.listingId": eventCenter._id,
+    permissions: "SCAN_TICKET",
+  }).lean();
+  if (staffInvite) return { authorized: true };
+
+  return { authorized: false, error: "Not authorized to scan tickets for this venue." };
 }
-
-// ============================================================================
-// QR PAYLOAD SIGNING — Same pattern as event tickets
-// ============================================================================
-const QR_SECRET =
-  process.env.QR_SIGNING_SECRET || "mnb-default-secret-change-in-production";
-
-/**
- * Generate a cryptographically unique ticket number.
- * Format: MNS-XXXXXXXX-XXXX (16 hex chars = 8 bytes = 2^64 combinations)
- * MNS = Munasaba Space (to distinguish from MNB event tickets)
- */
-const generateTicketNumber = () => {
-  const hex = crypto.randomBytes(8).toString("hex").toUpperCase();
-  return `MNS-${hex.slice(0, 8)}-${hex.slice(8)}`;
-};
-
-/**
- * Generate a HMAC-signed QR payload for tamper-proof verification.
- */
-const generateQRPayload = (ticketNumber, eventCenterId) => {
-  const payload = {
-    tn: ticketNumber,
-    ecid: eventCenterId.toString(), // event center ID
-    ts: Date.now(),
-    v: 1,
-    type: "EVENT_CENTER", // distinguish from event tickets
-  };
-
-  const dataString = JSON.stringify(payload);
-  const signature = crypto
-    .createHmac("sha256", QR_SECRET)
-    .update(dataString)
-    .digest("hex")
-    .slice(0, 12);
-
-  return JSON.stringify({ ...payload, sig: signature });
-};
-
-/**
- * Verify the HMAC signature of a scanned QR payload.
- */
-const verifyQRPayload = (qrString) => {
-  try {
-    const parsed = JSON.parse(qrString);
-    const { sig, ...data } = parsed;
-
-    const expectedSig = crypto
-      .createHmac("sha256", QR_SECRET)
-      .update(JSON.stringify(data))
-      .digest("hex")
-      .slice(0, 12);
-
-    return { valid: sig === expectedSig, data: parsed };
-  } catch {
-    return { valid: false, data: null };
-  }
-};
 
 // ===================== CREATE TICKET (PENDING) =====================
 const createTicket = async (req, res) => {
@@ -111,6 +73,43 @@ const createTicket = async (req, res) => {
         .json({ success: false, message: "Event Center not found." });
     }
 
+    // 2b. Validate selected dates are still available
+    if (bookingUnit === "day" && selectedDates && selectedDates.length > 0) {
+      const requestedDates = selectedDates.map(d =>
+        new Date(d.date).toISOString().split("T")[0]
+      );
+      const blockedDates = (eventCenter.availability?.unavailableDates || [])
+        .filter(d => d.type === "BOOKED" || d.type === "BLOCKED" || d.type === "MANUAL")
+        .map(d => new Date(d.date).toISOString().split("T")[0]);
+
+      const conflicts = requestedDates.filter(d => blockedDates.includes(d));
+      if (conflicts.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: "One or more selected dates are no longer available. Please choose different dates.",
+        });
+      }
+    }
+
+    // 2c. Prevent duplicate pending bookings from rapid double-taps
+    const existingPending = await EventCenterBooking.findOne({
+      buyer: buyerId,
+      eventCenter: eventCenterId,
+      paymentStatus: "PENDING",
+      status: "ACTIVE",
+    }).sort({ createdAt: -1 });
+
+    if (existingPending) {
+      const ageMs = Date.now() - new Date(existingPending.createdAt).getTime();
+      if (ageMs < 5 * 60 * 1000) {
+        return res.status(201).json({
+          success: true,
+          message: "You already have a pending booking for this venue.",
+          data: { reference: existingPending.paymentReference },
+        });
+      }
+    }
+
     // 3. Initialize logic based on payment method
     const reference = `MNS-${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
     const { paymentMethod } = req.body;
@@ -118,15 +117,19 @@ const createTicket = async (req, res) => {
     if (paymentMethod === "paystack" || !paymentMethod) {
       // Get the authentic event center owner's subaccount details
       const owner = await User.findById(eventCenter.createdBy).select(
-        "paystackSubaccountCode",
+        "vendorAccountCode",
       );
 
+      const isReviewMode = eventCenter.bookingSettings === "REVIEW";
+
       // Initialize Paystack Transaction via Service
-      const paystackData = await paystackService.initializeTransaction({
+      // For REVIEW mode: skip subaccount so payment goes to platform account (held until organizer accepts)
+      // For INSTANT mode: use subaccount for split payment to organizer
+      const paymentData = await gateway.initializePayment({
         email,
         amount: totalPrice.amount,
         reference,
-        subaccount: owner?.paystackSubaccountCode || undefined,
+        subaccount: isReviewMode ? undefined : (owner?.vendorAccountCode || undefined),
         metadata: {
           eventCenterId,
           organiserId: eventCenter.createdBy.toString(), // Securely bind the database owner ID
@@ -138,10 +141,11 @@ const createTicket = async (req, res) => {
           fullName,
           phoneNumber,
           type: "EVENT_CENTER",
+          bookingMode: isReviewMode ? "REVIEW" : "INSTANT",
         },
       });
 
-      const { authorization_url, access_code } = paystackData;
+      const { authorization_url, access_code } = paymentData;
 
       return res.status(201).json({
         success: true,
@@ -153,11 +157,11 @@ const createTicket = async (req, res) => {
         },
       });
     } else if (paymentMethod === "transfer") {
-      // Generate ticket number and QR for manual transfer bookings
-      const ticketNumber = generateTicketNumber();
-      const qrPayload = generateQRPayload(ticketNumber, eventCenterId);
+      const isReviewModeTransfer = eventCenter.bookingSettings === "REVIEW";
 
-      const newTicket = new EventCenterTicket({
+      // For REVIEW mode: create as PENDING_REVIEW, no ticket/QR
+      // For INSTANT mode: generate ticket number and QR immediately
+      const ticketData = {
         buyer: buyerId,
         organiser: eventCenter.createdBy,
         eventCenter: eventCenterId,
@@ -170,79 +174,115 @@ const createTicket = async (req, res) => {
         bookingUnit,
         duration,
         totalPrice,
-        paystackReference: reference,
+        paymentReference: reference,
         paymentStatus: "PENDING",
-        ticketNumber,
-        qrPayload,
-      });
+      };
+
+      if (isReviewModeTransfer) {
+        ticketData.status = "PENDING_REVIEW";
+        ticketData.bookingMode = "REVIEW";
+        ticketData.reviewDeadline = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      } else {
+        ticketData.ticketNumber = generateTicketNumber("MNS");
+        ticketData.qrPayload = generateQRPayload(ticketData.ticketNumber, eventCenterId, "EVENT_CENTER");
+      }
+
+      const newTicket = new EventCenterBooking(ticketData);
 
       const savedTicket = await newTicket.save();
 
-      // Update event center availability for transfer bookings
+      // Update event center availability for transfer bookings (both INSTANT and REVIEW modes)
       const eventCenterDoc = await EventCenter.findById(eventCenterId);
-      if (eventCenterDoc) {
-        if (!eventCenterDoc.availability) {
-          eventCenterDoc.availability = {
-            unavailableDates: [],
-            unavailableSlots: [],
-          };
-        }
+        if (eventCenterDoc) {
+          if (!eventCenterDoc.availability) {
+            eventCenterDoc.availability = {
+              unavailableDates: [],
+              unavailableSlots: [],
+            };
+          }
 
-        if (bookingUnit === "day") {
-          const datesToMark = (selectedDates || []).map(
-            (d) => new Date(d.date).toISOString().split("T")[0]
-          );
-          const currentUnavailableStrings = (
-            eventCenterDoc.availability.unavailableDates || []
-          ).map((d) => new Date(d.date).toISOString().split("T")[0]);
+          if (bookingUnit === "day") {
+            const datesToMark = (selectedDates || []).map(
+              (d) => new Date(d.date).toISOString().split("T")[0]
+            );
+            const currentUnavailableStrings = (
+              eventCenterDoc.availability.unavailableDates || []
+            ).map((d) => new Date(d.date).toISOString().split("T")[0]);
 
-          const newDateStrings = datesToMark.filter(
-            (d) => !currentUnavailableStrings.includes(d)
-          );
+            const newDateStrings = datesToMark.filter(
+              (d) => !currentUnavailableStrings.includes(d)
+            );
 
-          newDateStrings.forEach((dateStr) => {
-            eventCenterDoc.availability.unavailableDates.push({
-              date: new Date(dateStr),
+            newDateStrings.forEach((dateStr) => {
+              eventCenterDoc.availability.unavailableDates.push({
+                date: new Date(dateStr),
+                type: "BOOKED",
+                bookingId: String(savedTicket._id),
+                clientName: fullName || savedTicket.guestDetails?.fullName || "",
+                clientPhone: phoneNumber || savedTicket.guestDetails?.phoneNumber || "",
+                clientEmail: savedTicket.guestDetails?.email || "",
+              });
+            });
+          } else if (bookingUnit === "hour") {
+            // Check for overlapping slots before adding
+            const existingSlots = eventCenterDoc.availability.unavailableSlots || [];
+            const conflictingSlots = (selectedDates || []).filter((slot) =>
+              hasSlotConflict(slot, existingSlots, null)
+            );
+
+            if (conflictingSlots.length > 0) {
+              return res.status(400).json({
+                success: false,
+                message: "One or more time slots conflict with an existing booking",
+              });
+            }
+
+            const newSlots = (selectedDates || []).map((slot) => ({
+              date: new Date(slot.date),
+              startTime: slot.startTime,
+              endTime: slot.endTime,
               type: "BOOKED",
               bookingId: String(savedTicket._id),
               clientName: fullName || savedTicket.guestDetails?.fullName || "",
               clientPhone: phoneNumber || savedTicket.guestDetails?.phoneNumber || "",
               clientEmail: savedTicket.guestDetails?.email || "",
-            });
-          });
-        } else if (bookingUnit === "hour") {
-          // Check for overlapping slots before adding
-          const existingSlots = eventCenterDoc.availability.unavailableSlots || [];
-          const conflictingSlots = (selectedDates || []).filter((slot) =>
-            hasSlotConflict(slot, existingSlots, null)
-          );
+            }));
 
-          if (conflictingSlots.length > 0) {
-            return res.status(400).json({
-              success: false,
-              message: "One or more time slots conflict with an existing booking",
-            });
+            if (!eventCenterDoc.availability.unavailableSlots) {
+              eventCenterDoc.availability.unavailableSlots = [];
+            }
+            eventCenterDoc.availability.unavailableSlots.push(...newSlots);
           }
 
-          const newSlots = (selectedDates || []).map((slot) => ({
-            date: new Date(slot.date),
-            startTime: slot.startTime,
-            endTime: slot.endTime,
-            type: "BOOKED",
-            bookingId: String(savedTicket._id),
-            clientName: fullName || savedTicket.guestDetails?.fullName || "",
-            clientPhone: phoneNumber || savedTicket.guestDetails?.phoneNumber || "",
-            clientEmail: savedTicket.guestDetails?.email || "",
-          }));
-
-          if (!eventCenterDoc.availability.unavailableSlots) {
-            eventCenterDoc.availability.unavailableSlots = [];
-          }
-          eventCenterDoc.availability.unavailableSlots.push(...newSlots);
-        }
-
-        await eventCenterDoc.save();
+          await eventCenterDoc.save();
       }
+
+      // Send notification to organizer
+      const transferGuestName = fullName || savedTicket.guestDetails?.fullName || "A guest";
+      const transferVenueName = (await EventCenter.findById(eventCenterId).select("venueName").lean())?.venueName || "your venue";
+      if (isReviewModeTransfer) {
+        await Notification.create({
+          recipient: eventCenter.createdBy,
+          sender: buyerId,
+          type: "BOOKING_UPDATE",
+          title: "New Booking Request",
+          message: `${transferGuestName} requested to book ${transferVenueName}. Review within 24 hours.`,
+          referenceId: savedTicket._id,
+        });
+      }
+
+      // Log booking history
+      logBookingHistory({
+        eventCenter: eventCenterId,
+        ticket: savedTicket._id,
+        bookingId: String(savedTicket._id),
+        bookingType: "PLATFORM",
+        action: "CREATED",
+        performedBy: buyerId,
+        dates: selectedDates,
+        guestName: fullName || savedTicket.guestDetails?.fullName || "",
+        totalPrice: totalPrice,
+      });
 
       return res.status(201).json({
         success: true,
@@ -255,7 +295,6 @@ const createTicket = async (req, res) => {
     res.status(500).json({
       success: false,
       message: "Server error during ticket creation",
-      error: err.message,
     });
   }
 };
@@ -270,29 +309,22 @@ const verifyPayment = async (req, res) => {
       .json({ success: false, message: "Missing payment reference." });
   }
 
-  if (!process.env.PAYSTACK_SECRET_KEY) {
-    return res.status(500).json({
-      success: false,
-      message: "PAYSTACK_SECRET_KEY is not set in environment variables.",
-    });
-  }
-
   try {
-    // 1. Verify with Paystack Service
-    const paystackData = await paystackService.verifyTransaction(reference);
+    // 1. Verify with payment gateway
+    const paymentData = await gateway.verifyPayment(reference);
 
     // Check if Paystack says it's successful
-    if (paystackData.status !== "success") {
+    if (paymentData.status !== "success") {
       return res.status(200).json({
         success: false,
-        message: `Transaction is currently ${paystackData.status}.`,
-        data: paystackData,
+        message: `Transaction is currently ${paymentData.status}.`,
+        data: paymentData,
       });
     }
 
     // 2. Check if a ticket already exists for this reference (prevent duplicates)
-    let ticket = await EventCenterTicket.findOne({
-      paystackReference: reference,
+    let ticket = await EventCenterBooking.findOne({
+      paymentReference: reference,
     });
 
     if (ticket && ticket.paymentStatus === "COMPLETED") {
@@ -304,7 +336,7 @@ const verifyPayment = async (req, res) => {
     }
 
     // 3. Extract booking details from Paystack Metadata
-    const meta = paystackData.metadata;
+    const meta = paymentData.metadata;
     const {
       eventCenterId,
       organiserId,
@@ -317,114 +349,204 @@ const verifyPayment = async (req, res) => {
       phoneNumber,
     } = meta;
 
-    if (!ticket) {
-      // Generate ticket number and QR payload for new ticket
-      const ticketNumber = generateTicketNumber();
-      const qrPayload = generateQRPayload(ticketNumber, eventCenterId);
+    // 4. Determine booking mode
+    const eventCenter = await EventCenter.findById(eventCenterId).select("bookingSettings venueName availability").lean();
+    const isReviewMode = eventCenter?.bookingSettings === "REVIEW" || meta.bookingMode === "REVIEW";
 
-      ticket = new EventCenterTicket({
+    // 4b. Validate selected dates are still available
+    if (bookingUnit === "day" && selectedDates && selectedDates.length > 0) {
+      const requestedDates = selectedDates.map(d =>
+        new Date(d.date).toISOString().split("T")[0]
+      );
+      const blockedDates = (eventCenter?.availability?.unavailableDates || [])
+        .filter(d => d.type === "BOOKED" || d.type === "BLOCKED" || d.type === "MANUAL")
+        .map(d => new Date(d.date).toISOString().split("T")[0]);
+
+      const conflicts = requestedDates.filter(d => blockedDates.includes(d));
+      if (conflicts.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: "One or more selected dates are no longer available. Payment will be refunded.",
+        });
+      }
+    }
+
+    if (!ticket) {
+      const ticketData = {
         buyer: buyerId,
         organiser: organiserId,
         eventCenter: eventCenterId,
         guestDetails: {
           fullName,
           phoneNumber,
-          email: paystackData.customer.email,
+          email: paymentData.customer.email,
         },
         selectedDates,
         bookingUnit,
         duration,
         totalPrice,
-        paystackReference: reference,
+        paymentReference: reference,
         paymentStatus: "COMPLETED",
-        ticketNumber,
-        qrPayload,
-      });
+      };
+
+      if (isReviewMode) {
+        ticketData.status = "PENDING_REVIEW";
+        ticketData.bookingMode = "REVIEW";
+        ticketData.reviewDeadline = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      } else {
+        ticketData.ticketNumber = generateTicketNumber("MNS");
+        ticketData.qrPayload = generateQRPayload(ticketData.ticketNumber, eventCenterId, "EVENT_CENTER");
+      }
+
+      ticket = new EventCenterBooking(ticketData);
     } else {
-      // Existing ticket being completed — generate QR if missing
+      // Existing ticket being completed
       ticket.paymentStatus = "COMPLETED";
-      if (!ticket.ticketNumber) {
-        ticket.ticketNumber = generateTicketNumber();
-        ticket.qrPayload = generateQRPayload(
-          ticket.ticketNumber,
-          ticket.eventCenter,
-        );
+      if (isReviewMode) {
+        ticket.status = "PENDING_REVIEW";
+        ticket.bookingMode = "REVIEW";
+        ticket.reviewDeadline = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      } else {
+        if (!ticket.ticketNumber) {
+          ticket.ticketNumber = generateTicketNumber("MNS");
+          ticket.qrPayload = generateQRPayload(
+            ticket.ticketNumber,
+            ticket.eventCenter,
+            "EVENT_CENTER",
+          );
+        }
       }
     }
 
-    await ticket.save();
+    try {
+      await ticket.save();
+    } catch (saveErr) {
+      // E11000 = duplicate key on paymentReference — webhook created it concurrently
+      if (saveErr.code === 11000) {
+        const existingTicket = await EventCenterBooking.findOne({ paymentReference: reference });
+        if (existingTicket) {
+          return res.json({
+            success: true,
+            message: "Payment verified (processed by webhook).",
+            data: existingTicket,
+          });
+        }
+      }
+      throw saveErr;
+    }
 
-    // 4. Update Event Center availability to prevent double-booking
-    const eventCenter = await EventCenter.findById(ticket.eventCenter);
-    if (eventCenter) {
-      if (!eventCenter.availability) {
-        eventCenter.availability = {
+    // 5. Update Event Center availability to prevent double-booking (both INSTANT and REVIEW modes)
+    //    For REVIEW mode, dates are blocked immediately. If organizer declines, blocks are removed.
+    const ec = await EventCenter.findById(ticket.eventCenter);
+    if (ec) {
+      if (!ec.availability) {
+        ec.availability = {
           unavailableDates: [],
           unavailableSlots: [],
         };
       }
 
-      if (ticket.bookingUnit === "day") {
-        const datesToMark = (ticket.selectedDates || []).map(
-          (d) => new Date(d.date).toISOString().split("T")[0],
-        );
+        if (ticket.bookingUnit === "day") {
+          const datesToMark = (ticket.selectedDates || []).map(
+            (d) => new Date(d.date).toISOString().split("T")[0],
+          );
 
-        const currentUnavailableStrings = (
-          eventCenter.availability.unavailableDates || []
-        ).map((d) => new Date(d.date).toISOString().split("T")[0]);
+          const currentUnavailableStrings = (
+            ec.availability.unavailableDates || []
+          ).map((d) => new Date(d.date).toISOString().split("T")[0]);
 
-        const newDateStrings = datesToMark.filter(
-          (d) => !currentUnavailableStrings.includes(d),
-        );
+          const newDateStrings = datesToMark.filter(
+            (d) => !currentUnavailableStrings.includes(d),
+          );
 
-        newDateStrings.forEach((dateStr) => {
-          eventCenter.availability.unavailableDates.push({
-            date: new Date(dateStr),
+          newDateStrings.forEach((dateStr) => {
+            ec.availability.unavailableDates.push({
+              date: new Date(dateStr),
+              type: "BOOKED",
+              bookingId: String(ticket._id),
+              clientName: fullName || ticket.guestDetails?.fullName || "",
+              clientPhone: phoneNumber || ticket.guestDetails?.phoneNumber || "",
+              clientEmail: ticket.guestDetails?.email || paymentData?.customer?.email || "",
+            });
+          });
+        } else if (ticket.bookingUnit === "hour") {
+          const existingSlots = ec.availability.unavailableSlots || [];
+          const conflictingSlots = (ticket.selectedDates || []).filter((slot) =>
+            hasSlotConflict(slot, existingSlots, String(ticket._id))
+          );
+
+          if (conflictingSlots.length > 0) {
+            return res.status(400).json({
+              success: false,
+              message: "One or more time slots conflict with an existing booking",
+            });
+          }
+
+          const newSlots = (ticket.selectedDates || []).map((slot) => ({
+            date: new Date(slot.date),
+            startTime: slot.startTime,
+            endTime: slot.endTime,
             type: "BOOKED",
             bookingId: String(ticket._id),
             clientName: fullName || ticket.guestDetails?.fullName || "",
             clientPhone: phoneNumber || ticket.guestDetails?.phoneNumber || "",
-            clientEmail: ticket.guestDetails?.email || paystackData?.customer?.email || "",
-          });
-        });
-      } else if (ticket.bookingUnit === "hour") {
-        // Check for overlapping slots before adding
-        const existingSlots = eventCenter.availability.unavailableSlots || [];
-        const conflictingSlots = (ticket.selectedDates || []).filter((slot) =>
-          hasSlotConflict(slot, existingSlots, null)
-        );
+            clientEmail: ticket.guestDetails?.email || paymentData?.customer?.email || "",
+          }));
 
-        if (conflictingSlots.length > 0) {
-          return res.status(400).json({
-            success: false,
-            message: "One or more time slots conflict with an existing booking",
-          });
+          if (!ec.availability.unavailableSlots) {
+            ec.availability.unavailableSlots = [];
+          }
+
+          ec.availability.unavailableSlots.push(...newSlots);
         }
 
-        const newSlots = (ticket.selectedDates || []).map((slot) => ({
-          date: new Date(slot.date),
-          startTime: slot.startTime,
-          endTime: slot.endTime,
-          type: "BOOKED",
-          bookingId: String(ticket._id),
-          clientName: fullName || ticket.guestDetails?.fullName || "",
-          clientPhone: phoneNumber || ticket.guestDetails?.phoneNumber || "",
-          clientEmail: ticket.guestDetails?.email || paystackData?.customer?.email || "",
-        }));
-
-        if (!eventCenter.availability.unavailableSlots) {
-          eventCenter.availability.unavailableSlots = [];
-        }
-
-        eventCenter.availability.unavailableSlots.push(...newSlots);
+        await ec.save();
       }
 
-      await eventCenter.save();
+    // 6. Send notifications
+    const guestName = fullName || ticket.guestDetails?.fullName || "A guest";
+    const venueName = eventCenter?.venueName || "your venue";
+
+    if (isReviewMode) {
+      await Notification.create({
+        recipient: organiserId,
+        sender: buyerId,
+        type: "BOOKING_UPDATE",
+        title: "New Booking Request",
+        message: `${guestName} requested to book ${venueName}. Review within 24 hours.`,
+        referenceId: ticket._id,
+      });
+    } else {
+      await Notification.create({
+        recipient: organiserId,
+        sender: buyerId,
+        type: "BOOKING_UPDATE",
+        title: "New Booking!",
+        message: `${guestName} booked ${venueName}.`,
+        referenceId: ticket._id,
+      });
     }
+
+    // Log booking history
+    logBookingHistory({
+      eventCenter: ticket.eventCenter,
+      ticket: ticket._id,
+      bookingId: String(ticket._id),
+      bookingType: "PLATFORM",
+      action: "CREATED",
+      performedBy: buyerId,
+      dates: ticket.selectedDates,
+      guestName: fullName || ticket.guestDetails?.fullName || "",
+      totalPrice: ticket.totalPrice,
+    });
+
+    const successMessage = isReviewMode
+      ? "Payment verified. Booking is pending organizer review."
+      : "Payment verified and booking confirmed successfully.";
 
     return res.status(200).json({
       success: true,
-      message: "Payment verified and booking confirmed successfully.",
+      message: successMessage,
       data: ticket,
     });
   } catch (err) {
@@ -432,18 +554,32 @@ const verifyPayment = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Payment verification failed.",
-      error: err.message,
     });
   }
 };
 
 const getMyTickets = async (req, res) => {
   try {
-    const tickets = await EventCenterTicket.find({ buyer: req.user.id })
-      .populate("eventCenter", "venueName images location")
-      .sort({ createdAt: -1 })
-      .lean();
-    res.json({ success: true, data: tickets });
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
+    const skip = (page - 1) * limit;
+
+    const [tickets, total] = await Promise.all([
+      EventCenterBooking.find({ buyer: req.user.id })
+        .populate("eventCenter", "venueName images location")
+        .select("buyer guestDetails eventCenter selectedDates bookingUnit duration totalPrice paymentStatus status paymentReference ticketNumber bookingMode reviewDeadline createdAt")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      EventCenterBooking.countDocuments({ buyer: req.user.id }),
+    ]);
+
+    res.json({
+      success: true,
+      data: tickets,
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) },
+    });
   } catch (err) {
     res.status(500).json({ success: false, message: "Server error" });
   }
@@ -480,10 +616,28 @@ const validateTicket = async (req, res) => {
       });
     }
 
+    // Ownership check: verify caller is authorised to scan for this venue
+    const existingTicket = await EventCenterBooking.findOne({ ticketNumber: lookupTicketNumber })
+      .select("eventCenter")
+      .lean();
+
+    if (!existingTicket) {
+      return res.status(404).json({
+        success: false,
+        message: "Booking pass not found. Please check the code and try again.",
+      });
+    }
+
+    const auth = await authorizeScanAccess(req.user.id, existingTicket.eventCenter);
+    if (!auth.authorized) {
+      return res.status(403).json({ success: false, message: auth.error });
+    }
+
     // Atomic update: only the first scanner wins
-    const ticket = await EventCenterTicket.findOneAndUpdate(
+    const ticket = await EventCenterBooking.findOneAndUpdate(
       {
         ticketNumber: lookupTicketNumber,
+        status: { $in: ["ACTIVE", "CONFIRMED"] },
         "checkIn.isCheckedIn": { $ne: true },
       },
       {
@@ -501,7 +655,7 @@ const validateTicket = async (req, res) => {
 
     if (!ticket) {
       // Check why it failed
-      const existingTicket = await EventCenterTicket.findOne({
+      const existingTicket = await EventCenterBooking.findOne({
         ticketNumber: lookupTicketNumber,
       })
         .select("status checkIn guestDetails")
@@ -569,7 +723,7 @@ const getTicketById = async (req, res) => {
   const userId = req.user.id;
 
   try {
-    const ticket = await EventCenterTicket.findOne({ _id: id, buyer: userId })
+    const ticket = await EventCenterBooking.findOne({ _id: id, buyer: userId })
       .populate("eventCenter")
       .populate("buyer", "firstName surname email phoneNumber");
 
@@ -620,7 +774,7 @@ const verifyTicket = async (req, res) => {
         .json({ success: false, message: "Ticket number required." });
     }
 
-    const ticket = await EventCenterTicket.findOne({
+    const ticket = await EventCenterBooking.findOne({
       ticketNumber: lookupTicketNumber,
     })
       .populate("buyer", "firstName surname email phoneNumber")
@@ -630,6 +784,11 @@ const verifyTicket = async (req, res) => {
       return res
         .status(404)
         .json({ success: false, message: "Booking pass not found." });
+    }
+
+    const auth = await authorizeScanAccess(req.user.id, ticket.eventCenter?._id || ticket.eventCenter);
+    if (!auth.authorized) {
+      return res.status(403).json({ success: false, message: auth.error });
     }
 
     res.status(200).json({
@@ -662,6 +821,223 @@ const verifyTicket = async (req, res) => {
   }
 };
 
+// ===================== ACCEPT BOOKING (REVIEW MODE) =====================
+const acceptBooking = async (req, res) => {
+  const { id } = req.params;
+  const organiserId = req.user.id;
+
+  try {
+    const ticket = await EventCenterBooking.findById(id);
+    if (!ticket) {
+      return res.status(404).json({ success: false, message: "Booking not found." });
+    }
+
+    if (String(ticket.organiser) !== organiserId) {
+      return res.status(403).json({ success: false, message: "Not authorized to accept this booking." });
+    }
+
+    if (ticket.status !== "PENDING_REVIEW") {
+      return res.status(400).json({ success: false, message: `Booking is already ${ticket.status}.` });
+    }
+
+    // Generate ticket number and QR payload
+    const ticketNumber = generateTicketNumber("MNS");
+    const qrPayload = generateQRPayload(ticketNumber, ticket.eventCenter, "EVENT_CENTER");
+
+    ticket.status = "CONFIRMED";
+    ticket.ticketNumber = ticketNumber;
+    ticket.qrPayload = qrPayload;
+    ticket.reviewedAt = new Date();
+    await ticket.save();
+
+    // Mark dates/slots unavailable on EventCenter
+    const eventCenter = await EventCenter.findById(ticket.eventCenter);
+    if (eventCenter) {
+      if (!eventCenter.availability) {
+        eventCenter.availability = { unavailableDates: [], unavailableSlots: [] };
+      }
+
+      if (ticket.bookingUnit === "day") {
+        const datesToMark = (ticket.selectedDates || []).map(
+          (d) => new Date(d.date).toISOString().split("T")[0]
+        );
+        const currentStrings = (eventCenter.availability.unavailableDates || []).map(
+          (d) => new Date(d.date).toISOString().split("T")[0]
+        );
+        const newDateStrings = datesToMark.filter((d) => !currentStrings.includes(d));
+
+        newDateStrings.forEach((dateStr) => {
+          eventCenter.availability.unavailableDates.push({
+            date: new Date(dateStr),
+            type: "BOOKED",
+            bookingId: String(ticket._id),
+            clientName: ticket.guestDetails?.fullName || "",
+            clientPhone: ticket.guestDetails?.phoneNumber || "",
+            clientEmail: ticket.guestDetails?.email || "",
+          });
+        });
+      } else if (ticket.bookingUnit === "hour") {
+        const existingSlots = eventCenter.availability.unavailableSlots || [];
+        const conflictingSlots = (ticket.selectedDates || []).filter((slot) =>
+          hasSlotConflict(slot, existingSlots, String(ticket._id))
+        );
+
+        if (conflictingSlots.length === 0) {
+          const newSlots = (ticket.selectedDates || []).map((slot) => ({
+            date: new Date(slot.date),
+            startTime: slot.startTime,
+            endTime: slot.endTime,
+            type: "BOOKED",
+            bookingId: String(ticket._id),
+            clientName: ticket.guestDetails?.fullName || "",
+            clientPhone: ticket.guestDetails?.phoneNumber || "",
+            clientEmail: ticket.guestDetails?.email || "",
+          }));
+
+          if (!eventCenter.availability.unavailableSlots) {
+            eventCenter.availability.unavailableSlots = [];
+          }
+          eventCenter.availability.unavailableSlots.push(...newSlots);
+        }
+      }
+
+      await eventCenter.save();
+    }
+
+    // Send notification to buyer
+    const venueName = eventCenter?.venueName || "your venue";
+    await Notification.create({
+      recipient: ticket.buyer,
+      sender: organiserId,
+      type: "BOOKING_UPDATE",
+      title: "Booking Confirmed!",
+      message: `Your booking at ${venueName} has been confirmed. Your ticket is ready.`,
+      referenceId: ticket._id,
+    });
+
+    // Log booking history
+    logBookingHistory({
+      eventCenter: ticket.eventCenter,
+      ticket: ticket._id,
+      bookingId: String(ticket._id),
+      bookingType: "PLATFORM",
+      action: "CREATED",
+      performedBy: organiserId,
+      dates: ticket.selectedDates,
+      guestName: ticket.guestDetails?.fullName || "",
+      totalPrice: ticket.totalPrice,
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Booking accepted and confirmed.",
+      data: ticket,
+    });
+  } catch (err) {
+    console.error("[ACCEPT BOOKING ERROR]", err);
+    return res.status(500).json({ success: false, message: "Server error accepting booking." });
+  }
+};
+
+// ===================== DECLINE BOOKING (REVIEW MODE) =====================
+const declineBooking = async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+  const organiserId = req.user.id;
+
+  try {
+    const ticket = await EventCenterBooking.findById(id);
+    if (!ticket) {
+      return res.status(404).json({ success: false, message: "Booking not found." });
+    }
+
+    if (String(ticket.organiser) !== organiserId) {
+      return res.status(403).json({ success: false, message: "Not authorized to decline this booking." });
+    }
+
+    if (ticket.status !== "PENDING_REVIEW") {
+      return res.status(400).json({ success: false, message: `Booking is already ${ticket.status}.` });
+    }
+
+    // Refund payment if it was completed
+    let refundSucceeded = false;
+    if (ticket.paymentStatus === "COMPLETED" && ticket.paymentReference) {
+      try {
+        await gateway.refundPayment(ticket.paymentReference);
+        ticket.paymentStatus = "REFUNDED";
+        refundSucceeded = true;
+      } catch (refundErr) {
+        console.error("[DECLINE BOOKING] Refund failed:", refundErr.message);
+        ticket.paymentStatus = "FAILED_REFUND";
+      }
+    }
+
+    ticket.status = "CANCELLED";
+    ticket.reviewedAt = new Date();
+    await ticket.save();
+
+    // Remove date/slot blocks from EventCenter
+    const eventCenterDoc = await EventCenter.findById(ticket.eventCenter);
+    if (eventCenterDoc?.availability) {
+      const ticketIdStr = String(ticket._id);
+
+      if (ticket.bookingUnit === "day" && eventCenterDoc.availability.unavailableDates) {
+        eventCenterDoc.availability.unavailableDates =
+          eventCenterDoc.availability.unavailableDates.filter(
+            (d) => String(d.bookingId) !== ticketIdStr
+          );
+      } else if (ticket.bookingUnit === "hour" && eventCenterDoc.availability.unavailableSlots) {
+        eventCenterDoc.availability.unavailableSlots =
+          eventCenterDoc.availability.unavailableSlots.filter(
+            (s) => String(s.bookingId) !== ticketIdStr
+          );
+      }
+
+      await eventCenterDoc.save();
+    }
+
+    // Send notification to buyer
+    const eventCenter = await EventCenter.findById(ticket.eventCenter).select("venueName").lean();
+    const venueName = eventCenter?.venueName || "your venue";
+    const refundNote = refundSucceeded
+      ? " A full refund has been issued."
+      : ticket.paymentStatus === "FAILED_REFUND"
+        ? " A refund could not be processed automatically. Please contact support."
+        : "";
+    await Notification.create({
+      recipient: ticket.buyer,
+      sender: organiserId,
+      type: "BOOKING_UPDATE",
+      title: "Booking Declined",
+      message: `Your booking at ${venueName} was declined.${refundNote}`,
+      referenceId: ticket._id,
+    });
+
+    // Log booking history
+    logBookingHistory({
+      eventCenter: ticket.eventCenter,
+      ticket: ticket._id,
+      bookingId: String(ticket._id),
+      bookingType: "PLATFORM",
+      action: "CANCELLED",
+      performedBy: organiserId,
+      dates: ticket.selectedDates,
+      guestName: ticket.guestDetails?.fullName || "",
+      totalPrice: ticket.totalPrice,
+      reason: reason || "Declined by organizer",
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: "Booking declined.",
+      data: ticket,
+    });
+  } catch (err) {
+    console.error("[DECLINE BOOKING ERROR]", err);
+    return res.status(500).json({ success: false, message: "Server error declining booking." });
+  }
+};
+
 module.exports = {
   createTicket,
   verifyPayment,
@@ -669,4 +1045,6 @@ module.exports = {
   validateTicket,
   verifyTicket,
   getTicketById,
+  acceptBooking,
+  declineBooking,
 };

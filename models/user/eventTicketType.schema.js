@@ -67,4 +67,4 @@ const TicketSchema = new Schema(
   { timestamps: true }
 );
 
-module.exports = model("Ticket", TicketSchema);
+module.exports = model("EventTicketType", TicketSchema, "tickets");

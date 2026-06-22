@@ -1,6 +1,8 @@
 const EventBooking = require("../../models/user/eventBooking.schema");
-const EventCenterTicket = require("../../models/user/eventCenterTicket.schema");
-const paystackService = require("../../services/paystack.service");
+const EventCenterBooking = require("../../models/user/eventCenterBooking.schema");
+const { getPaymentGateway } = require("../../services/payment");
+
+const gateway = getPaymentGateway();
 
 const getPayments = async (req, res) => {
   try {
@@ -8,29 +10,29 @@ const getPayments = async (req, res) => {
     const skip = (Number(page) - 1) * Number(limit);
     const query = {};
 
-    if (reference) query.paystackReference = new RegExp(reference.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    if (reference) query.paymentReference = new RegExp(reference.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
     if (status) query.paymentStatus = status;
 
     const [eventPayments, venuePayments, eventCount, venueCount] = await Promise.all([
       EventBooking.find(query)
         .populate("buyer", "firstName surname email")
         .populate("eventId", "title")
-        .select("buyer eventId totalAmount currency paymentStatus paymentMethod paystackReference createdAt")
+        .select("buyer eventId totalAmount currency paymentStatus paymentMethod paymentReference createdAt")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(Number(limit))
         .lean(),
-      EventCenterTicket.find(query)
+      EventCenterBooking.find(query)
         .populate("buyer", "firstName surname email")
         .populate("organiser", "firstName surname email")
         .populate("eventCenter", "venueName")
-        .select("buyer organiser eventCenter totalPrice paymentStatus paystackReference createdAt")
+        .select("buyer organiser eventCenter totalPrice paymentStatus paymentReference createdAt")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(Number(limit))
         .lean(),
       EventBooking.countDocuments(query),
-      EventCenterTicket.countDocuments(query),
+      EventCenterBooking.countDocuments(query),
     ]);
 
     const payments = [
@@ -58,7 +60,7 @@ const getPayments = async (req, res) => {
 const verifyPaymentReference = async (req, res) => {
   try {
     const { reference } = req.params;
-    const data = await paystackService.verifyTransaction(reference);
+    const data = await gateway.verifyPayment(reference);
 
     res.status(200).json({
       success: true,
@@ -89,7 +91,7 @@ const getPaymentDetail = async (req, res) => {
       });
     }
 
-    payment = await EventCenterTicket.findById(id)
+    payment = await EventCenterBooking.findById(id)
       .populate("buyer", "firstName surname email phoneNumber profilePicture")
       .populate("organiser", "firstName surname email")
       .populate("eventCenter", "venueName status images location createdBy", { populate: { path: "createdBy", select: "firstName surname email" } })

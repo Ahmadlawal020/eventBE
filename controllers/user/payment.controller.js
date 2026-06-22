@@ -1,15 +1,17 @@
-const paystackService = require("../../services/paystack.service");
+const { getPaymentGateway } = require("../../services/payment");
+
+const gateway = getPaymentGateway();
 
 // ===================== INITIALIZE =====================
 const initializePayment = async (req, res) => {
   const { email, amount, metadata, callback_url } = req.body;
 
   try {
-    const data = await paystackService.initializeTransaction({
+    const data = await gateway.initializePayment({
       email,
       amount,
       metadata,
-      callback_url,
+      callbackUrl: callback_url,
     });
 
     res.status(200).json({
@@ -18,11 +20,10 @@ const initializePayment = async (req, res) => {
       data,
     });
   } catch (err) {
-    console.error(" [PAYMENT INIT ERROR]", err.message);
+    console.error("[PAYMENT INIT ERROR]", err.message);
     res.status(500).json({
       success: false,
       message: "Could not initialize payment",
-      error: err.message,
     });
   }
 };
@@ -32,7 +33,7 @@ const verifyPayment = async (req, res) => {
   const { reference } = req.params;
 
   try {
-    const data = await paystackService.verifyTransaction(reference);
+    const data = await gateway.verifyPayment(reference);
 
     res.status(200).json({
       success: true,
@@ -40,11 +41,10 @@ const verifyPayment = async (req, res) => {
       data,
     });
   } catch (err) {
-    console.error(" [PAYMENT VERIFY ERROR]", err.message);
+    console.error("[PAYMENT VERIFY ERROR]", err.message);
     res.status(500).json({
       success: false,
       message: "Payment verification failed",
-      error: err.message,
     });
   }
 };

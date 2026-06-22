@@ -1,70 +1,42 @@
 const UserEventTicket = require("../../models/user/userEventTicket.schema");
-const Ticket = require("../../models/user/eventTicket.schema");
+const Ticket = require("../../models/user/eventTicketType.schema");
 const Event = require("../../models/user/event.schema");
-const crypto = require("crypto");
-
-// ============================================================================
-// QR PAYLOAD SIGNING — Tamper-proof ticket verification
-// ============================================================================
-const QR_SECRET = process.env.QR_SIGNING_SECRET || "mnb-default-secret-change-in-production";
+const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
+const StaffInvitation = require("../../models/user/staffInvitation.schema");
+const { generateTicketNumber, generateQRPayload, verifyQRPayload } = require("../../utils/qr");
 
 /**
- * Generate a cryptographically unique ticket number.
- * Format: MNB-XXXXXXXX-XXXX (16 hex chars = 8 bytes = 2^64 combinations)
- * 
- * At 1 million tickets/day, collision probability stays near zero
- * for centuries (birthday paradox threshold ~4 billion for 64-bit).
- * The DB unique index is a safety net regardless.
+ * Check if a user is authorized to scan/verify tickets for an event.
+ * Owner: always has access
+ * Co-organiser: SCAN_TICKET or ALL_ACCESS
+ * Staff: SCAN_TICKET
  */
-const generateTicketNumber = () => {
-  const hex = crypto.randomBytes(8).toString("hex").toUpperCase();
-  return `MNB-${hex.slice(0, 8)}-${hex.slice(8)}`;
-};
+async function authorizeScanAccess(userId, eventId) {
+  const event = await Event.findById(eventId).select("createdBy").lean();
+  if (!event) return { authorized: false, error: "Event not found." };
 
-/**
- * Generate a HMAC-signed QR payload for tamper-proof verification.
- * The QR code encodes this JSON string; scanners verify the signature
- * before hitting the network, enabling offline-first validation.
- */
-const generateQRPayload = (ticketNumber, eventId) => {
-  const payload = {
-    tn: ticketNumber,      // ticket number
-    eid: eventId.toString(), // event ID
-    ts: Date.now(),        // timestamp of generation
-    v: 1,                  // payload version for future compat
-    type: "EVENT",         // distinguish from event center tickets
-  };
+  if (String(event.createdBy) === userId) return { authorized: true };
 
-  const dataString = JSON.stringify(payload);
-  const signature = crypto
-    .createHmac("sha256", QR_SECRET)
-    .update(dataString)
-    .digest("hex")
-    .slice(0, 12); // 12-char signature (48-bit) — sufficient for mobile QR
+  const coHostInvite = await CoHostInvitation.findOne({
+    coHost: userId,
+    host: event.createdBy,
+    status: "ACCEPTED",
+    "listings.listingId": event._id,
+    permissions: { $in: ["SCAN_TICKET", "ALL_ACCESS"] },
+  }).lean();
+  if (coHostInvite) return { authorized: true };
 
-  return JSON.stringify({ ...payload, sig: signature });
-};
+  const staffInvite = await StaffInvitation.findOne({
+    staff: userId,
+    organiser: event.createdBy,
+    status: "ACCEPTED",
+    "listings.listingId": event._id,
+    permissions: "SCAN_TICKET",
+  }).lean();
+  if (staffInvite) return { authorized: true };
 
-/**
- * Verify the HMAC signature of a scanned QR payload.
- * Returns { valid, data } — can be used offline on the scanner device.
- */
-const verifyQRPayload = (qrString) => {
-  try {
-    const parsed = JSON.parse(qrString);
-    const { sig, ...data } = parsed;
-
-    const expectedSig = crypto
-      .createHmac("sha256", QR_SECRET)
-      .update(JSON.stringify(data))
-      .digest("hex")
-      .slice(0, 12);
-
-    return { valid: sig === expectedSig, data: parsed };
-  } catch {
-    return { valid: false, data: null };
-  }
-};
+  return { authorized: false, error: "Not authorized to scan tickets for this event." };
+}
 
 // ============================================================================
 // GET MY TICKETS
@@ -200,7 +172,7 @@ const createTicketsForBooking = async (booking) => {
       // Create N individual tickets based on quantity
       for (let i = 0; i < item.quantity; i++) {
         const ticketNumber = generateTicketNumber();
-        const qrPayload = generateQRPayload(ticketNumber, booking.eventId);
+        const qrPayload = generateQRPayload(ticketNumber, booking.eventId, "EVENT");
 
         userEventTickets.push({
           bookingId: booking._id,
@@ -264,6 +236,23 @@ const validateTicket = async (req, res) => {
         success: false,
         message: "Ticket number or QR payload is required.",
       });
+    }
+
+    // Ownership check: verify caller is authorised to scan for this event
+    const existingTicket = await UserEventTicket.findOne({ ticketNumber: lookupTicketNumber })
+      .select("eventId")
+      .lean();
+
+    if (!existingTicket) {
+      return res.status(404).json({
+        success: false,
+        message: "Ticket not found. Please check the code and try again.",
+      });
+    }
+
+    const auth = await authorizeScanAccess(req.user.id, existingTicket.eventId);
+    if (!auth.authorized) {
+      return res.status(403).json({ success: false, message: auth.error });
     }
 
     // Atomic update: find UNREDEEMED ticket and mark as REDEEMED in one operation.
@@ -406,6 +395,11 @@ const verifyTicket = async (req, res) => {
 
     if (!ticket) {
       return res.status(404).json({ success: false, message: "Ticket not found." });
+    }
+
+    const auth = await authorizeScanAccess(req.user.id, ticket.eventId?._id || ticket.eventId);
+    if (!auth.authorized) {
+      return res.status(403).json({ success: false, message: auth.error });
     }
 
     res.status(200).json({

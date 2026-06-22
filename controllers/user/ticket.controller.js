@@ -1,4 +1,4 @@
-const EventCenterTicket = require("../../models/user/eventCenterTicket.schema");
+const EventCenterBooking = require("../../models/user/eventCenterBooking.schema");
 const UserEventTicket = require("../../models/user/userEventTicket.schema");
 
 /**
@@ -10,12 +10,12 @@ const getAllMyTickets = async (req, res) => {
 
   try {
     // 1. Fetch Event Center Tickets (Bookings of venues)
-    const eventCenterTickets = await EventCenterTicket.find({ buyer: userId })
+    const eventCenterTickets = await EventCenterBooking.find({ buyer: userId })
       .populate("eventCenter", "venueName images location")
       .sort({ createdAt: -1 })
       .lean();
 
-    const formattedEventCenterTickets = eventCenterTickets.map(ticket => ({
+    const formattedEventCenterBookings = eventCenterTickets.map(ticket => ({
       ...ticket,
       ticketCategory: 'EVENT_CENTER',
     }));
@@ -33,7 +33,7 @@ const getAllMyTickets = async (req, res) => {
     }));
 
     // 3. Combine and sort
-    const allTickets = [...formattedEventCenterTickets, ...formattedUserEventTickets]
+    const allTickets = [...formattedEventCenterBookings, ...formattedUserEventTickets]
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
     res.status(200).json({
@@ -52,7 +52,7 @@ const getTicketDetails = async (req, res) => {
 
   try {
     // Check if it's an Event Center Ticket
-    const eventCenterTicket = await EventCenterTicket.findOne({ _id: ticketId, buyer: userId })
+    const eventCenterTicket = await EventCenterBooking.findOne({ _id: ticketId, buyer: userId })
       .populate("eventCenter");
 
     if (eventCenterTicket) {

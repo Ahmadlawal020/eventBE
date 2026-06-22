@@ -2,7 +2,7 @@ const User = require("../../models/user/user.schema");
 const Event = require("../../models/user/event.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
 const EventBooking = require("../../models/user/eventBooking.schema");
-const EventCenterTicket = require("../../models/user/eventCenterTicket.schema");
+const EventCenterBooking = require("../../models/user/eventCenterBooking.schema");
 const { recordAdminAction } = require("../../services/admin/adminAudit.service");
 
 const escapeRegex = (value = "") => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -88,7 +88,7 @@ const getUserDetails = async (req, res) => {
         .limit(20)
         .lean(),
       EventBooking.find({ buyer: id }).select("eventId totalAmount currency paymentStatus status createdAt").populate("eventId", "title").sort({ createdAt: -1 }).limit(10).lean(),
-      EventCenterTicket.find({ buyer: id }).select("eventCenter totalPrice paymentStatus status createdAt").populate("eventCenter", "venueName").sort({ createdAt: -1 }).limit(10).lean(),
+      EventCenterBooking.find({ buyer: id }).select("eventCenter totalPrice paymentStatus status createdAt").populate("eventCenter", "venueName").sort({ createdAt: -1 }).limit(10).lean(),
     ]);
 
     if (!user) {

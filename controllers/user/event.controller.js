@@ -1,6 +1,6 @@
 const Event = require("../../models/user/event.schema");
 const User = require("../../models/user/user.schema");
-const Ticket = require("../../models/user/eventTicket.schema");
+const Ticket = require("../../models/user/eventTicketType.schema");
 const mongoose = require("mongoose");
 const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const cloudinary = require("../../utils/cloudinary");
@@ -53,14 +53,25 @@ const createEvent = async (req, res) => {
 // 📋 Get All Events
 const getEvents = async (req, res) => {
   try {
-    const events = await Event.find().populate(
-      "createdBy",
-      "firstName surname email",
-    );
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
+    const skip = (page - 1) * limit;
+
+    const [events, total] = await Promise.all([
+      Event.find()
+        .populate("createdBy", "firstName surname email")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Event.countDocuments(),
+    ]);
+
     res.json({
       success: true,
       message: "Events fetched successfully",
       data: events,
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) },
     });
   } catch (err) {
     console.error(err);

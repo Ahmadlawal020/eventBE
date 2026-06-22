@@ -1,4 +1,4 @@
-const Ticket = require("../../models/user/eventTicket.schema");
+const Ticket = require("../../models/user/eventTicketType.schema");
 const UserEventTicket = require("../../models/user/userEventTicket.schema");
 
 const escapeRegex = (value = "") => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

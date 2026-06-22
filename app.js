@@ -21,7 +21,9 @@ const helmet = require("helmet");
 app.use(helmet());
 app.use(logger);
 app.use(cors(corsOptions));
-app.use(express.json());
+app.use(express.json({
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+}));
 app.use(cookieParser());
 
 // Serve static files from the "public" directory
@@ -30,14 +32,15 @@ app.use("/", express.static(path.join(__dirname, "public")));
 app.use("/", require("./routes/root"));
 // Mount user routes
 app.use("/api/auth", require("./routes/user/auth.route"));
-app.use("/api/user-info", require("./routes/user/info.route"));
+app.use("/api/user-info", require("./routes/user/userProfile.route"));
 app.use("/api/events", require("./routes/user/event.route"));
 app.use("/api/event-centers", require("./routes/user/eventCenter.route"));
+app.use("/api/webhooks/payment", require("./routes/user/paymentWebhook.route"));
 app.use("/api/event-center-tickets", require("./routes/user/eventCenterTicket.route"));
 app.use("/api/payments", require("./routes/user/payment.route"));
 app.use("/api/listings", require("./routes/user/listings.route"));
 app.use("/api/organiser-listings", require("./routes/user/organiserListings.route"));
-app.use("/api/event-tickets", require("./routes/user/eventTicket.route"));
+app.use("/api/event-tickets", require("./routes/user/eventTicketType.route"));
 app.use("/api/user-event-tickets", require("./routes/user/userEventTicket.route"));
 app.use("/api/event-bookings", require("./routes/user/eventBooking.route"));
 app.use("/api/tickets", require("./routes/user/ticket.route"));
@@ -50,6 +53,7 @@ app.use("/api/analytics", require("./routes/user/analytics.route"));
 app.use("/api/ticket-dashboard", require("./routes/user/ticketDashboard.route"));
 app.use("/api/listing-dashboard", require("./routes/user/listingDashboard.route"));
 app.use("/api/booking-dashboard", require("./routes/user/bookingDashboard.route"));
+app.use("/api/booking-history", require("./routes/user/bookingHistory.route"));
 app.use("/api/finance-dashboard", require("./routes/user/financeDashboard.route"));
 app.use("/api/platform-fees", require("./routes/user/platformFees.route"));
 app.use("/api/kyc", require("./routes/user/kyc.route"));

@@ -167,36 +167,32 @@ const sendMessage = async (req, res) => {
 // 📋 Get All Conversations for User
 const getConversations = async (req, res) => {
   const userId = req.user.id;
-  const { role } = req.query; // 'organiser' or 'user'
+  const { role } = req.query;
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
 
   try {
-    // Find all listing IDs where this user has CUSTOMER_CARE permission as Staff
     const staffInvites = await StaffInvitation.find({
       staff: userId,
       status: "ACCEPTED",
       permissions: "CUSTOMER_CARE"
     }).select("listings.listingId");
 
-    // Find all listing IDs where this user has CUSTOMER_CARE permission as Co-Host
     const coHostInvites = await CoHostInvitation.find({
       coHost: userId,
       status: "ACCEPTED",
       permissions: "CUSTOMER_CARE"
     }).select("listings.listingId");
 
-    // Fetch all listings where this user is directly listed as a Co-Host
     const directCoHostEventCenters = await EventCenter.find({ coHosts: userId }).select("_id");
     const directCoHostEvents = await Event.find({ coHosts: userId }).select("_id");
 
     const agentListingIds = [];
     staffInvites.forEach(inv => inv.listings.forEach(l => agentListingIds.push(l.listingId)));
     coHostInvites.forEach(inv => inv.listings.forEach(l => agentListingIds.push(l.listingId)));
-
-    // Automatically authorize direct Co-Hosts to access message streams
     directCoHostEventCenters.forEach(center => agentListingIds.push(center._id));
     directCoHostEvents.forEach(evt => agentListingIds.push(evt._id));
 
-    // Fetch all conversations matching either direct participant OR contextId being in agent listings
     const conversations = await Conversation.find({
       $or: [
         { participants: userId },
@@ -212,37 +208,38 @@ const getConversations = async (req, res) => {
         path: "contextId",
         select: "title venueName images createdBy",
       })
-      .sort({ updatedAt: -1 });
+      .sort({ updatedAt: -1 })
+      .lean();
 
     let filteredConversations = conversations;
 
     if (role === 'organiser') {
       filteredConversations = conversations.filter(conv => {
         if (!conv.contextId) return false;
-
-        // Owner check
         const isOwner = conv.contextId.createdBy && conv.contextId.createdBy.toString() === userId.toString();
         if (isOwner) return true;
-
-        // Staff/Co-Host agent check
         const isAgent = agentListingIds.some(id => id.toString() === conv.contextId._id.toString());
         return isAgent;
       });
     } else if (role === 'user') {
       filteredConversations = conversations.filter(conv => {
         if (!conv.contextId) return false;
-
-        // Ensure they are a participant but NOT the owner or an agent for this listing
         const isOwner = conv.contextId.createdBy && conv.contextId.createdBy.toString() === userId.toString();
         const isAgent = agentListingIds.some(id => id.toString() === conv.contextId._id.toString());
         return !isOwner && !isAgent;
       });
     }
 
+    // Apply pagination after filtering
+    const total = filteredConversations.length;
+    const skip = (page - 1) * limit;
+    const paginatedConversations = filteredConversations.slice(skip, skip + limit);
+
     res.json({
       success: true,
       message: "Conversations fetched successfully",
-      data: filteredConversations,
+      data: paginatedConversations,
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) },
     });
   } catch (err) {
     console.error("[GET CONVERSATIONS ERROR]", err);
@@ -254,12 +251,21 @@ const getConversations = async (req, res) => {
 const getMessages = async (req, res) => {
   const { conversationId } = req.params;
   const userId = req.user.id;
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 50));
+  const skip = (page - 1) * limit;
 
   try {
-    const messages = await Message.find({ conversationId })
-      .sort({ createdAt: 1 })
-      .populate("sender", "firstName surname profilePicture")
-      .populate("receiver", "firstName surname profilePicture");
+    const [messages, total] = await Promise.all([
+      Message.find({ conversationId })
+        .sort({ createdAt: -1 }) // Newest first for efficient pagination
+        .skip(skip)
+        .limit(limit)
+        .populate("sender", "firstName surname profilePicture")
+        .populate("receiver", "firstName surname profilePicture")
+        .lean(),
+      Message.countDocuments({ conversationId }),
+    ]);
 
     // Mark messages as read for the current user
     await Message.updateMany(
@@ -277,7 +283,8 @@ const getMessages = async (req, res) => {
     res.json({
       success: true,
       message: "Messages fetched successfully",
-      data: messages,
+      data: messages.reverse(), // Return in chronological order
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) },
     });
   } catch (err) {
     console.error("[GET MESSAGES ERROR]", err);

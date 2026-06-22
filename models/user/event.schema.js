@@ -374,22 +374,11 @@ const eventSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-/* ===================== AUTO-UNLIST PAST EVENTS ===================== */
+/* ===================== INDEXES ===================== */
 
-eventSchema.pre(/^find/, async function (next) {
-  try {
-    await mongoose.model("Event").updateMany(
-      {
-        status: { $in: ["LISTED", "ACTION_REQUIRED", "UNLISTED"] },
-        "schedule.to": { $lt: new Date() },
-      },
-      { $set: { status: "COMPLETED" } }
-    );
-  } catch (err) {
-    console.error("Error in event pre-find hook to mark completed:", err);
-  }
-  next();
-});
+eventSchema.index({ createdBy: 1, status: 1 });
+eventSchema.index({ status: 1, "schedule.to": 1 });
+eventSchema.index({ status: 1, createdAt: -1 });
 
 /* ===================== HUMAN-READABLE LABEL ===================== */
 

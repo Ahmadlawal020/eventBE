@@ -47,19 +47,35 @@ const eventCenterTicketSchema = new mongoose.Schema(
     },
     paymentStatus: {
       type: String,
-      enum: ["PENDING", "COMPLETED", "FAILED"],
+      enum: ["PENDING", "COMPLETED", "FAILED", "REFUNDED", "FAILED_REFUND"],
       default: "PENDING",
     },
-    paystackReference: {
+    paymentReference: {
       type: String,
       unique: true,
       sparse: true,
     },
+    // Legacy alias — kept during migration period
+    paystackReference: {
+      type: String,
+      sparse: true,
+    },
     status: {
       type: String,
-      enum: ["ACTIVE", "CANCELLED", "COMPLETED"],
+      enum: ["ACTIVE", "CANCELLED", "COMPLETED", "PENDING_REVIEW", "CONFIRMED"],
       default: "ACTIVE",
     },
+
+    // ============================================================
+    // REVIEW BOOKING FLOW
+    // ============================================================
+    bookingMode: {
+      type: String,
+      enum: ["INSTANT", "REVIEW"],
+      default: "INSTANT",
+    },
+    reviewDeadline: { type: Date, index: true },
+    reviewedAt: { type: Date },
 
     // ============================================================
     // QR CODE & ENTRY CONTROL (same pattern as event tickets)
@@ -98,5 +114,8 @@ eventCenterTicketSchema.index({ buyer: 1, eventCenter: 1 });
 // Compound index: eventCenter + status for venue analytics
 eventCenterTicketSchema.index({ eventCenter: 1, status: 1 });
 
+// Compound index: status + reviewDeadline for cron job expiry queries
+eventCenterTicketSchema.index({ status: 1, reviewDeadline: 1 });
 
-module.exports = mongoose.model("EventCenterTicket", eventCenterTicketSchema);
+
+module.exports = mongoose.model("EventCenterBooking", eventCenterTicketSchema, "eventcentertickets");

@@ -1,26 +1,7 @@
 const UserEventTicket = require("../../models/user/userEventTicket.schema");
-const EventCenterTicket = require("../../models/user/eventCenterTicket.schema");
+const EventCenterBooking = require("../../models/user/eventCenterBooking.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
-const crypto = require("crypto");
-
-const QR_SECRET = process.env.QR_SIGNING_SECRET || "mnb-default-secret-change-in-production";
-
-const verifyQRPayload = (qrString) => {
-  try {
-    const parsed = JSON.parse(qrString);
-    const { sig, ...data } = parsed;
-
-    const expectedSig = crypto
-      .createHmac("sha256", QR_SECRET)
-      .update(JSON.stringify(data))
-      .digest("hex")
-      .slice(0, 12);
-
-    return { valid: sig === expectedSig, data: parsed };
-  } catch {
-    return { valid: false, data: null };
-  }
-};
+const { verifyQRPayload } = require("../../utils/qr");
 
 /**
  * Verify staff permissions for scanning tickets for a specific listing
@@ -113,6 +94,8 @@ const verifyTicketStaff = async (req, res) => {
           guestEmail: ticket.owner?.email,
           guestPhone: ticket.owner?.phoneNumber,
           eventTitle: ticket.eventSnapshot?.title || ticket.eventId?.title,
+          price: ticket.ticketSnapshot?.price,
+          eventDate: ticket.eventSnapshot?.schedule?.from,
           status: ticket.status,
           isCheckedIn: ticket.checkIn?.isCheckedIn,
           checkedInAt: ticket.checkIn?.checkedInAt,
@@ -120,7 +103,7 @@ const verifyTicketStaff = async (req, res) => {
         }
       });
     } else if (listingType === "event-center") {
-      const ticket = await EventCenterTicket.findOne({ ticketNumber: lookupTicketNumber })
+      const ticket = await EventCenterBooking.findOne({ ticketNumber: lookupTicketNumber })
         .populate("buyer", "firstName surname email phoneNumber")
         .populate("eventCenter", "venueName");
 
@@ -140,6 +123,10 @@ const verifyTicketStaff = async (req, res) => {
           guestEmail: ticket.buyer?.email || ticket.guestDetails?.email,
           guestPhone: ticket.buyer?.phoneNumber || ticket.guestDetails?.phoneNumber,
           venueName: ticket.eventCenter?.venueName,
+          duration: ticket.duration,
+          bookingUnit: ticket.bookingUnit,
+          totalPrice: ticket.totalPrice,
+          selectedDates: ticket.selectedDates,
           status: ticket.status,
           paymentStatus: ticket.paymentStatus,
           isCheckedIn: ticket.checkIn?.isCheckedIn,
@@ -250,12 +237,15 @@ const validateTicketStaff = async (req, res) => {
           ticketName: ticket.ticketName,
           ownerName: ticket.owner ? `${ticket.owner.firstName} ${ticket.owner.surname}` : "Guest",
           eventTitle: ticket.eventSnapshot?.title,
+          price: ticket.ticketSnapshot?.price,
+          eventDate: ticket.eventSnapshot?.schedule?.from,
+          isCheckedIn: true,
           checkedInAt: ticket.checkIn?.checkedInAt,
         },
       });
 
     } else if (listingType === "event-center") {
-      const ticket = await EventCenterTicket.findOneAndUpdate(
+      const ticket = await EventCenterBooking.findOneAndUpdate(
         {
           ticketNumber: lookupTicketNumber,
           eventCenter: listingId,
@@ -275,7 +265,7 @@ const validateTicketStaff = async (req, res) => {
       .populate("eventCenter", "venueName");
 
       if (!ticket) {
-        const existingTicket = await EventCenterTicket.findOne({
+        const existingTicket = await EventCenterBooking.findOne({
           ticketNumber: lookupTicketNumber,
         }).select("status checkIn guestDetails eventCenter").lean();
 
@@ -312,6 +302,11 @@ const validateTicketStaff = async (req, res) => {
           ticketNumber: ticket.ticketNumber,
           guestName: ticket.buyer ? `${ticket.buyer.firstName} ${ticket.buyer.surname}` : ticket.guestDetails?.fullName || "Guest",
           venueName: ticket.eventCenter?.venueName,
+          duration: ticket.duration,
+          bookingUnit: ticket.bookingUnit,
+          totalPrice: ticket.totalPrice,
+          selectedDates: ticket.selectedDates,
+          isCheckedIn: true,
           checkedInAt: ticket.checkIn?.checkedInAt,
         },
       });

@@ -7,7 +7,7 @@ const {
   getTicketById,
   updateTicket,
   deleteTicket,
-} = require("../../controllers/user/eventTicket.controller");
+} = require("../../controllers/user/eventTicketType.controller");
 
 const {
   createBooking,

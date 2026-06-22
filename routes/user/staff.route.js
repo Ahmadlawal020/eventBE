@@ -6,7 +6,7 @@ const staffMessageController = require("../../controllers/user/staffMessage.cont
 const staffListingController = require("../../controllers/user/staffListing.controller");
 const verifyJWT = require("../../middleware/verifyJWT");
 const staffScannerController = require("../../controllers/user/staffScanner.controller");
-const staffBookingController = require("../../controllers/user/staffBooking.controller");
+const eventCenterBookingController = require("../../controllers/user/eventCenterBooking.controller");
 const staffTicketController = require("../../controllers/user/staffTicket.controller");
 
 router.use(verifyJWT);
@@ -42,13 +42,13 @@ router.post("/scanner/:listingType/:listingId/verify", staffScannerController.ve
 router.post("/scanner/:listingType/:listingId/validate", staffScannerController.validateTicketStaff);
 
 // --- Staff Event Center Booking Management ---
-router.get("/bookings/search/:eventCenterId", staffBookingController.searchBooking);
-router.get("/bookings/stats/:eventCenterId", staffBookingController.getBookingStats);
-router.get("/bookings/details/:bookingId", staffBookingController.getBookingDetails);
-router.get("/bookings/:eventCenterId", staffBookingController.getEventCenterBookings);
-router.post("/bookings/:bookingId/check-in", staffBookingController.manualCheckIn);
-router.post("/bookings/:bookingId/cancel", staffBookingController.cancelBooking);
-router.patch("/bookings/:bookingId/reschedule", staffBookingController.rescheduleBooking);
+router.get("/bookings/search/:eventCenterId", eventCenterBookingController.searchBooking);
+router.get("/bookings/stats/:eventCenterId", eventCenterBookingController.getBookingStats);
+router.get("/bookings/details/:bookingId", eventCenterBookingController.getBookingDetails);
+router.get("/bookings/:eventCenterId", eventCenterBookingController.getEventCenterBookings);
+router.post("/bookings/:bookingId/check-in", eventCenterBookingController.manualCheckIn);
+router.post("/bookings/:bookingId/cancel", eventCenterBookingController.cancelBooking);
+router.patch("/bookings/:bookingId/reschedule", eventCenterBookingController.rescheduleBooking);
 
 // --- Staff Event Ticket Management ---
 router.get("/tickets/search/:eventId", staffTicketController.searchStaffTickets);

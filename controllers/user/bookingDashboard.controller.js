@@ -1,5 +1,5 @@
 const EventCenter = require("../../models/user/eventCenter.schema");
-const EventCenterTicket = require("../../models/user/eventCenterTicket.schema");
+const EventCenterBooking = require("../../models/user/eventCenterBooking.schema");
 const mongoose = require("mongoose");
 const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
@@ -87,7 +87,7 @@ const getOrganiserBookingStats = async (req, res) => {
     }
 
     // 2. Aggregate Booking Data
-    const bookingStats = await EventCenterTicket.aggregate([
+    const bookingStats = await EventCenterBooking.aggregate([
       { $match: { eventCenter: { $in: venueIds } } },
       {
         $facet: {
@@ -190,7 +190,7 @@ const getOrganiserBookingStats = async (req, res) => {
     };
 
     // 3. Format Venue List with specific stats
-    const venueStats = await EventCenterTicket.aggregate([
+    const venueStats = await EventCenterBooking.aggregate([
       { $match: { eventCenter: { $in: venueIds } } },
       {
         $group: {
@@ -202,6 +202,7 @@ const getOrganiserBookingStats = async (req, res) => {
             },
           },
           checkedIn: { $sum: { $cond: ["$checkIn.isCheckedIn", 1, 0] } },
+          pendingReview: { $sum: { $cond: [{ $eq: ["$status", "PENDING_REVIEW"] }, 1, 0] } },
         },
       },
     ]);
@@ -212,7 +213,7 @@ const getOrganiserBookingStats = async (req, res) => {
     });
 
     const venueList = venues.map((v) => {
-      const stats = venueStatsMap[v._id.toString()] || { count: 0, revenue: 0, checkedIn: 0 };
+      const stats = venueStatsMap[v._id.toString()] || { count: 0, revenue: 0, checkedIn: 0, pendingReview: 0 };
       return {
         id: v._id,
         venueName: v.venueName,
@@ -223,9 +224,38 @@ const getOrganiserBookingStats = async (req, res) => {
           total: stats.count,
           revenue: v.hasFinancePerm ? stats.revenue : null,
           checkedIn: stats.checkedIn,
+          pendingReview: stats.pendingReview,
         },
       };
     });
+
+    // 4. Fetch pending review bookings across all venues
+    const pendingRequests = await EventCenterBooking.find({
+      eventCenter: { $in: venueIds },
+      status: "PENDING_REVIEW",
+    })
+      .populate("buyer", "firstName surname email profileImage")
+      .populate("eventCenter", "venueName")
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .lean();
+
+    const pendingRequestsList = pendingRequests.map((t) => ({
+      bookingId: String(t._id),
+      guestName: t.guestDetails?.fullName || (t.buyer ? `${t.buyer.firstName} ${t.buyer.surname}` : ""),
+      guestEmail: t.guestDetails?.email || t.buyer?.email || "",
+      guestImage: t.buyer?.profileImage || null,
+      venueName: t.eventCenter?.venueName || "",
+      venueId: t.eventCenter?._id || t.eventCenter,
+      selectedDates: t.selectedDates || [],
+      bookingUnit: t.bookingUnit,
+      duration: t.duration,
+      totalPrice: t.totalPrice,
+      reviewDeadline: t.reviewDeadline,
+      createdAt: t.createdAt,
+    }));
+
+    const totalPendingReview = pendingRequestsList.length;
 
     res.status(200).json({
       success: true,
@@ -241,7 +271,9 @@ const getOrganiserBookingStats = async (req, res) => {
           staffEfficiency: facetData.staffEfficiency,
           venueAnalytics,
           platformEngagement,
-          hasGlobalFinancePerm: financeVenueIds.length > 0
+          hasGlobalFinancePerm: financeVenueIds.length > 0,
+          pendingReviewCount: totalPendingReview,
+          pendingRequests: pendingRequestsList,
         },
         venues: venueList,
       },
@@ -269,7 +301,7 @@ const getSingleVenueBookingStats = async (req, res) => {
         { coHosts: organiserId },
         { staff: organiserId },
       ],
-    }).select("_id venueName images status createdBy").lean();
+    }).select("_id venueName images status createdBy bookingSettings").lean();
 
     if (!venue) {
       return res.status(404).json({ success: false, message: "Venue not found or access denied" });
@@ -292,8 +324,8 @@ const getSingleVenueBookingStats = async (req, res) => {
       }
     }
 
-    const bookings = await EventCenterTicket.find({ eventCenter: venueId })
-      .populate("buyer", "firstName lastName email profileImage")
+    const bookings = await EventCenterBooking.find({ eventCenter: venueId })
+      .populate("buyer", "firstName surname email profileImage")
       .sort({ createdAt: -1 })
       .lean();
 
@@ -313,7 +345,8 @@ const getSingleVenueBookingStats = async (req, res) => {
     // Aggregate stats for this specific venue
     const stats = {
       total: bookings.length,
-      active: bookings.filter(b => b.status === 'ACTIVE').length,
+      active: bookings.filter(b => b.status === 'ACTIVE' || b.status === 'CONFIRMED').length,
+      pendingReview: bookings.filter(b => b.status === 'PENDING_REVIEW').length,
       checkedIn: bookings.filter(b => b.checkIn.isCheckedIn).length,
       revenue: hasFinancePerm ? bookings.filter(b => b.paymentStatus === 'COMPLETED').reduce((acc, b) => acc + b.totalPrice.amount, 0) : null,
     };

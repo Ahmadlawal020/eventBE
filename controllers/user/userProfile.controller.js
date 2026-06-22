@@ -4,10 +4,15 @@ const asyncHandler = require("express-async-handler");
 const cloudinary = require("../../utils/cloudinary");
 
 // @desc    Get user by ID
-// @route   GET /api/users/:id
+// @route   GET /api/user-info/:id
 // @access  Private
 const getUserById = asyncHandler(async (req, res) => {
   const { id } = req.params;
+
+  // Ownership check: users can only view their own profile
+  if (req.user.id !== id) {
+    return res.status(403).json({ message: "Not authorized to view this profile." });
+  }
 
   const user = await User.findById(id).lean();
 
@@ -15,8 +20,8 @@ const getUserById = asyncHandler(async (req, res) => {
     return res.status(404).json({ message: "User not found." });
   }
 
-  // Add hasPassword flag and remove sensitive fields
-  user.id = user._id; // Ensure ID consistency if needed, though most things use _id
+  // Remove sensitive fields
+  user.id = user._id;
   user.hasPassword = !!user.password;
   delete user.password;
   delete user.refreshToken;
@@ -24,8 +29,19 @@ const getUserById = asyncHandler(async (req, res) => {
   res.json(user);
 });
 
+// @desc    Update user profile
+// @route   PATCH /api/user-info/:id
+// @access  Private (owner only)
 const updateUser = asyncHandler(async (req, res) => {
   const { id } = req.params;
+
+  // Ownership check
+  if (req.user.id !== id) {
+    return res.status(403).json({ message: "Not authorized to update this profile." });
+  }
+
+  // Whitelist ONLY safe fields — roles (restricted to toggling 'organiser'), isActive, isIdentityVerified,
+  // isPhoneVerified, phoneVerifiedAt are admin-only and NOT accepted here
   const {
     firstName,
     surname,
@@ -34,15 +50,11 @@ const updateUser = asyncHandler(async (req, res) => {
     email,
     dob,
     password,
-    roles,
     residentialAddress,
     emergencyContact,
     preferredLanguage,
-    isActive,
-    isIdentityVerified,
-    isPhoneVerified,
-    phoneVerifiedAt,
     profilePicture,
+    roles,
   } = req.body;
 
   const user = await User.findById(id).exec();
@@ -65,7 +77,6 @@ const updateUser = asyncHandler(async (req, res) => {
 
   // Handle Profile Picture update and Cloudinary cleanup
   if (profilePicture && typeof profilePicture === 'object') {
-    // Delete old image if it exists
     if (user.profilePicture?.publicId) {
       try {
         await cloudinary.uploader.destroy(user.profilePicture.publicId);
@@ -79,12 +90,6 @@ const updateUser = asyncHandler(async (req, res) => {
     };
   }
 
-  // ✅ Fix: merge roles instead of replacing
-  if (roles?.length) {
-    const merged = new Set([...user.roles, ...roles]);
-    user.roles = Array.from(merged);
-  }
-
   // Robustly update nested objects
   if (residentialAddress) {
     user.residentialAddress = { ...user.residentialAddress.toObject(), ...residentialAddress };
@@ -94,10 +99,14 @@ const updateUser = asyncHandler(async (req, res) => {
   }
 
   user.preferredLanguage = preferredLanguage ?? user.preferredLanguage;
-  user.isActive = typeof isActive === "boolean" ? isActive : user.isActive;
-  user.isIdentityVerified = typeof isIdentityVerified === "boolean" ? isIdentityVerified : user.isIdentityVerified;
-  user.isPhoneVerified = typeof isPhoneVerified === "boolean" ? isPhoneVerified : user.isPhoneVerified;
-  user.phoneVerifiedAt = phoneVerifiedAt ?? user.phoneVerifiedAt;
+
+  // Safe update for roles: users can toggle "organiser" themselves but cannot assign "admin" or "staff"
+  if (roles && Array.isArray(roles)) {
+    const allowedRoles = ["user", "organiser"];
+    const verifiedRoles = roles.filter(role => allowedRoles.includes(role));
+    const existingRestrictedRoles = user.roles.filter(role => !allowedRoles.includes(role));
+    user.roles = [...new Set([...existingRestrictedRoles, ...verifiedRoles])];
+  }
 
   if (password) {
     user.password = await bcrypt.hash(password, 10);

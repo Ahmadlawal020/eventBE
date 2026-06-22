@@ -1,6 +1,7 @@
 const EventCenter = require("../../models/user/eventCenter.schema");
 const User = require("../../models/user/user.schema");
 const mongoose = require("mongoose");
+const crypto = require("crypto");
 const cloudinary = require("../../utils/cloudinary");
 const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
 
@@ -70,15 +71,25 @@ const createEventCenter = async (req, res) => {
 // ===================== GET ALL EVENT CENTERS =====================
 const getEventCenters = async (req, res) => {
   try {
-    const centers = await EventCenter.find().populate(
-      "createdBy",
-      "firstName surname email",
-    );
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
+    const skip = (page - 1) * limit;
+
+    const [centers, total] = await Promise.all([
+      EventCenter.find({ status: "LISTED" })
+        .populate("createdBy", "firstName surname email")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      EventCenter.countDocuments({ status: "LISTED" }),
+    ]);
 
     res.json({
       success: true,
       message: "Event Centers fetched successfully",
       data: centers,
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) },
     });
   } catch (err) {
     console.error("[GET EVENT CENTERS]", err);
@@ -218,6 +229,8 @@ const updateEventCenter = async (req, res) => {
 
     // Permission check: co-hosts need MANAGE_LISTING, staff need MANAGE_CALENDAR (or ALL_ACCESS)
     const isOwner = prevCenter.createdBy?.toString() === req.user.id;
+    let isCalendarOnlyStaff = false;
+
     if (!isOwner) {
       let hasAccess = false;
 
@@ -241,12 +254,12 @@ const updateEventCenter = async (req, res) => {
           "listings.listingId": id,
         }).lean();
         const staffPerms = staffInvite?.permissions || [];
-        
-        // Staff can only update if they have MANAGE_CALENDAR or ALL_ACCESS, 
-        // AND if the payload only touches allowed fields (like availability).
-        if (staffPerms.includes("MANAGE_CALENDAR") || staffPerms.includes("ALL_ACCESS")) {
-          // For simplicity, if they have MANAGE_CALENDAR, they can update availability.
+
+        if (staffPerms.includes("ALL_ACCESS")) {
           hasAccess = true;
+        } else if (staffPerms.includes("MANAGE_CALENDAR")) {
+          hasAccess = true;
+          isCalendarOnlyStaff = true;
         }
       }
 
@@ -258,7 +271,23 @@ const updateEventCenter = async (req, res) => {
       }
     }
 
-    const updatePayload = { ...req.body };
+    // Restrict staff with MANAGE_CALENDAR to only availability-related fields
+    let updatePayload;
+    if (isCalendarOnlyStaff) {
+      const allowedFields = ["availability"];
+      updatePayload = {};
+      for (const key of allowedFields) {
+        if (req.body[key] !== undefined) updatePayload[key] = req.body[key];
+      }
+      if (Object.keys(updatePayload).length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Staff with calendar access can only update availability",
+        });
+      }
+    } else {
+      updatePayload = { ...req.body };
+    }
 
     // ===== Price unit consistency synchronization =====
     if (updatePayload.basePrice && updatePayload.basePrice.unit) {
@@ -309,6 +338,47 @@ const updateEventCenter = async (req, res) => {
         ...filteredExisting,
         ...newImages,
       ]);
+    }
+
+    // ===== Manual booking validation =====
+    if (updatePayload.availability?.unavailableDates) {
+      const existingBooked = (prevCenter.availability?.unavailableDates || []).filter(
+        (d) => typeof d === "object" && d.type === "BOOKED"
+      );
+      const newDates = updatePayload.availability.unavailableDates;
+      const errors = [];
+
+      for (let i = 0; i < newDates.length; i++) {
+        const entry = newDates[i];
+        if (typeof entry !== "object" || entry.type !== "MANUAL") continue;
+
+        // Server-generated bookingId (replace client-generated ones)
+        if (!entry.bookingId || entry.bookingId.startsWith("manual-")) {
+          entry.bookingId = `manual-${crypto.randomBytes(8).toString("hex")}`;
+        }
+
+        // Required fields
+        if (!entry.clientName || typeof entry.clientName !== "string" || !entry.clientName.trim()) {
+          errors.push(`Entry ${i + 1}: clientName is required`);
+        }
+        if (entry.totalPrice == null || typeof entry.totalPrice !== "number" || entry.totalPrice <= 0) {
+          errors.push(`Entry ${i + 1}: totalPrice must be a positive number`);
+        }
+
+        // Conflict detection against existing BOOKED entries
+        const entryDateKey = new Date(entry.date).toISOString().split("T")[0];
+        const hasConflict = existingBooked.some((booked) => {
+          const bookedDateKey = new Date(booked.date).toISOString().split("T")[0];
+          return bookedDateKey === entryDateKey;
+        });
+        if (hasConflict) {
+          errors.push(`Entry ${i + 1}: date ${entryDateKey} conflicts with an existing platform booking`);
+        }
+      }
+
+      if (errors.length > 0) {
+        return res.status(400).json({ success: false, message: errors.join("; ") });
+      }
     }
 
     // ===== Availability atomic update =====

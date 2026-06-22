@@ -3,8 +3,8 @@ const User = require("../../models/user/user.schema");
 const Event = require("../../models/user/event.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
 const EventBooking = require("../../models/user/eventBooking.schema");
-const EventCenterTicket = require("../../models/user/eventCenterTicket.schema");
-const Ticket = require("../../models/user/eventTicket.schema");
+const EventCenterBooking = require("../../models/user/eventCenterBooking.schema");
+const Ticket = require("../../models/user/eventTicketType.schema");
 const UserEventTicket = require("../../models/user/userEventTicket.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
 const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
@@ -47,7 +47,7 @@ const getAdminOverview = async (req, res) => {
       Event.countDocuments({ status: "ACTION_REQUIRED" }),
       EventCenter.countDocuments({ status: "ACTION_REQUIRED" }),
       EventBooking.countDocuments(),
-      EventCenterTicket.countDocuments(),
+      EventCenterBooking.countDocuments(),
       UserEventTicket.countDocuments(),
       Ticket.countDocuments(),
       StaffInvitation.countDocuments({ status: "PENDING" }),
@@ -60,7 +60,7 @@ const getAdminOverview = async (req, res) => {
         { $match: { paymentStatus: "COMPLETED" } },
         { $group: { _id: "$currency", total: { $sum: "$totalAmount" }, count: { $sum: 1 } } },
       ]),
-      EventCenterTicket.aggregate([
+      EventCenterBooking.aggregate([
         { $match: { paymentStatus: "COMPLETED" } },
         { $group: { _id: "$totalPrice.currency", total: { $sum: "$totalPrice.amount" }, count: { $sum: 1 } } },
       ]),

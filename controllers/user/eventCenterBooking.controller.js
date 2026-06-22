@@ -1,25 +1,12 @@
-const EventCenterTicket = require("../../models/user/eventCenterTicket.schema");
+const EventCenterBooking = require("../../models/user/eventCenterBooking.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
 const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const mongoose = require("mongoose");
+const { hasSlotConflict } = require("../../utils/slotConflict");
+const { logBookingHistory } = require("./bookingHistory.controller");
 
-/**
- * Check if a proposed hourly slot overlaps with existing booked slots
- */
-function hasSlotConflict(newSlot, existingSlots, excludeBookingId) {
-  const newDateStr = new Date(newSlot.date).toISOString().split("T")[0];
-  const newStart = newSlot.startTime;
-  const newEnd = newSlot.endTime;
-
-  return existingSlots.some((existing) => {
-    const existingDateStr = new Date(existing.date).toISOString().split("T")[0];
-    if (existingDateStr !== newDateStr) return false;
-    if (excludeBookingId && String(existing.bookingId) === String(excludeBookingId)) return false;
-    if (existing.type !== "BOOKED" && existing.type !== "MANUAL") return false;
-    return newStart < existing.endTime && newEnd > existing.startTime;
-  });
-}
+const escapeRegex = (value = "") => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * Authorization helper: check if user can manage bookings for an event center
@@ -80,7 +67,7 @@ exports.getEventCenterBookings = async (req, res) => {
       query.status = status;
     }
 
-    // Since EventCenterTickets have an array of selectedDates, we filter based on the last date in the array
+    // Since EventCenterBookings have an array of selectedDates, we filter based on the last date in the array
     if (timeFilter === "upcoming") {
       query["selectedDates.date"] = { $gte: new Date(new Date().setHours(0, 0, 0, 0)) };
     } else if (timeFilter === "past") {
@@ -89,13 +76,13 @@ exports.getEventCenterBookings = async (req, res) => {
 
     const skip = (page - 1) * limit;
 
-    const bookings = await EventCenterTicket.find(query)
-      .populate("buyer", "firstName lastName email avatar")
+    const bookings = await EventCenterBooking.find(query)
+      .populate("buyer", "firstName surname email avatar")
       .sort({ "selectedDates.0.date": 1, createdAt: -1 })
       .skip(skip)
       .limit(parseInt(limit));
 
-    const total = await EventCenterTicket.countDocuments(query);
+    const total = await EventCenterBooking.countDocuments(query);
 
     res.status(200).json({
       success: true,
@@ -124,7 +111,7 @@ exports.getBookingDetails = async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid booking ID." });
     }
 
-    const booking = await EventCenterTicket.findById(bookingId).populate("buyer", "firstName surname email avatar phoneNumber");
+    const booking = await EventCenterBooking.findById(bookingId).populate("buyer", "firstName surname email avatar phoneNumber");
 
     if (!booking) {
       return res.status(404).json({ success: false, message: "Booking not found." });
@@ -166,19 +153,21 @@ exports.searchBooking = async (req, res) => {
       return res.status(403).json({ success: false, message: auth.error });
     }
 
+    const safeQuery = escapeRegex(query);
+
     // Try finding by exact ticket number first
-    let bookings = await EventCenterTicket.find({
+    let bookings = await EventCenterBooking.find({
       eventCenter: eventCenterId,
-      ticketNumber: { $regex: query, $options: "i" },
+      ticketNumber: { $regex: safeQuery, $options: "i" },
     }).populate("buyer", "firstName surname email avatar");
 
     if (bookings.length === 0) {
       // If not found by ticket number, search by guest details (name, email)
-      bookings = await EventCenterTicket.find({
+      bookings = await EventCenterBooking.find({
         eventCenter: eventCenterId,
         $or: [
-          { "guestDetails.fullName": { $regex: query, $options: "i" } },
-          { "guestDetails.email": { $regex: query, $options: "i" } },
+          { "guestDetails.fullName": { $regex: safeQuery, $options: "i" } },
+          { "guestDetails.email": { $regex: safeQuery, $options: "i" } },
         ],
       }).populate("buyer", "firstName surname email avatar");
     }
@@ -205,7 +194,7 @@ exports.manualCheckIn = async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid booking ID." });
     }
 
-    const booking = await EventCenterTicket.findById(bookingId);
+    const booking = await EventCenterBooking.findById(bookingId);
 
     if (!booking) {
       return res.status(404).json({ success: false, message: "Booking not found." });
@@ -216,7 +205,7 @@ exports.manualCheckIn = async (req, res) => {
       return res.status(403).json({ success: false, message: auth.error });
     }
 
-    if (booking.status !== "ACTIVE") {
+    if (!["ACTIVE", "CONFIRMED"].includes(booking.status)) {
       return res.status(400).json({ success: false, message: `Cannot check in. Booking is ${booking.status}.` });
     }
 
@@ -232,6 +221,19 @@ exports.manualCheckIn = async (req, res) => {
     };
 
     await booking.save();
+
+    // Log booking history
+    logBookingHistory({
+      eventCenter: booking.eventCenter,
+      ticket: booking._id,
+      bookingId: String(booking._id),
+      bookingType: "PLATFORM",
+      action: "CHECKED_IN",
+      performedBy: staffId,
+      dates: booking.selectedDates,
+      guestName: booking.guestDetails?.fullName || "",
+      totalPrice: booking.totalPrice,
+    });
 
     res.status(200).json({
       success: true,
@@ -250,12 +252,13 @@ exports.manualCheckIn = async (req, res) => {
 exports.cancelBooking = async (req, res) => {
   try {
     const { bookingId } = req.params;
+    const { reason } = req.body;
 
     if (!mongoose.Types.ObjectId.isValid(bookingId)) {
       return res.status(400).json({ success: false, message: "Invalid booking ID." });
     }
 
-    const booking = await EventCenterTicket.findById(bookingId);
+    const booking = await EventCenterBooking.findById(bookingId);
 
     if (!booking) {
       return res.status(404).json({ success: false, message: "Booking not found." });
@@ -298,6 +301,20 @@ exports.cancelBooking = async (req, res) => {
       await eventCenter.save();
     }
 
+    // Log booking history
+    logBookingHistory({
+      eventCenter: booking.eventCenter,
+      ticket: booking._id,
+      bookingId: String(booking._id),
+      bookingType: "PLATFORM",
+      action: "CANCELLED",
+      performedBy: req.user.id,
+      dates: booking.selectedDates,
+      guestName: booking.guestDetails?.fullName || "",
+      reason: reason || undefined,
+      totalPrice: booking.totalPrice,
+    });
+
     res.status(200).json({
       success: true,
       message: "Booking successfully cancelled.",
@@ -337,14 +354,14 @@ exports.getBookingStats = async (req, res) => {
       "selectedDates.date": { $gte: startOfDay, $lte: endOfDay },
     };
 
-    const totalExpectedToday = await EventCenterTicket.countDocuments(todaysBookingsQuery);
+    const totalExpectedToday = await EventCenterBooking.countDocuments(todaysBookingsQuery);
 
-    const checkedInToday = await EventCenterTicket.countDocuments({
+    const checkedInToday = await EventCenterBooking.countDocuments({
       ...todaysBookingsQuery,
       "checkIn.isCheckedIn": true,
     });
 
-    const totalActiveBookings = await EventCenterTicket.countDocuments({
+    const totalActiveBookings = await EventCenterBooking.countDocuments({
       eventCenter: eventCenterId,
       status: "ACTIVE"
     });
@@ -380,7 +397,7 @@ exports.rescheduleBooking = async (req, res) => {
       return res.status(400).json({ success: false, message: "New dates are required." });
     }
 
-    const booking = await EventCenterTicket.findById(bookingId);
+    const booking = await EventCenterBooking.findById(bookingId);
 
     if (!booking) {
       return res.status(404).json({ success: false, message: "Booking not found." });
@@ -428,6 +445,9 @@ exports.rescheduleBooking = async (req, res) => {
         }
       }
     }
+
+    // Capture old dates for history before updating
+    const previousDates = [...(booking.selectedDates || [])];
 
     // Remove old dates/slots from availability
     if (booking.bookingUnit === "day") {
@@ -485,6 +505,21 @@ exports.rescheduleBooking = async (req, res) => {
       });
     }
     await eventCenter.save();
+
+    // Log booking history
+    logBookingHistory({
+      eventCenter: booking.eventCenter,
+      ticket: booking._id,
+      bookingId: String(booking._id),
+      bookingType: "PLATFORM",
+      bookingUnit: booking.bookingUnit,
+      action: "RESCHEDULED",
+      performedBy: req.user.id,
+      dates: booking.selectedDates,
+      previousDates: previousDates,
+      guestName: booking.guestDetails?.fullName || "",
+      totalPrice: booking.totalPrice,
+    });
 
     res.status(200).json({
       success: true,

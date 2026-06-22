@@ -1,12 +1,13 @@
 const EventBooking = require("../../models/user/eventBooking.schema");
 const UserEventTicket = require("../../models/user/userEventTicket.schema");
-const Ticket = require("../../models/user/eventTicket.schema");
+const Ticket = require("../../models/user/eventTicketType.schema");
 const Event = require("../../models/user/event.schema");
 const User = require("../../models/user/user.schema");
-const { initializeTransaction, verifyTransaction } = require("../../services/paystack.service");
+const { getPaymentGateway } = require("../../services/payment");
 const { createTicketsForBooking } = require("./userEventTicket.controller");
-const paystackService = require("../../services/paystack.service"); // For type consistency if used elsewhere
 const crypto = require("crypto");
+
+const gateway = getPaymentGateway();
 
 
 /**
@@ -109,8 +110,8 @@ const createBooking = async (req, res) => {
 
     let savedBooking = null;
 
-    // Only save immediately if NOT Paystack or if it's FREE
-    if (paymentMethod !== "PAYSTACK" || calculatedTotal === 0) {
+    // Only save immediately if NOT card payment or if it's FREE
+    if (paymentMethod !== "CARD" || calculatedTotal === 0) {
       const newBooking = new EventBooking({
         eventId,
         buyer: buyerId,
@@ -122,23 +123,23 @@ const createBooking = async (req, res) => {
         items: processedItems,
         totalAmount: calculatedTotal,
         paymentMethod,
-        paystackReference: reference,
+        paymentReference: reference,
         paymentStatus: calculatedTotal === 0 ? "COMPLETED" : "PENDING",
       });
       savedBooking = await newBooking.save();
     }
 
     // 4. Handle Payment Flow
-    if (paymentMethod === "PAYSTACK" && calculatedTotal > 0) {
+    if (paymentMethod === "CARD" && calculatedTotal > 0) {
       // Get the event owner's subaccount details
-      const organiser = await User.findById(event.createdBy).select("paystackSubaccountCode");
+      const organiser = await User.findById(event.createdBy).select("vendorAccountCode");
 
-      // Initialize Paystack with full booking details in metadata
-      const paystackData = await initializeTransaction({
+      // Initialize payment with full booking details in metadata
+      const paymentData = await gateway.initializePayment({
         email: email,
-        amount: calculatedTotal / 100, // Service expects Naira
+        amount: calculatedTotal / 100, // Service expects main currency unit
         reference: reference,
-        subaccount: organiser?.paystackSubaccountCode || undefined,
+        subaccount: organiser?.vendorAccountCode || undefined,
         metadata: {
           eventId,
           buyerId,
@@ -159,8 +160,8 @@ const createBooking = async (req, res) => {
       return res.json({
         success: true,
         data: {
-          booking: savedBooking, // will be null for Paystack
-          payment: paystackData,
+          booking: savedBooking, // will be null for card payment
+          payment: paymentData,
         },
       });
     }
@@ -195,11 +196,11 @@ const verifyBooking = async (req, res) => {
   const { reference } = req.params;
 
   try {
-    // 1. Verify with Paystack first to get metadata if needed
-    const transaction = await verifyTransaction(reference);
+    // 1. Verify with payment gateway first to get metadata if needed
+    const transaction = await gateway.verifyPayment(reference);
 
     if (transaction.status === "success") {
-      let booking = await EventBooking.findOne({ paystackReference: reference });
+      let booking = await EventBooking.findOne({ paymentReference: reference });
 
       // If booking already exists and is completed, return success early to avoid duplicate generation/increments
       if (booking && booking.paymentStatus === "COMPLETED") {
@@ -242,8 +243,8 @@ const verifyBooking = async (req, res) => {
           },
           items,
           totalAmount,
-          paymentMethod: "PAYSTACK",
-          paystackReference: reference,
+          paymentMethod: "CARD",
+          paymentReference: reference,
           paymentStatus: "COMPLETED",
         });
         await booking.save();
@@ -282,10 +283,24 @@ const verifyBooking = async (req, res) => {
 
 const getMyBookings = async (req, res) => {
   try {
-    const bookings = await EventBooking.find({ buyer: req.user.id })
-      .populate("eventId", "title images location startDate")
-      .sort({ createdAt: -1 });
-    res.json({ success: true, data: bookings });
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
+    const skip = (page - 1) * limit;
+
+    const [bookings, total] = await Promise.all([
+      EventBooking.find({ buyer: req.user.id })
+        .populate("eventId", "title images location startDate")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit),
+      EventBooking.countDocuments({ buyer: req.user.id }),
+    ]);
+
+    res.json({
+      success: true,
+      data: bookings,
+      pagination: { total, page, limit, pages: Math.ceil(total / limit) },
+    });
   } catch (err) {
     console.error("[GET MY BOOKINGS ERROR]", err);
     res.status(500).json({ success: false, message: "Server error fetching bookings" });

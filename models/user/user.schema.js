@@ -98,7 +98,7 @@ const userSchema = new mongoose.Schema(
     },
     isIdentityVerified: {
       type: Boolean,
-      default: true,
+      default: false,
     },
     residentialAddress: {
       type: addressSchema,
@@ -133,10 +133,15 @@ const userSchema = new mongoose.Schema(
       },
     ],
     // Finance / Payout fields
+    vendorAccountCode: {
+      type: String,
+      default: null,
+      index: true,
+    },
+    // Legacy alias — kept during migration period
     paystackSubaccountCode: {
       type: String,
       default: null,
-      index: true, // Enable sub-millisecond lookups for webhooks and finance audits
     },
     bankDetails: {
       accountName: { type: String, trim: true },

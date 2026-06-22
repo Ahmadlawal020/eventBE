@@ -1,22 +1,35 @@
 const Event = require("../../models/user/event.schema");
-const Ticket = require("../../models/user/eventTicket.schema");
+const Ticket = require("../../models/user/eventTicketType.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
+
+/**
+ * Escape special regex characters to prevent ReDoS attacks
+ */
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 // 📋 Get Aggregated Listings (Events and Event Centers)
 const getListings = async (req, res) => {
   try {
-    const { 
-      q, 
-      location, 
-      eventTypes, 
-      venueTypes, 
-      amenities, 
-      minPrice, 
-      maxPrice, 
+    const {
+      q,
+      location,
+      eventTypes,
+      venueTypes,
+      amenities,
+      minPrice,
+      maxPrice,
       minCapacity,
       bookingType,
-      listingType 
+      listingType,
+      page = 1,
+      limit = 20,
     } = req.query;
+
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.min(50, Math.max(1, parseInt(limit)));
+    const skip = (pageNum - 1) * limitNum;
 
     const showEvents = !listingType || listingType === "event";
     const showCenters = !listingType || listingType === "eventCenter";
@@ -28,12 +41,13 @@ const getListings = async (req, res) => {
     if (showEvents) {
       const eventQuery = { status: { $in: ["LISTED", "PUBLISHED"] } };
 
-      if (q) eventQuery.title = { $regex: q, $options: "i" };
+      if (q) eventQuery.title = { $regex: escapeRegex(q), $options: "i" };
       if (location) {
+        const escapedLocation = escapeRegex(location);
         eventQuery.$or = [
-          { "location.addressString": { $regex: location, $options: "i" } },
-          { "location.city": { $regex: location, $options: "i" } },
-          { "location.country": { $regex: location, $options: "i" } },
+          { "location.addressString": { $regex: escapedLocation, $options: "i" } },
+          { "location.city": { $regex: escapedLocation, $options: "i" } },
+          { "location.country": { $regex: escapedLocation, $options: "i" } },
         ];
       }
       if (eventTypes) {
@@ -44,45 +58,55 @@ const getListings = async (req, res) => {
 
       const events = await Event.find(eventQuery).lean();
 
-      enrichedEvents = await Promise.all(
-        events.map(async (event) => {
-          const tickets = await Ticket.find({ eventId: event._id }).lean();
-          let lowestPrice = null;
-          let maxPriceVal = null;
-          let currency = null;
+      // Batch fetch all tickets for all events (fixes N+1 query)
+      const eventIds = events.map(e => e._id);
+      const allTickets = await Ticket.find({ eventId: { $in: eventIds } }).lean();
 
-          if (tickets.length > 0) {
-            const validTickets = tickets.filter(t => t.ticketType === "PAID" || t.ticketType === "FREE");
-            if (validTickets.length > 0) {
-              const prices = validTickets.map(t => t.ticketType === "FREE" ? 0 : (t.price?.amountCents / 100));
-              lowestPrice = Math.min(...prices);
-              maxPriceVal = Math.max(...prices);
-              const minTicket = validTickets.find(t => (t.ticketType === "FREE" ? 0 : (t.price?.amountCents / 100)) === lowestPrice) || validTickets[0];
-              currency = {
-                code: minTicket.currency?.code || "USD",
-                symbol: minTicket.currency?.symbol || "$"
-              };
-            }
+      // Group tickets by eventId
+      const ticketsByEvent = {};
+      allTickets.forEach(ticket => {
+        const eid = ticket.eventId.toString();
+        if (!ticketsByEvent[eid]) ticketsByEvent[eid] = [];
+        ticketsByEvent[eid].push(ticket);
+      });
+
+      enrichedEvents = events.map(event => {
+        const tickets = ticketsByEvent[event._id.toString()] || [];
+        let lowestPrice = null;
+        let maxPriceVal = null;
+        let currency = null;
+
+        if (tickets.length > 0) {
+          const validTickets = tickets.filter(t => t.ticketType === "PAID" || t.ticketType === "FREE");
+          if (validTickets.length > 0) {
+            const prices = validTickets.map(t => t.ticketType === "FREE" ? 0 : (t.price?.amountCents / 100));
+            lowestPrice = Math.min(...prices);
+            maxPriceVal = Math.max(...prices);
+            const minTicket = validTickets.find(t => (t.ticketType === "FREE" ? 0 : (t.price?.amountCents / 100)) === lowestPrice) || validTickets[0];
+            currency = {
+              code: minTicket.currency?.code || "USD",
+              symbol: minTicket.currency?.symbol || "$"
+            };
           }
+        }
 
-          return {
-            id: event._id,
-            title: event.title,
-            images: event.images,
-            location: event.location,
-            schedule: event.schedule,
-            eventType: event.eventType,
-            price: lowestPrice !== null ? {
-              amount: lowestPrice,
-              maxAmount: maxPriceVal,
-              currency: currency.code,
-              symbol: currency.symbol
-            } : null,
-            type: "event",
-            createdAt: event.createdAt
-          };
-        })
-      );
+        return {
+          id: event._id,
+          title: event.title,
+          images: event.images,
+          location: event.location,
+          schedule: event.schedule,
+          eventType: event.eventType,
+          price: lowestPrice !== null ? {
+            amount: lowestPrice,
+            maxAmount: maxPriceVal,
+            currency: currency.code,
+            symbol: currency.symbol
+          } : null,
+          type: "event",
+          createdAt: event.createdAt
+        };
+      });
 
       // Filter events by price (post-enrichment)
       if (minPrice || maxPrice) {
@@ -99,12 +123,13 @@ const getListings = async (req, res) => {
     if (showCenters) {
       const centerQuery = { status: "LISTED" };
 
-      if (q) centerQuery.venueName = { $regex: q, $options: "i" };
+      if (q) centerQuery.venueName = { $regex: escapeRegex(q), $options: "i" };
       if (location) {
+        const escapedLocation = escapeRegex(location);
         centerQuery.$or = [
-          { "location.addressString": { $regex: location, $options: "i" } },
-          { "location.city": { $regex: location, $options: "i" } },
-          { "location.country": { $regex: location, $options: "i" } },
+          { "location.addressString": { $regex: escapedLocation, $options: "i" } },
+          { "location.city": { $regex: escapedLocation, $options: "i" } },
+          { "location.country": { $regex: escapedLocation, $options: "i" } },
         ];
       }
       if (venueTypes) {
@@ -149,16 +174,25 @@ const getListings = async (req, res) => {
       });
     }
 
-    // --- 3️⃣ Combine and Sort ---
+    // --- 3️⃣ Combine, Sort, and Paginate ---
     const allListings = [...enrichedEvents, ...enrichedEventCenters].sort(
       (a, b) => new Date(b.createdAt) - new Date(a.createdAt)
     );
 
+    const total = allListings.length;
+    const paginatedListings = allListings.slice(skip, skip + limitNum);
+
     res.json({
       success: true,
       message: "Listings aggregated successfully",
-      count: allListings.length,
-      data: allListings,
+      count: paginatedListings.length,
+      data: paginatedListings,
+      pagination: {
+        total,
+        page: pageNum,
+        limit: limitNum,
+        pages: Math.ceil(total / limitNum),
+      },
     });
   } catch (err) {
     console.error("[GET LISTINGS] ERROR:", err);

@@ -1,5 +1,5 @@
 const Event = require("../../models/user/event.schema");
-const Ticket = require("../../models/user/eventTicket.schema");
+const Ticket = require("../../models/user/eventTicketType.schema");
 const UserEventTicket = require("../../models/user/userEventTicket.schema");
 const EventBooking = require("../../models/user/eventBooking.schema");
 const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");

@@ -37,12 +37,17 @@ const eventBookingSchema = new Schema(
     },
     paymentMethod: {
       type: String,
-      enum: ["PAYSTACK", "TRANSFER", "FREE"],
+      enum: ["CARD", "TRANSFER", "FREE", "PAYSTACK"], // PAYSTACK kept for migration
       required: true,
     },
-    paystackReference: {
+    paymentReference: {
       type: String,
       unique: true,
+      sparse: true,
+    },
+    // Legacy alias — kept during migration period
+    paystackReference: {
+      type: String,
       sparse: true,
     },
     status: {

@@ -1,8 +1,10 @@
 const User = require("../../models/user/user.schema");
-const EventCenterTicket = require("../../models/user/eventCenterTicket.schema");
-const paystackService = require("../../services/paystack.service");
+const EventCenterBooking = require("../../models/user/eventCenterBooking.schema");
+const { getPaymentGateway } = require("../../services/payment");
 const bcrypt = require("bcrypt");
 const mongoose = require("mongoose");
+
+const gateway = getPaymentGateway();
 
 /**
  * @desc    Get finance stats, balance, and recent transactions
@@ -13,10 +15,10 @@ const getFinanceStats = async (req, res) => {
   const userId = req.user.id;
 
   try {
-    const user = await User.findById(userId).select("bankDetails paystackSubaccountCode");
+    const user = await User.findById(userId).select("bankDetails vendorAccountCode");
 
     // 1. Scalable aggregation in DB: calculates earnings and pending totals without loading documents
-    const stats = await EventCenterTicket.aggregate([
+    const stats = await EventCenterBooking.aggregate([
       { $match: { organiser: new mongoose.Types.ObjectId(userId) } },
       {
         $group: {
@@ -48,7 +50,7 @@ const getFinanceStats = async (req, res) => {
     const successfulPayouts = 0; // Simulated for now
 
     // 2. Fetch only the top 10 completed transactions for the dashboard (extremely lightweight)
-    const recentTickets = await EventCenterTicket.find({
+    const recentTickets = await EventCenterBooking.find({
       organiser: userId,
       paymentStatus: "COMPLETED",
     })
@@ -78,7 +80,7 @@ const getFinanceStats = async (req, res) => {
           successfulPayouts,
         },
         transactions,
-        payoutMethod: user.bankDetails && user.paystackSubaccountCode ? user.bankDetails : null,
+        payoutMethod: user.bankDetails && user.vendorAccountCode ? user.bankDetails : null,
       },
     });
   } catch (error) {
@@ -94,7 +96,7 @@ const getFinanceStats = async (req, res) => {
  */
 const getBanksList = async (req, res) => {
   try {
-    const banks = await paystackService.getBanks();
+    const banks = await gateway.getBanks();
     res.status(200).json({ success: true, data: banks });
   } catch (error) {
     console.error("[GET BANKS ERROR]", error);
@@ -114,7 +116,7 @@ const verifyAccount = async (req, res) => {
   }
 
   try {
-    const accountInfo = await paystackService.resolveAccountNumber(accountNumber, bankCode);
+    const accountInfo = await gateway.resolveBankAccount(accountNumber, bankCode);
     res.status(200).json({ success: true, data: accountInfo });
   } catch (error) {
     console.error("[VERIFY ACCOUNT ERROR]", error);
@@ -174,24 +176,24 @@ const setupSubaccount = async (req, res) => {
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ success: false, message: "User not found" });
 
-    // Block if user already has a subaccount — must remove first
-    if (user.paystackSubaccountCode) {
+    // Block if user already has a vendor account — must remove first
+    if (user.vendorAccountCode) {
       return res.status(400).json({
         success: false,
         message: "An existing payout method must be removed before adding a new one.",
       });
     }
 
-    // Create Subaccount on Paystack
-    const subaccountData = await paystackService.createSubaccount({
-      business_name: user.fullName || accountName,
-      settlement_bank: bankCode,
-      account_number: accountNumber,
-      percentage_charge: 10, // Platform fee
+    // Create vendor account via payment gateway
+    const vendorData = await gateway.createVendorAccount({
+      businessName: user.fullName || accountName,
+      bankCode: bankCode,
+      accountNumber: accountNumber,
+      platformFeePercent: 10,
     });
 
     // Save details to user profile
-    user.paystackSubaccountCode = subaccountData.subaccount_code;
+    user.vendorAccountCode = vendorData.vendorCode;
     user.bankDetails = {
       accountName,
       accountNumber,
@@ -223,20 +225,20 @@ const removeSubaccount = async (req, res) => {
     const user = await User.findById(userId);
     if (!user) return res.status(404).json({ success: false, message: "User not found" });
 
-    if (!user.paystackSubaccountCode) {
+    if (!user.vendorAccountCode) {
       return res.status(400).json({ success: false, message: "No payout method linked to remove" });
     }
 
-    // 1. Deactivate the subaccount on Paystack
+    // 1. Deactivate the vendor account on payment gateway
     try {
-      await paystackService.deactivateSubaccount(user.paystackSubaccountCode);
-    } catch (paystackError) {
-      // Log Paystack error, but allow DB cleanup so user doesn't get stuck in a broken state
-      console.error("[PAYSTACK DEACTIVATE SUBACCOUNT ERROR]", paystackError.message || paystackError);
+      await gateway.deactivateVendorAccount(user.vendorAccountCode);
+    } catch (gatewayError) {
+      // Log error, but allow DB cleanup so user doesn't get stuck
+      console.error("[GATEWAY DEACTIVATE VENDOR ACCOUNT ERROR]", gatewayError.message || gatewayError);
     }
 
-    // 2. Clear subaccount and bank details locally
-    user.paystackSubaccountCode = undefined;
+    // 2. Clear vendor account and bank details locally
+    user.vendorAccountCode = undefined;
     user.bankDetails = undefined;
     await user.save();
 
