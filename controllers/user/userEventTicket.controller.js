@@ -1,7 +1,7 @@
 const UserEventTicket = require("../../models/user/userEventTicket.schema");
 const Ticket = require("../../models/user/eventTicketType.schema");
 const Event = require("../../models/user/event.schema");
-const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
+const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
 const { generateTicketNumber, generateQRPayload, verifyQRPayload } = require("../../utils/qr");
 
@@ -17,14 +17,14 @@ async function authorizeScanAccess(userId, eventId) {
 
   if (String(event.createdBy) === userId) return { authorized: true };
 
-  const coHostInvite = await CoHostInvitation.findOne({
-    coHost: userId,
+  const coOrganiserInvite = await CoOrganiserInvitation.findOne({
+    coOrganiser: userId,
     host: event.createdBy,
     status: "ACCEPTED",
     "listings.listingId": event._id,
     permissions: { $in: ["SCAN_TICKET", "ALL_ACCESS"] },
   }).lean();
-  if (coHostInvite) return { authorized: true };
+  if (coOrganiserInvite) return { authorized: true };
 
   const staffInvite = await StaffInvitation.findOne({
     staff: userId,
@@ -142,20 +142,13 @@ const createTicketsForBooking = async (booking) => {
       ticketTypeMap[tt._id.toString()] = tt;
     });
 
-    // 3. Build all ticket documents + inventory updates
-    const inventoryUpdates = [];
-
+    // 3. Build all ticket documents
     for (const item of booking.items) {
       const ticketType = ticketTypeMap[item.ticketId.toString()];
       if (!ticketType) continue;
 
-      // Queue inventory update (batched below)
-      inventoryUpdates.push({
-        updateOne: {
-          filter: { _id: item.ticketId },
-          update: { $inc: { soldQuantity: item.quantity } },
-        },
-      });
+      // soldQuantity is already atomically incremented at booking creation time.
+      // No additional inventory update needed here.
 
       const ticketSnapshot = {
         name: ticketType.name,
@@ -189,15 +182,10 @@ const createTicketsForBooking = async (booking) => {
       }
     }
 
-    // 4. Execute bulk operations in parallel for maximum throughput
-    const [savedTickets] = await Promise.all([
-      userEventTickets.length > 0
-        ? UserEventTicket.insertMany(userEventTickets, { ordered: false })
-        : Promise.resolve([]),
-      inventoryUpdates.length > 0
-        ? Ticket.bulkWrite(inventoryUpdates)
-        : Promise.resolve(),
-    ]);
+    // 4. Execute bulk insert for tickets
+    const savedTickets = userEventTickets.length > 0
+      ? await UserEventTicket.insertMany(userEventTickets, { ordered: false })
+      : [];
 
     return savedTickets;
   } catch (error) {
@@ -343,6 +331,12 @@ const getEventCheckInStats = async (req, res) => {
   const { eventId } = req.params;
 
   try {
+    // Authorization check: only event owner/co-organiser/staff can view stats
+    const auth = await authorizeScanAccess(req.user.id, eventId);
+    if (!auth.authorized) {
+      return res.status(403).json({ success: false, message: auth.error });
+    }
+
     const [total, redeemed, unredeemed, cancelled] = await Promise.all([
       UserEventTicket.countDocuments({ eventId }),
       UserEventTicket.countDocuments({ eventId, status: "REDEEMED" }),

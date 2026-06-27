@@ -2,7 +2,7 @@ const Event = require("../../models/user/event.schema");
 const User = require("../../models/user/user.schema");
 const Ticket = require("../../models/user/eventTicketType.schema");
 const mongoose = require("mongoose");
-const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
+const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const cloudinary = require("../../utils/cloudinary");
 
 // 📌 Create Event
@@ -86,7 +86,7 @@ const getEventById = async (req, res) => {
   try {
     const event = await Event.findById(id)
       .populate("createdBy", "firstName surname email profilePicture")
-      .populate("coHosts", "firstName surname email profilePicture")
+      .populate("coOrganisers", "firstName surname email profilePicture")
       .populate("staff", "firstName surname email profilePicture");
     if (!event)
       return res
@@ -109,7 +109,7 @@ const getMyDraftEvents = async (req, res) => {
   try {
     const drafts = await Event.find({
       status: "IN_PROGRESS",
-      $or: [{ createdBy: req.user.id }, { coHosts: req.user.id }],
+      $or: [{ createdBy: req.user.id }, { coOrganisers: req.user.id }],
     }).populate("createdBy", "firstName surname email");
 
     res.json({
@@ -152,15 +152,15 @@ const updateEvent = async (req, res) => {
       });
     }
 
-    // Permission check: co-hosts need MANAGE_LISTING
+    // Permission check: co-organisers need MANAGE_LISTING
     const isOwner = prevEvent.createdBy?.toString() === req.user.id;
     if (!isOwner) {
-      const coHostInvite = await CoHostInvitation.findOne({
-        coHost: req.user.id,
+      const coOrganiserInvite = await CoOrganiserInvitation.findOne({
+        coOrganiser: req.user.id,
         status: "ACCEPTED",
         "listings.listingId": id,
       }).lean();
-      const perms = coHostInvite?.permissions || [];
+      const perms = coOrganiserInvite?.permissions || [];
       if (!perms.includes("MANAGE_LISTING") && !perms.includes("ALL_ACCESS")) {
         return res.status(403).json({
           success: false,
@@ -465,7 +465,7 @@ const getMyEvents = async (req, res) => {
 
     const events = await Event.find({
       status: { $in: ["LISTED", "ACTION_REQUIRED", "UNLISTED"] },
-      $or: [{ createdBy: req.user.id }, { coHosts: req.user.id }],
+      $or: [{ createdBy: req.user.id }, { coOrganisers: req.user.id }],
     }).populate("createdBy", "firstName surname email");
 
     res.json({
@@ -495,7 +495,7 @@ const getPersonalEventListings = async (req, res) => {
     await syncUserEvents(req.user.id);
 
     const events = await Event.find({
-      $or: [{ createdBy: req.user.id }, { coHosts: req.user.id }],
+      $or: [{ createdBy: req.user.id }, { coOrganisers: req.user.id }],
     })
       .select({
         title: 1,
@@ -520,7 +520,7 @@ const getPersonalEventListings = async (req, res) => {
         location: obj.location || null,
         images: obj.images || [], // ✅ FIXED
         createdAt: obj.createdAt,
-        isCoHost: obj.createdBy?.toString() !== userId,
+        isCoOrganiser: obj.createdBy?.toString() !== userId,
       };
     });
 
@@ -559,18 +559,34 @@ const deleteEventPerformer = async (req, res) => {
       });
     }
 
-    const initialCount = event.performers.length;
+    const performer = event.performers.id(performerId);
 
-    event.performers = event.performers.filter(
-      (p) => p._id.toString() !== performerId,
-    );
-
-    if (event.performers.length === initialCount) {
+    if (!performer) {
       return res.status(404).json({
         success: false,
         message: "Performer not found",
       });
     }
+
+    // Clean up Cloudinary image if it exists
+    if (performer.image && !performer.image.startsWith("file://")) {
+      const parts = performer.image.split("/upload/");
+      if (parts.length >= 2) {
+        const withoutVersion = parts[1].replace(/^v\d+\//, "");
+        const publicId = withoutVersion.replace(/\.[^.]+$/, "");
+        if (publicId) {
+          try {
+            await cloudinary.uploader.destroy(publicId);
+          } catch (cloudinaryErr) {
+            console.error("[CLOUDINARY DELETE ERROR]", cloudinaryErr);
+          }
+        }
+      }
+    }
+
+    event.performers = event.performers.filter(
+      (p) => p._id.toString() !== performerId,
+    );
 
     await event.save();
 
@@ -635,6 +651,61 @@ const updateEventPerformer = async (req, res) => {
   }
 };
 
+// 🗑️ Delete Performer Image
+const deletePerformerImage = async (req, res) => {
+  const { id, performerId } = req.params;
+  const { publicId } = req.body;
+
+  if (!publicId) {
+    return res.status(400).json({
+      success: false,
+      message: "publicId is required",
+    });
+  }
+
+  try {
+    const event = await Event.findById(id);
+
+    if (!event) {
+      return res.status(404).json({
+        success: false,
+        message: "Event not found",
+      });
+    }
+
+    const performer = event.performers.id(performerId);
+
+    if (!performer) {
+      return res.status(404).json({
+        success: false,
+        message: "Performer not found",
+      });
+    }
+
+    // Delete from Cloudinary
+    try {
+      await cloudinary.uploader.destroy(publicId);
+    } catch (cloudinaryErr) {
+      console.error("[CLOUDINARY DELETE ERROR]", cloudinaryErr);
+    }
+
+    performer.image = null;
+    await event.save();
+
+    res.json({
+      success: true,
+      message: "Performer image deleted successfully",
+      data: performer,
+    });
+  } catch (err) {
+    console.error("[DELETE PERFORMER IMAGE]", err);
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+    });
+  }
+};
+
 // ===================== SYNC EVENTS ON VERIFICATION =====================
 const syncUserEvents = async (userId) => {
   try {
@@ -665,6 +736,7 @@ module.exports = {
   getEventById,
   getMyDraftEvents,
   updateEventPerformer,
+  deletePerformerImage,
   updateEvent,
   deleteEvent,
   getPersonalEventListings,

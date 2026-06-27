@@ -16,6 +16,7 @@ const gateway = getPaymentGateway();
 const createBooking = async (req, res) => {
   const { eventId, items, paymentMethod, totalAmount } = req.body;
   const buyerId = req.user.id; // From verifyJWT middleware
+  let reservedTickets = []; // Track atomic reservations for rollback
 
   try {
     // 1. Fetch User details for automated filling
@@ -35,10 +36,18 @@ const createBooking = async (req, res) => {
     }
 
     // 2. Validate Tickets and Inventory
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ success: false, message: "At least one ticket item is required." });
+    }
+
     const processedItems = [];
     let calculatedTotal = 0;
 
     for (const item of items) {
+      if (!item.product || !item.quantity || item.quantity < 1) {
+        return res.status(400).json({ success: false, message: "Each item must have a valid product and quantity >= 1." });
+      }
+
       const ticketType = await Ticket.findById(item.product);
       if (!ticketType) {
         return res.status(404).json({ success: false, message: `Ticket type ${item.product} not found` });
@@ -66,10 +75,24 @@ const createBooking = async (req, res) => {
         });
       }
 
-      const available = ticketType.totalQuantity - ticketType.soldQuantity;
-      if (available < item.quantity) {
+      // Atomic inventory reservation: check + increment in one operation
+      const reservation = await Ticket.findOneAndUpdate(
+        {
+          _id: item.product,
+          $expr: { $gte: [{ $subtract: ["$totalQuantity", "$soldQuantity"] }, item.quantity] },
+        },
+        { $inc: { soldQuantity: item.quantity } },
+        { new: true },
+      );
+
+      if (!reservation) {
+        // Rollback previous reservations
+        for (const prev of reservedTickets) {
+          await Ticket.findByIdAndUpdate(prev.ticketId, { $inc: { soldQuantity: -prev.quantity } });
+        }
         return res.status(400).json({ success: false, message: `Not enough tickets available for ${ticketType.name}` });
       }
+      reservedTickets.push({ ticketId: item.product, quantity: item.quantity });
 
       let pricePerUnit = 0;
       if (ticketType.ticketType === "FREE") {
@@ -184,6 +207,12 @@ const createBooking = async (req, res) => {
     });
 
   } catch (error) {
+    // Rollback any atomic reservations on unexpected error
+    for (const prev of reservedTickets) {
+      try {
+        await Ticket.findByIdAndUpdate(prev.ticketId, { $inc: { soldQuantity: -prev.quantity } });
+      } catch (_) {}
+    }
     console.error("[CREATE BOOKING ERROR]", error);
     res.status(500).json({ success: false, message: "Server error during checkout" });
   }
@@ -196,50 +225,71 @@ const verifyBooking = async (req, res) => {
   const { reference } = req.params;
 
   try {
-    // 1. Verify with payment gateway first to get metadata if needed
-    const transaction = await gateway.verifyPayment(reference);
+    // 1. Verify with payment gateway
+    let transaction;
+    try {
+      transaction = await gateway.verifyPayment(reference);
+    } catch (gatewayError) {
+      console.error(`[VERIFY BOOKING] Gateway verification failed for ref ${reference}:`, gatewayError.message);
+      return res.status(502).json({
+        success: false,
+        message: "Could not verify payment with payment provider. Please try again.",
+      });
+    }
 
-    if (transaction.status === "success") {
-      let booking = await EventBooking.findOne({ paymentReference: reference });
+    if (transaction.status !== "success") {
+      return res.status(400).json({
+        success: false,
+        message: `Payment status: ${transaction.status}`,
+      });
+    }
 
-      // If booking already exists and is completed, return success early to avoid duplicate generation/increments
-      if (booking && booking.paymentStatus === "COMPLETED") {
-        return res.json({
-          success: true,
-          message: "Payment already verified and tickets generated.",
-          data: { booking }
+    // 2. Find or create booking
+    let booking = await EventBooking.findOne({ paymentReference: reference });
+
+    // Idempotent: already completed
+    if (booking && booking.paymentStatus === "COMPLETED") {
+      return res.json({
+        success: true,
+        message: "Payment already verified and tickets generated.",
+        data: { booking }
+      });
+    }
+
+    // Create booking from Paystack metadata (for CARD payments that didn't save a booking upfront)
+    if (!booking) {
+      let metadata = transaction.metadata;
+
+      if (typeof metadata === "string" && metadata.trim() !== "") {
+        try {
+          metadata = JSON.parse(metadata);
+        } catch (e) {
+          console.error(`[VERIFY BOOKING] Failed to parse metadata for ref ${reference}:`, e);
+          return res.status(400).json({
+            success: false,
+            message: "Payment metadata is corrupted. Please contact support.",
+          });
+        }
+      }
+
+      const { eventId, buyerId, items, totalAmount, fullName, phoneNumber } = metadata || {};
+
+      if (!eventId || !buyerId || !items) {
+        console.error(`[VERIFY BOOKING] Missing metadata fields for ref ${reference}. Metadata:`, JSON.stringify(metadata));
+        return res.status(400).json({
+          success: false,
+          message: "Booking details missing in payment metadata. Please contact support.",
         });
       }
 
-      // 2. If booking doesn't exist, create it from metadata
-      if (!booking) {
-        let metadata = transaction.metadata;
-        
-        // Paystack sometimes returns metadata as a string
-        if (typeof metadata === "string" && metadata.trim() !== "") {
-          try {
-            metadata = JSON.parse(metadata);
-          } catch (e) {
-            console.error("[METADATA PARSE ERROR]", e);
-          }
-        }
-
-        const { eventId, buyerId, items, totalAmount, fullName, phoneNumber } = metadata || {};
-
-        if (!eventId || !buyerId || !items) {
-           return res.status(400).json({ 
-             success: false, 
-             message: "Booking details missing in payment metadata. Please contact support." 
-           });
-        }
-        
+      try {
         booking = new EventBooking({
           eventId,
           buyer: buyerId,
           guestDetails: {
             fullName,
             phoneNumber,
-            email: transaction.customer.email,
+            email: transaction.customer?.email,
           },
           items,
           totalAmount,
@@ -248,36 +298,60 @@ const verifyBooking = async (req, res) => {
           paymentStatus: "COMPLETED",
         });
         await booking.save();
-      } else {
-        // If it exists but is pending, mark as completed
-        if (booking.paymentStatus !== "COMPLETED") {
-          booking.paymentStatus = "COMPLETED";
-          await booking.save();
+      } catch (saveError) {
+        // Handle duplicate key race condition (webhook or parallel verify)
+        if (saveError.code === 11000) {
+          console.log(`[VERIFY BOOKING] Duplicate booking for ref ${reference}, fetching existing`);
+          booking = await EventBooking.findOne({ paymentReference: reference });
+          if (booking && booking.paymentStatus !== "COMPLETED") {
+            booking.paymentStatus = "COMPLETED";
+            await booking.save();
+          }
+        } else {
+          console.error(`[VERIFY BOOKING] Failed to save booking for ref ${reference}:`, saveError);
+          return res.status(500).json({
+            success: false,
+            message: "Failed to create booking record. Please try again.",
+          });
         }
       }
+    } else {
+      // Existing pending booking — mark as completed
+      booking.paymentStatus = "COMPLETED";
+      await booking.save();
+    }
 
-      // 3. Generate Individual Tickets
-      const tickets = await createTicketsForBooking(booking);
-
+    // 3. Generate Individual Tickets (idempotent — skip if tickets already exist)
+    let tickets;
+    try {
+      const existingTickets = await UserEventTicket.find({ bookingId: booking._id }).lean();
+      if (existingTickets.length > 0) {
+        tickets = existingTickets;
+      } else {
+        tickets = await createTicketsForBooking(booking);
+      }
+    } catch (ticketError) {
+      console.error(`[VERIFY BOOKING] Ticket generation failed for ref ${reference}:`, ticketError);
+      // Booking is saved as COMPLETED, so the webhook or retry can generate tickets
       return res.json({
         success: true,
-        message: "Payment verified and tickets generated",
-        data: {
-          booking,
-          tickets
-        },
-      });
-    } else {
-      return res.status(400).json({
-        success: false,
-        message: `Payment status: ${transaction.status}`,
-        data: transaction,
+        message: "Payment verified. Tickets are being generated — please check your tickets shortly.",
+        data: { booking, tickets: [] },
       });
     }
 
+    return res.json({
+      success: true,
+      message: "Payment verified and tickets generated",
+      data: {
+        booking,
+        tickets
+      },
+    });
+
   } catch (error) {
-    console.error("[VERIFY BOOKING ERROR]", error);
-    res.status(500).json({ success: false, message: "Verification failed" });
+    console.error(`[VERIFY BOOKING] Unexpected error for ref ${req.params.reference}:`, error);
+    res.status(500).json({ success: false, message: "Verification failed. Please try again." });
   }
 };
 

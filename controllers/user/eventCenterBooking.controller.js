@@ -1,7 +1,7 @@
 const EventCenterBooking = require("../../models/user/eventCenterBooking.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
-const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
+const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const mongoose = require("mongoose");
 const { hasSlotConflict } = require("../../utils/slotConflict");
 const { logBookingHistory } = require("./bookingHistory.controller");
@@ -22,14 +22,14 @@ async function authorizeBookingAccess(userId, eventCenterId) {
   if (String(eventCenter.createdBy) === userId) return { authorized: true };
 
   // Co-organiser with MANAGE_BOOKINGS, ALL_ACCESS, or VIEW_CALENDAR
-  const coHostInvite = await CoHostInvitation.findOne({
-    coHost: userId,
+  const coOrganiserInvite = await CoOrganiserInvitation.findOne({
+    coOrganiser: userId,
     host: eventCenter.createdBy,
     status: "ACCEPTED",
     "listings.listingId": eventCenter._id,
     permissions: { $in: ["MANAGE_BOOKINGS", "ALL_ACCESS", "VIEW_CALENDAR"] }
   });
-  if (coHostInvite) return { authorized: true };
+  if (coOrganiserInvite) return { authorized: true };
 
   // Staff with MANAGE_BOOKINGS
   const staffInvite = await StaffInvitation.findOne({
@@ -183,7 +183,7 @@ exports.searchBooking = async (req, res) => {
 };
 
 /**
- * Manually check in a guest for a booking
+ * Manually check in a guest for a booking (atomic)
  */
 exports.manualCheckIn = async (req, res) => {
   try {
@@ -195,7 +195,6 @@ exports.manualCheckIn = async (req, res) => {
     }
 
     const booking = await EventCenterBooking.findById(bookingId);
-
     if (!booking) {
       return res.status(404).json({ success: false, message: "Booking not found." });
     }
@@ -205,40 +204,54 @@ exports.manualCheckIn = async (req, res) => {
       return res.status(403).json({ success: false, message: auth.error });
     }
 
-    if (!["ACTIVE", "CONFIRMED"].includes(booking.status)) {
-      return res.status(400).json({ success: false, message: `Cannot check in. Booking is ${booking.status}.` });
+    // Atomic check-in: only succeeds if not already checked in
+    const updated = await EventCenterBooking.findOneAndUpdate(
+      {
+        _id: bookingId,
+        status: { $in: ["ACTIVE", "CONFIRMED"] },
+        "checkIn.isCheckedIn": { $ne: true },
+      },
+      {
+        $set: {
+          "checkIn.isCheckedIn": true,
+          "checkIn.checkedInAt": new Date(),
+          "checkIn.checkedInBy": staffId,
+          "checkIn.method": "MANUAL",
+        },
+      },
+      { new: true },
+    );
+
+    if (!updated) {
+      // Check why it failed
+      const existing = await EventCenterBooking.findById(bookingId).select("status checkIn").lean();
+      if (!existing) {
+        return res.status(404).json({ success: false, message: "Booking not found." });
+      }
+      if (existing.checkIn?.isCheckedIn) {
+        return res.status(400).json({ success: false, message: "Guest is already checked in." });
+      }
+      return res.status(400).json({ success: false, message: `Cannot check in. Booking is ${existing.status}.` });
     }
-
-    if (booking.checkIn && booking.checkIn.isCheckedIn) {
-      return res.status(400).json({ success: false, message: "Guest is already checked in." });
-    }
-
-    booking.checkIn = {
-      isCheckedIn: true,
-      checkedInAt: new Date(),
-      checkedInBy: staffId,
-      method: "MANUAL",
-    };
-
-    await booking.save();
 
     // Log booking history
     logBookingHistory({
-      eventCenter: booking.eventCenter,
-      ticket: booking._id,
-      bookingId: String(booking._id),
+      eventCenter: updated.eventCenter,
+      ticket: updated._id,
+      bookingId: String(updated._id),
       bookingType: "PLATFORM",
+      bookingUnit: updated.bookingUnit,
       action: "CHECKED_IN",
       performedBy: staffId,
-      dates: booking.selectedDates,
-      guestName: booking.guestDetails?.fullName || "",
-      totalPrice: booking.totalPrice,
+      dates: updated.selectedDates,
+      guestName: updated.guestDetails?.fullName || "",
+      totalPrice: updated.totalPrice,
     });
 
     res.status(200).json({
       success: true,
       message: "Guest successfully checked in manually.",
-      data: booking,
+      data: updated,
     });
   } catch (error) {
     console.error("Error checking in guest manually:", error);
@@ -273,25 +286,45 @@ exports.cancelBooking = async (req, res) => {
       return res.status(400).json({ success: false, message: "Booking is already cancelled." });
     }
 
+    // PENDING_REVIEW bookings must go through declineBooking (handles refund properly)
+    if (booking.status === "PENDING_REVIEW") {
+      return res.status(400).json({
+        success: false,
+        message: "PENDING_REVIEW bookings must be declined, not cancelled. Use the decline endpoint.",
+      });
+    }
+
     if (booking.checkIn && booking.checkIn.isCheckedIn) {
       return res.status(400).json({ success: false, message: "Cannot cancel. Guest is already checked in." });
     }
 
     booking.status = "CANCELLED";
+
+    // Refund payment if it was completed
+    if (booking.paymentStatus === "COMPLETED" && booking.paymentReference) {
+      try {
+        const { getPaymentGateway } = require("../../services/payment");
+        const gw = getPaymentGateway();
+        await gw.refundPayment(booking.paymentReference);
+        booking.paymentStatus = "REFUNDED";
+      } catch (refundErr) {
+        console.error("[CANCEL BOOKING] Refund failed:", refundErr.message);
+        booking.paymentStatus = "FAILED_REFUND";
+      }
+    }
+
     await booking.save();
 
     // Remove booked dates/slots from event center's availability
     const eventCenter = await EventCenter.findById(booking.eventCenter);
     if (eventCenter) {
       if (booking.bookingUnit === "day") {
-        // Use bookingId matching to avoid removing other bookings' dates
         eventCenter.availability.unavailableDates = (
           eventCenter.availability.unavailableDates || []
         ).filter((entry) => {
           return String(entry.bookingId) !== String(booking._id);
         });
       } else if (booking.bookingUnit === "hour") {
-        // Remove matching slots from unavailableSlots
         eventCenter.availability.unavailableSlots = (
           eventCenter.availability.unavailableSlots || []
         ).filter((slot) => {
@@ -307,6 +340,7 @@ exports.cancelBooking = async (req, res) => {
       ticket: booking._id,
       bookingId: String(booking._id),
       bookingType: "PLATFORM",
+      bookingUnit: booking.bookingUnit,
       action: "CANCELLED",
       performedBy: req.user.id,
       dates: booking.selectedDates,
@@ -350,7 +384,7 @@ exports.getBookingStats = async (req, res) => {
     // Get all bookings that include today in their selected dates
     const todaysBookingsQuery = {
       eventCenter: eventCenterId,
-      status: "ACTIVE",
+      status: { $in: ["ACTIVE", "CONFIRMED"] },
       "selectedDates.date": { $gte: startOfDay, $lte: endOfDay },
     };
 
@@ -363,7 +397,7 @@ exports.getBookingStats = async (req, res) => {
 
     const totalActiveBookings = await EventCenterBooking.countDocuments({
       eventCenter: eventCenterId,
-      status: "ACTIVE"
+      status: { $in: ["ACTIVE", "CONFIRMED"] },
     });
 
     res.status(200).json({
@@ -449,16 +483,12 @@ exports.rescheduleBooking = async (req, res) => {
     // Capture old dates for history before updating
     const previousDates = [...(booking.selectedDates || [])];
 
-    // Remove old dates/slots from availability
+    // Remove old dates/slots from availability (filter by bookingId to avoid removing other bookings' dates)
     if (booking.bookingUnit === "day") {
-      const oldDateStrings = (booking.selectedDates || []).map(
-        (d) => new Date(d.date).toISOString().split("T")[0]
-      );
       eventCenter.availability.unavailableDates = (
         eventCenter.availability.unavailableDates || []
       ).filter((entry) => {
-        const entryDateStr = new Date(entry.date).toISOString().split("T")[0];
-        return !oldDateStrings.includes(entryDateStr);
+        return String(entry.bookingId) !== String(booking._id);
       });
     } else if (booking.bookingUnit === "hour") {
       eventCenter.availability.unavailableSlots = (

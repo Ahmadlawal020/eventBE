@@ -1,49 +1,49 @@
 const User = require("../../models/user/user.schema");
-const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
+const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const Event = require("../../models/user/event.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
 const mongoose = require("mongoose");
 
 /**
- * 📊 Get Aggregated Co-Host Statistics for Organiser Dashboard
+ * Get Aggregated Co-Organiser Statistics for Organiser Dashboard
  */
-exports.getOrganiserCoHostStats = async (req, res) => {
+exports.getOrganiserCoOrganiserStats = async (req, res) => {
   try {
     const organiserId = req.user.id;
 
-    // 1. Get all co-hosts associated with organiser's listings
+    // 1. Get all co-organisers associated with organiser's listings
     const [events, centers] = await Promise.all([
-      Event.find({ createdBy: organiserId }).select("coHosts title"),
-      EventCenter.find({ createdBy: organiserId }).select("coHosts venueName"),
+      Event.find({ createdBy: organiserId }).select("coOrganisers title"),
+      EventCenter.find({ createdBy: organiserId }).select("coOrganisers venueName"),
     ]);
 
-    const coHostMap = new Map(); // Store coHostId -> count of shared listings
+    const coOrganiserMap = new Map(); // Store coOrganiserId -> count of shared listings
     let sharedListingsCount = 0;
 
     events.forEach(e => {
-      if (e.coHosts && e.coHosts.length > 0) {
+      if (e.coOrganisers && e.coOrganisers.length > 0) {
         sharedListingsCount++;
-        e.coHosts.forEach(id => {
+        e.coOrganisers.forEach(id => {
           const strId = id.toString();
-          coHostMap.set(strId, (coHostMap.get(strId) || 0) + 1);
+          coOrganiserMap.set(strId, (coOrganiserMap.get(strId) || 0) + 1);
         });
       }
     });
 
     centers.forEach(c => {
-      if (c.coHosts && c.coHosts.length > 0) {
+      if (c.coOrganisers && c.coOrganisers.length > 0) {
         sharedListingsCount++;
-        c.coHosts.forEach(id => {
+        c.coOrganisers.forEach(id => {
           const strId = id.toString();
-          coHostMap.set(strId, (coHostMap.get(strId) || 0) + 1);
+          coOrganiserMap.set(strId, (coOrganiserMap.get(strId) || 0) + 1);
         });
       }
     });
 
-    const activeCoHostsCount = coHostMap.size;
+    const activeCoOrganisersCount = coOrganiserMap.size;
 
     // 2. Get pending invitations
-    const pendingInvites = await CoHostInvitation.countDocuments({
+    const pendingInvites = await CoOrganiserInvitation.countDocuments({
       host: organiserId,
       status: "PENDING"
     });
@@ -51,55 +51,55 @@ exports.getOrganiserCoHostStats = async (req, res) => {
     res.json({
       success: true,
       data: {
-        activeCoHosts: activeCoHostsCount,
+        activeCoOrganisers: activeCoOrganisersCount,
         sharedListings: sharedListingsCount,
         pendingInvitations: pendingInvites,
       }
     });
   } catch (error) {
-    console.error("[GET ORGANISER CO-HOST STATS] ERROR:", error);
+    console.error("[GET ORGANISER CO-ORGANISER STATS] ERROR:", error);
     res.status(500).json({ success: false, message: "Server error" });
   }
 };
 
 /**
- * 👥 Get All Co-Hosts
+ * Get All Co-Organisers
  */
 exports.getAllCoOrganisers = async (req, res) => {
   try {
     const organiserId = req.user.id;
 
-    // 1. Get all unique co-hosts
+    // 1. Get all unique co-organisers
     const [events, centers] = await Promise.all([
-      Event.find({ createdBy: organiserId }).select("coHosts"),
-      EventCenter.find({ createdBy: organiserId }).select("coHosts"),
+      Event.find({ createdBy: organiserId }).select("coOrganisers"),
+      EventCenter.find({ createdBy: organiserId }).select("coOrganisers"),
     ]);
 
-    const coHostMap = new Map(); // coHostId -> shared events count
+    const coOrganiserMap = new Map(); // coOrganiserId -> shared events count
     
-    const countCoHosts = (listings) => {
+    const countCoOrganisers = (listings) => {
       listings.forEach(listing => {
-        if (listing.coHosts) {
-          listing.coHosts.forEach(id => {
+        if (listing.coOrganisers) {
+          listing.coOrganisers.forEach(id => {
             const strId = id.toString();
-            coHostMap.set(strId, (coHostMap.get(strId) || 0) + 1);
+            coOrganiserMap.set(strId, (coOrganiserMap.get(strId) || 0) + 1);
           });
         }
       });
     };
 
-    countCoHosts(events);
-    countCoHosts(centers);
+    countCoOrganisers(events);
+    countCoOrganisers(centers);
 
-    const coHostIds = Array.from(coHostMap.keys());
+    const coOrganiserIds = Array.from(coOrganiserMap.keys());
 
-    const coHosts = await User.find({ _id: { $in: coHostIds } })
+    const coOrganisers = await User.find({ _id: { $in: coOrganiserIds } })
       .select("firstName surname email profilePicture isActive createdAt");
 
-    // Map the shared listings count to each co-host
-    const data = coHosts.map(user => ({
+    // Map the shared listings count to each co-organiser
+    const data = coOrganisers.map(user => ({
       ...user.toObject(),
-      sharedListingsCount: coHostMap.get(user._id.toString())
+      sharedListingsCount: coOrganiserMap.get(user._id.toString())
     }));
 
     res.json({
@@ -107,40 +107,40 @@ exports.getAllCoOrganisers = async (req, res) => {
       data,
     });
   } catch (error) {
-    console.error("[GET ALL CO-HOSTS] ERROR:", error);
+    console.error("[GET ALL CO-ORGANISERS] ERROR:", error);
     res.status(500).json({ success: false, message: "Server error" });
   }
 };
 
 /**
- * 👤 Get Detailed Co-Host Profile
+ * Get Detailed Co-Organiser Profile
  */
 exports.getCoOrganiserDetailedProfile = async (req, res) => {
   try {
-    const { coHostId } = req.params;
+    const { coOrganiserId } = req.params;
     const organiserId = req.user.id;
 
-    const coHostUser = await User.findById(coHostId).select("firstName surname email profilePicture isActive createdAt");
-    if (!coHostUser) {
-      return res.status(404).json({ success: false, message: "Co-host not found" });
+    const coOrganiserUser = await User.findById(coOrganiserId).select("firstName surname email profilePicture isActive createdAt");
+    if (!coOrganiserUser) {
+      return res.status(404).json({ success: false, message: "Co-organiser not found" });
     }
 
     // Find all accepted invitations to see which listings and permissions they have
-    const invitations = await CoHostInvitation.find({
+    const invitations = await CoOrganiserInvitation.find({
       host: organiserId,
-      coHost: coHostId,
+      coOrganiser: coOrganiserId,
       status: "ACCEPTED"
     }).populate("listings.listingId", "title venueName images type");
 
     res.json({
       success: true,
       data: {
-        profile: coHostUser,
+        profile: coOrganiserUser,
         invitations
       }
     });
   } catch (error) {
-    console.error("[GET CO-HOST DETAILED PROFILE] ERROR:", error);
+    console.error("[GET CO-ORGANISER DETAILED PROFILE] ERROR:", error);
     res.status(500).json({ success: false, message: "Server error" });
   }
 };

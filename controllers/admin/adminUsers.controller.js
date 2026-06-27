@@ -62,12 +62,12 @@ const getUserDetails = async (req, res) => {
       Event.find({
         $or: [
           { createdBy: id },
-          { coHosts: id },
+          { coOrganisers: id },
           { staff: id }
         ]
       })
-        .select("title status schedule performance createdAt coHosts staff createdBy")
-        .populate("coHosts", "firstName surname email")
+        .select("title status schedule performance createdAt coOrganisers staff createdBy")
+        .populate("coOrganisers", "firstName surname email")
         .populate("staff", "firstName surname email")
         .populate("createdBy", "firstName surname email")
         .sort({ createdAt: -1 })
@@ -76,12 +76,12 @@ const getUserDetails = async (req, res) => {
       EventCenter.find({
         $or: [
           { createdBy: id },
-          { coHosts: id },
+          { coOrganisers: id },
           { staff: id }
         ]
       })
-        .select("venueName status performance createdAt coHosts staff createdBy")
-        .populate("coHosts", "firstName surname email")
+        .select("venueName status performance createdAt coOrganisers staff createdBy")
+        .populate("coOrganisers", "firstName surname email")
         .populate("staff", "firstName surname email")
         .populate("createdBy", "firstName surname email")
         .sort({ createdAt: -1 })

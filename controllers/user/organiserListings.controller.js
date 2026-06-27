@@ -1,10 +1,10 @@
 const Event = require("../../models/user/event.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
-const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
+const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
 
 /**
  * 📋 Get Aggregated Organiser Listings (My Events and My Event Centers)
- * Co-hosts will only see listings they have MANAGE_LISTING or ALL_ACCESS permission for.
+ * Includes listings where user is the owner or a co-organiser.
  */
 const getOrganiserListings = async (req, res) => {
   try {
@@ -17,33 +17,9 @@ const getOrganiserListings = async (req, res) => {
 
     const userId = req.user.id;
 
-    // Fetch accepted co-host invitations for this user to check permissions
-    const coHostInvites = await CoHostInvitation.find({
-      coHost: userId,
-      status: "ACCEPTED",
-    }).lean();
-
-    // Build a map: listingId -> permissions[]
-    const permissionsMap = {};
-    coHostInvites.forEach((invite) => {
-      if (invite.listings) {
-        invite.listings.forEach((item) => {
-          if (item.listingId) {
-            permissionsMap[item.listingId.toString()] = invite.permissions || [];
-          }
-        });
-      }
-    });
-
-    // Helper: check if user has MANAGE_LISTING access for a co-hosted listing
-    const hasManageListingPerm = (listingId) => {
-      const perms = permissionsMap[listingId.toString()] || [];
-      return perms.includes("MANAGE_LISTING") || perms.includes("ALL_ACCESS");
-    };
-
-    // 1️⃣ Fetch Organiser's Events (Created or Co-hosted, but NOT where user is staff)
+    // 1️⃣ Fetch Organiser's Events (Created or Co-organised, but NOT where user is staff)
     const events = await Event.find({
-      $or: [{ createdBy: userId }, { coHosts: userId }],
+      $or: [{ createdBy: userId }, { coOrganisers: userId }],
       staff: { $ne: userId },
     })
       .select({
@@ -54,7 +30,7 @@ const getOrganiserListings = async (req, res) => {
         location: 1,
         createdAt: 1,
         createdBy: 1,
-        coHosts: 1,
+        coOrganisers: 1,
         staff: 1,
         performance: 1,
       })
@@ -63,8 +39,10 @@ const getOrganiserListings = async (req, res) => {
     const formattedEvents = events
       .filter((event) => {
         const isOwner = event.createdBy?.toString() === userId;
-        // Owner always sees their own listings; co-hosts need MANAGE_LISTING
-        return isOwner || hasManageListingPerm(event._id);
+        const isCoOrganiser = event.coOrganisers?.some(
+          (id) => id.toString() === userId
+        );
+        return isOwner || isCoOrganiser;
       })
       .map((event) => {
         const obj = event.toJSON();
@@ -77,16 +55,16 @@ const getOrganiserListings = async (req, res) => {
           images: obj.images || [],
           createdAt: obj.createdAt,
           type: "event",
-          isCoHost: obj.createdBy?.toString() !== userId,
-          coHosts: obj.coHosts || [],
+          isCoOrganiser: obj.createdBy?.toString() !== userId,
+          coOrganisers: obj.coOrganisers || [],
           staff: obj.staff || [],
           performance: obj.performance || {},
         };
       });
 
-    // 2️⃣ Fetch Organiser's Event Centers (Created or Co-hosted, but NOT where user is staff)
+    // 2️⃣ Fetch Organiser's Event Centers (Created or Co-organised, but NOT where user is staff)
     const eventCenters = await EventCenter.find({
-      $or: [{ createdBy: userId }, { coHosts: userId }],
+      $or: [{ createdBy: userId }, { coOrganisers: userId }],
       staff: { $ne: userId },
     })
       .select({
@@ -97,7 +75,7 @@ const getOrganiserListings = async (req, res) => {
         location: 1,
         createdAt: 1,
         createdBy: 1,
-        coHosts: 1,
+        coOrganisers: 1,
         staff: 1,
         performance: 1,
       })
@@ -106,7 +84,10 @@ const getOrganiserListings = async (req, res) => {
     const formattedEventCenters = eventCenters
       .filter((center) => {
         const isOwner = center.createdBy?.toString() === userId;
-        return isOwner || hasManageListingPerm(center._id);
+        const isCoOrganiser = center.coOrganisers?.some(
+          (id) => id.toString() === userId
+        );
+        return isOwner || isCoOrganiser;
       })
       .map((center) => {
         const obj = center.toJSON();
@@ -119,8 +100,8 @@ const getOrganiserListings = async (req, res) => {
           images: obj.images || [],
           createdAt: obj.createdAt,
           type: "event-center",
-          isCoHost: obj.createdBy?.toString() !== userId,
-          coHosts: obj.coHosts || [],
+          isCoOrganiser: obj.createdBy?.toString() !== userId,
+          coOrganisers: obj.coOrganisers || [],
           staff: obj.staff || [],
           performance: obj.performance || {},
         };

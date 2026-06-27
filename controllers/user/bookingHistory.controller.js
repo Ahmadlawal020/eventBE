@@ -1,7 +1,7 @@
 const BookingHistory = require("../../models/user/bookingHistory.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
 const EventCenterBooking = require("../../models/user/eventCenterBooking.schema");
-const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
+const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
 const mongoose = require("mongoose");
 
@@ -14,14 +14,14 @@ async function authorizeBookingAccess(userId, eventCenterId) {
 
   if (String(eventCenter.createdBy) === userId) return { authorized: true };
 
-  const coHostInvite = await CoHostInvitation.findOne({
-    coHost: userId,
+  const coOrganiserInvite = await CoOrganiserInvitation.findOne({
+    coOrganiser: userId,
     host: eventCenter.createdBy,
     status: "ACCEPTED",
     "listings.listingId": eventCenter._id,
     permissions: { $in: ["MANAGE_BOOKINGS", "ALL_ACCESS", "VIEW_CALENDAR"] },
   });
-  if (coHostInvite) return { authorized: true };
+  if (coOrganiserInvite) return { authorized: true };
 
   const staffInvite = await StaffInvitation.findOne({
     staff: userId,
@@ -117,7 +117,7 @@ const getAllBookingHistory = async (req, res) => {
     const venues = await EventCenter.find({
       $or: [
         { createdBy: organiserId },
-        { coHosts: organiserId },
+        { coOrganisers: organiserId },
       ],
       staff: { $ne: organiserId },
     }).select("_id").lean();
@@ -214,7 +214,7 @@ const getUnifiedBookings = async (req, res) => {
     const venues = await EventCenter.find({
       $or: [
         { createdBy: organiserId },
-        { coHosts: organiserId },
+        { coOrganisers: organiserId },
       ],
       staff: { $ne: organiserId },
     }).select("_id venueName").lean();
@@ -350,6 +350,30 @@ const getBookingActivity = async (req, res) => {
   const { bookingId } = req.params;
 
   try {
+    // Find the booking to determine its event center for authorization
+    let eventCenterId = null;
+
+    // Try platform booking first
+    const platformBooking = await EventCenterBooking.findById(bookingId).select("eventCenter").lean();
+    if (platformBooking) {
+      eventCenterId = platformBooking.eventCenter;
+    } else {
+      // Try manual booking via history
+      const historyEntry = await BookingHistory.findOne({ bookingId }).select("eventCenter").lean();
+      if (historyEntry) {
+        eventCenterId = historyEntry.eventCenter;
+      }
+    }
+
+    if (!eventCenterId) {
+      return res.status(404).json({ success: false, message: "Booking not found" });
+    }
+
+    const auth = await authorizeBookingAccess(req.user.id, eventCenterId);
+    if (!auth.authorized) {
+      return res.status(403).json({ success: false, message: auth.error });
+    }
+
     const entries = await BookingHistory.find({ bookingId })
       .populate("performedBy", "firstName surname")
       .populate("eventCenter", "venueName")
@@ -375,6 +399,7 @@ const getBookingFullDetails = async (req, res) => {
   try {
     let booking = null;
     let isPlatform = false;
+    let eventCenterId = null;
 
     // Determine if this is a platform booking (ObjectId) or manual booking
     if (mongoose.Types.ObjectId.isValid(bookingId)) {
@@ -387,6 +412,7 @@ const getBookingFullDetails = async (req, res) => {
 
       if (booking) {
         isPlatform = true;
+        eventCenterId = booking.eventCenter?._id || booking.eventCenter;
       }
     }
 
@@ -402,6 +428,8 @@ const getBookingFullDetails = async (req, res) => {
       if (!createdEntry) {
         return res.status(404).json({ success: false, message: "Booking not found" });
       }
+
+      eventCenterId = createdEntry.eventCenter?._id || createdEntry.eventCenter;
 
       // Get latest entry for current status
       const latestEntry = await BookingHistory.findOne({ bookingId })
@@ -424,6 +452,14 @@ const getBookingFullDetails = async (req, res) => {
         eventCenter: createdEntry.eventCenter,
         createdAt: createdEntry.createdAt,
       };
+    }
+
+    // Authorization check
+    if (eventCenterId) {
+      const auth = await authorizeBookingAccess(req.user.id, eventCenterId);
+      if (!auth.authorized) {
+        return res.status(403).json({ success: false, message: auth.error });
+      }
     }
 
     // Fetch activity timeline

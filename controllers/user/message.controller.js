@@ -3,10 +3,10 @@ const Conversation = require("../../models/user/conversation.schema");
 const Event = require("../../models/user/event.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
-const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
+const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const mongoose = require("mongoose");
 
-// Helper function to check if a user is an authorized representative (Owner, Co-Host, or Staff with CUSTOMER_CARE permission)
+// Helper function to check if a user is an authorized representative (Owner, Co-Organiser, or Staff with CUSTOMER_CARE permission)
 const checkCustomerCareAccess = async (userId, listingId, listingType) => {
   try {
     let listing;
@@ -34,8 +34,8 @@ const checkCustomerCareAccess = async (userId, listingId, listingType) => {
       if (staffInvite) return true;
     }
 
-    // 3. Is an active Co-Host? (Automatic full access to messages and replies)
-    if (listing.coHosts && listing.coHosts.includes(userId)) {
+    // 3. Is an active Co-Organiser? (Automatic full access to messages and replies)
+    if (listing.coOrganisers && listing.coOrganisers.includes(userId)) {
       return true;
     }
 
@@ -93,7 +93,7 @@ const sendMessage = async (req, res) => {
     } else {
       receiverId = organiserId;
       if (isSenderRepresentative) {
-        return res.status(400).json({ success: false, message: "Organisers, Co-Hosts, and Staff cannot start conversations with their own listings" });
+        return res.status(400).json({ success: false, message: "Organisers, Co-Organisers, and Staff cannot start conversations with their own listings" });
       }
 
       conversation = await Conversation.findOne({
@@ -103,16 +103,28 @@ const sendMessage = async (req, res) => {
       });
 
       if (!conversation) {
-        conversation = new Conversation({
-          participants: [senderId, receiverId],
-          contextType,
-          contextId,
-          isReplied: true, // Default true, will be set to false below as it's the first message from user
-        });
-        await conversation.save();
-
-        // Increment total unique inquiries (messages)
-        context.performance.messages = (context.performance.messages || 0) + 1;
+        try {
+          conversation = new Conversation({
+            participants: [senderId, receiverId],
+            contextType,
+            contextId,
+            isReplied: true,
+          });
+          await conversation.save();
+          // Increment total unique inquiries (messages)
+          context.performance.messages = (context.performance.messages || 0) + 1;
+        } catch (err) {
+          // Handle duplicate key error from race condition
+          if (err.code === 11000) {
+            conversation = await Conversation.findOne({
+              participants: { $all: [senderId, receiverId] },
+              contextType,
+              contextId,
+            });
+          } else {
+            throw err;
+          }
+        }
       }
     }
 
@@ -124,7 +136,7 @@ const sendMessage = async (req, res) => {
         context.performance.pendingInquiries = (context.performance.pendingInquiries || 0) + 1;
       }
     } else {
-      // Host representative (Owner, Co-Host, or Staff) is replying
+      // Host representative (Owner, Co-Organiser, or Staff) is replying
       if (!conversation.isReplied) {
         conversation.isReplied = true;
         context.performance.pendingInquiries = Math.max(0, (context.performance.pendingInquiries || 0) - 1);
@@ -178,20 +190,20 @@ const getConversations = async (req, res) => {
       permissions: "CUSTOMER_CARE"
     }).select("listings.listingId");
 
-    const coHostInvites = await CoHostInvitation.find({
-      coHost: userId,
+    const coOrganiserInvites = await CoOrganiserInvitation.find({
+      coOrganiser: userId,
       status: "ACCEPTED",
       permissions: "CUSTOMER_CARE"
     }).select("listings.listingId");
 
-    const directCoHostEventCenters = await EventCenter.find({ coHosts: userId }).select("_id");
-    const directCoHostEvents = await Event.find({ coHosts: userId }).select("_id");
+    const directCoOrganiserEventCenters = await EventCenter.find({ coOrganisers: userId }).select("_id");
+    const directCoOrganiserEvents = await Event.find({ coOrganisers: userId }).select("_id");
 
     const agentListingIds = [];
     staffInvites.forEach(inv => inv.listings.forEach(l => agentListingIds.push(l.listingId)));
-    coHostInvites.forEach(inv => inv.listings.forEach(l => agentListingIds.push(l.listingId)));
-    directCoHostEventCenters.forEach(center => agentListingIds.push(center._id));
-    directCoHostEvents.forEach(evt => agentListingIds.push(evt._id));
+    coOrganiserInvites.forEach(inv => inv.listings.forEach(l => agentListingIds.push(l.listingId)));
+    directCoOrganiserEventCenters.forEach(center => agentListingIds.push(center._id));
+    directCoOrganiserEvents.forEach(evt => agentListingIds.push(evt._id));
 
     const conversations = await Conversation.find({
       $or: [

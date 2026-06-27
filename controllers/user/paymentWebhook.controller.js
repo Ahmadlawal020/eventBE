@@ -1,12 +1,75 @@
 const EventCenterBooking = require("../../models/user/eventCenterBooking.schema");
+const EventBooking = require("../../models/user/eventBooking.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
+const User = require("../../models/user/user.schema");
 const Notification = require("../../models/user/notification.schema");
 const { generateTicketNumber, generateQRPayload } = require("../../utils/qr");
 const { hasSlotConflict } = require("../../utils/slotConflict");
 const { logBookingHistory } = require("./bookingHistory.controller");
 const { getPaymentGateway } = require("../../services/payment");
+const { createTicketsForBooking } = require("./userEventTicket.controller");
 
 const gateway = getPaymentGateway();
+
+// ============================================================================
+// EVENT TICKET BOOKING WEBHOOK HANDLER
+// ============================================================================
+
+const handleEventTicketWebhook = async (reference, metadata, customer) => {
+  const { eventId, buyerId, items, totalAmount, fullName, phoneNumber } = metadata;
+
+  // 1. Idempotency: check if booking already exists and is completed
+  const existingBooking = await EventBooking.findOne({ paymentReference: reference });
+  if (existingBooking && existingBooking.paymentStatus === "COMPLETED") {
+    console.log(`[WEBHOOK] Event ticket booking already completed for ref ${reference}`);
+    return;
+  }
+
+  // 2. Create or update booking
+  let booking;
+  if (existingBooking) {
+    existingBooking.paymentStatus = "COMPLETED";
+    booking = await existingBooking.save();
+  } else {
+    try {
+      booking = await EventBooking.create({
+        eventId,
+        buyer: buyerId,
+        guestDetails: {
+          fullName: fullName || "",
+          phoneNumber: phoneNumber || "",
+          email: customer?.email || "",
+        },
+        items: items || [],
+        totalAmount: totalAmount || 0,
+        paymentMethod: "CARD",
+        paymentReference: reference,
+        paymentStatus: "COMPLETED",
+      });
+    } catch (err) {
+      if (err.code === 11000) {
+        // Duplicate key race condition — fetch existing
+        booking = await EventBooking.findOne({ paymentReference: reference });
+        if (booking && booking.paymentStatus !== "COMPLETED") {
+          booking.paymentStatus = "COMPLETED";
+          booking = await booking.save();
+        }
+      } else {
+        throw err;
+      }
+    }
+  }
+
+  // 3. Generate individual tickets (idempotent — skip if tickets already exist)
+  if (booking) {
+    const UserEventTicket = require("../../models/user/userEventTicket.schema");
+    const existingTickets = await UserEventTicket.find({ bookingId: booking._id }).lean();
+    if (existingTickets.length === 0) {
+      await createTicketsForBooking(booking);
+    }
+    console.log(`[WEBHOOK] Tickets generated for event booking ref ${reference}`);
+  }
+};
 
 // ============================================================================
 // GENERIC PAYMENT WEBHOOK HANDLER
@@ -30,12 +93,22 @@ const handlePaymentWebhook = async (req, res) => {
     return res.status(200).send("Transaction not successful");
   }
 
-  // 3. Only handle event center bookings
-  if (normalizedEvent.metadata?.type !== "EVENT_CENTER") {
-    return res.status(200).send("Not an event center booking");
+  const { reference, metadata, customer } = normalizedEvent;
+
+  // 3. Route to the correct handler based on booking type
+  if (metadata?.type === "EVENT_TICKET") {
+    try {
+      await handleEventTicketWebhook(reference, metadata, customer);
+      return res.status(200).send("OK");
+    } catch (err) {
+      console.error(`[EVENT_TICKET WEBHOOK ERROR]`, err);
+      return res.status(500).send("Internal error");
+    }
   }
 
-  const { reference, metadata, customer } = normalizedEvent;
+  if (metadata?.type !== "EVENT_CENTER") {
+    return res.status(200).send("Unknown booking type");
+  }
 
   try {
     // 4. Idempotency: check if ticket already exists

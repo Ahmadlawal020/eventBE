@@ -89,7 +89,7 @@ const getListingDetails = async (req, res) => {
     const listing = await config.model
       .findById(id)
       .populate("createdBy", "firstName surname email phoneNumber roles isActive")
-      .populate("coHosts", "firstName surname email")
+      .populate("coOrganisers", "firstName surname email")
       .populate("staff", "firstName surname email")
       .lean();
 

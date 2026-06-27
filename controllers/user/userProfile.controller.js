@@ -3,6 +3,37 @@ const bcrypt = require("bcrypt");
 const asyncHandler = require("express-async-handler");
 const cloudinary = require("../../utils/cloudinary");
 
+// @desc    Look up a user by email (lightweight — name + email + picture only)
+// @route   GET /api/user-info/lookup?email=...
+// @access  Private
+const lookupUserByEmail = asyncHandler(async (req, res) => {
+  const { email } = req.query;
+
+  if (!email || typeof email !== "string" || !email.trim()) {
+    return res.status(400).json({ success: false, message: "Email query param is required." });
+  }
+
+  const user = await User.findOne({ email: email.toLowerCase().trim() })
+    .select("firstName surname email profilePicture")
+    .lean();
+
+  if (!user) {
+    return res.status(404).json({ success: false, message: "No user found with that email." });
+  }
+
+  res.status(200).json({
+    success: true,
+    data: {
+      id: user._id,
+      firstName: user.firstName,
+      surname: user.surname,
+      fullName: `${user.firstName || ""} ${user.surname || ""}`.trim(),
+      email: user.email,
+      profilePicture: user.profilePicture,
+    },
+  });
+});
+
 // @desc    Get user by ID
 // @route   GET /api/user-info/:id
 // @access  Private
@@ -145,6 +176,7 @@ const updateUser = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  lookupUserByEmail,
   getUserById,
   updateUser,
 };

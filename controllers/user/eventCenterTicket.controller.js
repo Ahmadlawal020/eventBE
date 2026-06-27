@@ -2,7 +2,7 @@ const EventCenterBooking = require("../../models/user/eventCenterBooking.schema"
 const EventCenter = require("../../models/user/eventCenter.schema");
 const User = require("../../models/user/user.schema");
 const Notification = require("../../models/user/notification.schema");
-const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
+const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
 const mongoose = require("mongoose");
 const crypto = require("crypto");
@@ -25,14 +25,14 @@ async function authorizeScanAccess(userId, eventCenterId) {
 
   if (String(eventCenter.createdBy) === userId) return { authorized: true };
 
-  const coHostInvite = await CoHostInvitation.findOne({
-    coHost: userId,
+  const coOrganiserInvite = await CoOrganiserInvitation.findOne({
+    coOrganiser: userId,
     host: eventCenter.createdBy,
     status: "ACCEPTED",
     "listings.listingId": eventCenter._id,
     permissions: { $in: ["SCAN_TICKET", "ALL_ACCESS"] },
   }).lean();
-  if (coHostInvite) return { authorized: true };
+  if (coOrganiserInvite) return { authorized: true };
 
   const staffInvite = await StaffInvitation.findOne({
     staff: userId,
@@ -87,6 +87,54 @@ const createTicket = async (req, res) => {
         return res.status(400).json({
           success: false,
           message: "One or more selected dates are no longer available. Please choose different dates.",
+        });
+      }
+    }
+
+    // 2b-hourly. Validate hourly slots don't conflict
+    if (bookingUnit === "hour" && selectedDates && selectedDates.length > 0) {
+      const existingSlots = eventCenter.availability?.unavailableSlots || [];
+      const conflictingSlots = selectedDates.filter((slot) =>
+        hasSlotConflict(slot, existingSlots, null)
+      );
+      if (conflictingSlots.length > 0) {
+        return res.status(400).json({
+          success: false,
+          message: "One or more time slots conflict with an existing booking.",
+        });
+      }
+    }
+
+    // 2d. Server-side price validation
+    const basePrice = eventCenter.pricing?.basePrice || eventCenter.basePrice || 0;
+    const weekendPrice = eventCenter.pricing?.weekendPrice || eventCenter.weekendPrice || basePrice;
+    const customPrices = eventCenter.pricing?.customPrices || eventCenter.customPrices || [];
+
+    if (basePrice > 0 && totalPrice?.amount > 0) {
+      let expectedTotal = 0;
+      for (const sd of selectedDates || []) {
+        const dateObj = new Date(sd.date);
+        const dateStr = dateObj.toISOString().split("T")[0];
+
+        // Check custom prices first
+        const customPrice = customPrices.find(cp =>
+          new Date(cp.date).toISOString().split("T")[0] === dateStr
+        );
+
+        if (customPrice) {
+          expectedTotal += customPrice.price;
+        } else {
+          const dayOfWeek = dateObj.getDay();
+          const isWeekend = dayOfWeek === 0 || dayOfWeek === 5 || dayOfWeek === 6;
+          expectedTotal += isWeekend ? weekendPrice : basePrice;
+        }
+      }
+
+      // Allow 1% tolerance for rounding differences
+      if (expectedTotal > 0 && Math.abs(totalPrice.amount - expectedTotal) > expectedTotal * 0.01) {
+        return res.status(400).json({
+          success: false,
+          message: `Price mismatch. Expected ${expectedTotal}, received ${totalPrice.amount}. Please refresh and try again.`,
         });
       }
     }
@@ -364,9 +412,15 @@ const verifyPayment = async (req, res) => {
 
       const conflicts = requestedDates.filter(d => blockedDates.includes(d));
       if (conflicts.length > 0) {
+        // Refund the payment since dates are no longer available
+        try {
+          await gateway.refundPayment(reference);
+        } catch (refundErr) {
+          console.error(`[VERIFY PAYMENT] Refund failed for conflicting dates ref ${reference}:`, refundErr.message);
+        }
         return res.status(400).json({
           success: false,
-          message: "One or more selected dates are no longer available. Payment will be refunded.",
+          message: "One or more selected dates are no longer available. Payment has been refunded.",
         });
       }
     }
@@ -836,69 +890,97 @@ const acceptBooking = async (req, res) => {
       return res.status(403).json({ success: false, message: "Not authorized to accept this booking." });
     }
 
-    if (ticket.status !== "PENDING_REVIEW") {
-      return res.status(400).json({ success: false, message: `Booking is already ${ticket.status}.` });
-    }
-
-    // Generate ticket number and QR payload
+    // Generate ticket number and QR payload before atomic update
     const ticketNumber = generateTicketNumber("MNS");
     const qrPayload = generateQRPayload(ticketNumber, ticket.eventCenter, "EVENT_CENTER");
 
-    ticket.status = "CONFIRMED";
-    ticket.ticketNumber = ticketNumber;
-    ticket.qrPayload = qrPayload;
-    ticket.reviewedAt = new Date();
-    await ticket.save();
+    // Atomic status transition: only succeeds if still PENDING_REVIEW
+    const updated = await EventCenterBooking.findOneAndUpdate(
+      { _id: id, status: "PENDING_REVIEW" },
+      {
+        $set: {
+          status: "CONFIRMED",
+          ticketNumber,
+          qrPayload,
+          reviewedAt: new Date(),
+        },
+      },
+      { new: true },
+    );
 
-    // Mark dates/slots unavailable on EventCenter
-    const eventCenter = await EventCenter.findById(ticket.eventCenter);
+    if (!updated) {
+      const current = await EventCenterBooking.findById(id).select("status").lean();
+      return res.status(400).json({ success: false, message: `Booking is already ${current?.status || "unknown"}.` });
+    }
+
+    // Check for date conflicts before marking unavailable
+    const eventCenter = await EventCenter.findById(updated.eventCenter);
     if (eventCenter) {
       if (!eventCenter.availability) {
         eventCenter.availability = { unavailableDates: [], unavailableSlots: [] };
       }
 
-      if (ticket.bookingUnit === "day") {
-        const datesToMark = (ticket.selectedDates || []).map(
+      if (updated.bookingUnit === "day") {
+        const datesToMark = (updated.selectedDates || []).map(
           (d) => new Date(d.date).toISOString().split("T")[0]
         );
         const currentStrings = (eventCenter.availability.unavailableDates || []).map(
           (d) => new Date(d.date).toISOString().split("T")[0]
         );
-        const newDateStrings = datesToMark.filter((d) => !currentStrings.includes(d));
+        const conflictingDates = datesToMark.filter((d) => currentStrings.includes(d));
 
-        newDateStrings.forEach((dateStr) => {
+        if (conflictingDates.length > 0) {
+          // Conflicts found — decline the booking instead of silently accepting
+          await EventCenterBooking.findByIdAndUpdate(id, {
+            $set: { status: "CANCELLED", reviewedAt: new Date() },
+          });
+          return res.status(409).json({
+            success: false,
+            message: `Cannot accept: dates ${conflictingDates.join(", ")} are already booked. Booking has been cancelled.`,
+          });
+        }
+
+        datesToMark.forEach((dateStr) => {
           eventCenter.availability.unavailableDates.push({
             date: new Date(dateStr),
             type: "BOOKED",
-            bookingId: String(ticket._id),
-            clientName: ticket.guestDetails?.fullName || "",
-            clientPhone: ticket.guestDetails?.phoneNumber || "",
-            clientEmail: ticket.guestDetails?.email || "",
+            bookingId: String(updated._id),
+            clientName: updated.guestDetails?.fullName || "",
+            clientPhone: updated.guestDetails?.phoneNumber || "",
+            clientEmail: updated.guestDetails?.email || "",
           });
         });
-      } else if (ticket.bookingUnit === "hour") {
+      } else if (updated.bookingUnit === "hour") {
         const existingSlots = eventCenter.availability.unavailableSlots || [];
-        const conflictingSlots = (ticket.selectedDates || []).filter((slot) =>
-          hasSlotConflict(slot, existingSlots, String(ticket._id))
+        const conflictingSlots = (updated.selectedDates || []).filter((slot) =>
+          hasSlotConflict(slot, existingSlots, String(updated._id))
         );
 
-        if (conflictingSlots.length === 0) {
-          const newSlots = (ticket.selectedDates || []).map((slot) => ({
-            date: new Date(slot.date),
-            startTime: slot.startTime,
-            endTime: slot.endTime,
-            type: "BOOKED",
-            bookingId: String(ticket._id),
-            clientName: ticket.guestDetails?.fullName || "",
-            clientPhone: ticket.guestDetails?.phoneNumber || "",
-            clientEmail: ticket.guestDetails?.email || "",
-          }));
-
-          if (!eventCenter.availability.unavailableSlots) {
-            eventCenter.availability.unavailableSlots = [];
-          }
-          eventCenter.availability.unavailableSlots.push(...newSlots);
+        if (conflictingSlots.length > 0) {
+          await EventCenterBooking.findByIdAndUpdate(id, {
+            $set: { status: "CANCELLED", reviewedAt: new Date() },
+          });
+          return res.status(409).json({
+            success: false,
+            message: "Cannot accept: time slots conflict with existing bookings. Booking has been cancelled.",
+          });
         }
+
+        const newSlots = (updated.selectedDates || []).map((slot) => ({
+          date: new Date(slot.date),
+          startTime: slot.startTime,
+          endTime: slot.endTime,
+          type: "BOOKED",
+          bookingId: String(updated._id),
+          clientName: updated.guestDetails?.fullName || "",
+          clientPhone: updated.guestDetails?.phoneNumber || "",
+          clientEmail: updated.guestDetails?.email || "",
+        }));
+
+        if (!eventCenter.availability.unavailableSlots) {
+          eventCenter.availability.unavailableSlots = [];
+        }
+        eventCenter.availability.unavailableSlots.push(...newSlots);
       }
 
       await eventCenter.save();
@@ -907,31 +989,32 @@ const acceptBooking = async (req, res) => {
     // Send notification to buyer
     const venueName = eventCenter?.venueName || "your venue";
     await Notification.create({
-      recipient: ticket.buyer,
+      recipient: updated.buyer,
       sender: organiserId,
       type: "BOOKING_UPDATE",
       title: "Booking Confirmed!",
       message: `Your booking at ${venueName} has been confirmed. Your ticket is ready.`,
-      referenceId: ticket._id,
+      referenceId: updated._id,
     });
 
-    // Log booking history
+    // Log booking history with correct action
     logBookingHistory({
-      eventCenter: ticket.eventCenter,
-      ticket: ticket._id,
-      bookingId: String(ticket._id),
+      eventCenter: updated.eventCenter,
+      ticket: updated._id,
+      bookingId: String(updated._id),
       bookingType: "PLATFORM",
-      action: "CREATED",
+      bookingUnit: updated.bookingUnit,
+      action: "ACCEPTED",
       performedBy: organiserId,
-      dates: ticket.selectedDates,
-      guestName: ticket.guestDetails?.fullName || "",
-      totalPrice: ticket.totalPrice,
+      dates: updated.selectedDates,
+      guestName: updated.guestDetails?.fullName || "",
+      totalPrice: updated.totalPrice,
     });
 
     return res.status(200).json({
       success: true,
       message: "Booking accepted and confirmed.",
-      data: ticket,
+      data: updated,
     });
   } catch (err) {
     console.error("[ACCEPT BOOKING ERROR]", err);
@@ -955,38 +1038,48 @@ const declineBooking = async (req, res) => {
       return res.status(403).json({ success: false, message: "Not authorized to decline this booking." });
     }
 
-    if (ticket.status !== "PENDING_REVIEW") {
-      return res.status(400).json({ success: false, message: `Booking is already ${ticket.status}.` });
+    // Atomic status transition: only succeeds if still PENDING_REVIEW
+    const updated = await EventCenterBooking.findOneAndUpdate(
+      { _id: id, status: "PENDING_REVIEW" },
+      {
+        $set: {
+          status: "CANCELLED",
+          reviewedAt: new Date(),
+        },
+      },
+      { new: true },
+    );
+
+    if (!updated) {
+      const current = await EventCenterBooking.findById(id).select("status").lean();
+      return res.status(400).json({ success: false, message: `Booking is already ${current?.status || "unknown"}.` });
     }
 
     // Refund payment if it was completed
     let refundSucceeded = false;
-    if (ticket.paymentStatus === "COMPLETED" && ticket.paymentReference) {
+    if (updated.paymentStatus === "COMPLETED" && updated.paymentReference) {
       try {
-        await gateway.refundPayment(ticket.paymentReference);
-        ticket.paymentStatus = "REFUNDED";
+        await gateway.refundPayment(updated.paymentReference);
+        updated.paymentStatus = "REFUNDED";
         refundSucceeded = true;
       } catch (refundErr) {
         console.error("[DECLINE BOOKING] Refund failed:", refundErr.message);
-        ticket.paymentStatus = "FAILED_REFUND";
+        updated.paymentStatus = "FAILED_REFUND";
       }
+      await updated.save();
     }
 
-    ticket.status = "CANCELLED";
-    ticket.reviewedAt = new Date();
-    await ticket.save();
-
     // Remove date/slot blocks from EventCenter
-    const eventCenterDoc = await EventCenter.findById(ticket.eventCenter);
+    const eventCenterDoc = await EventCenter.findById(updated.eventCenter);
     if (eventCenterDoc?.availability) {
-      const ticketIdStr = String(ticket._id);
+      const ticketIdStr = String(updated._id);
 
-      if (ticket.bookingUnit === "day" && eventCenterDoc.availability.unavailableDates) {
+      if (updated.bookingUnit === "day" && eventCenterDoc.availability.unavailableDates) {
         eventCenterDoc.availability.unavailableDates =
           eventCenterDoc.availability.unavailableDates.filter(
             (d) => String(d.bookingId) !== ticketIdStr
           );
-      } else if (ticket.bookingUnit === "hour" && eventCenterDoc.availability.unavailableSlots) {
+      } else if (updated.bookingUnit === "hour" && eventCenterDoc.availability.unavailableSlots) {
         eventCenterDoc.availability.unavailableSlots =
           eventCenterDoc.availability.unavailableSlots.filter(
             (s) => String(s.bookingId) !== ticketIdStr
@@ -997,40 +1090,41 @@ const declineBooking = async (req, res) => {
     }
 
     // Send notification to buyer
-    const eventCenter = await EventCenter.findById(ticket.eventCenter).select("venueName").lean();
+    const eventCenter = await EventCenter.findById(updated.eventCenter).select("venueName").lean();
     const venueName = eventCenter?.venueName || "your venue";
     const refundNote = refundSucceeded
       ? " A full refund has been issued."
-      : ticket.paymentStatus === "FAILED_REFUND"
+      : updated.paymentStatus === "FAILED_REFUND"
         ? " A refund could not be processed automatically. Please contact support."
         : "";
     await Notification.create({
-      recipient: ticket.buyer,
+      recipient: updated.buyer,
       sender: organiserId,
       type: "BOOKING_UPDATE",
       title: "Booking Declined",
       message: `Your booking at ${venueName} was declined.${refundNote}`,
-      referenceId: ticket._id,
+      referenceId: updated._id,
     });
 
-    // Log booking history
+    // Log booking history with correct action
     logBookingHistory({
-      eventCenter: ticket.eventCenter,
-      ticket: ticket._id,
-      bookingId: String(ticket._id),
+      eventCenter: updated.eventCenter,
+      ticket: updated._id,
+      bookingId: String(updated._id),
       bookingType: "PLATFORM",
-      action: "CANCELLED",
+      bookingUnit: updated.bookingUnit,
+      action: "DECLINED",
       performedBy: organiserId,
-      dates: ticket.selectedDates,
-      guestName: ticket.guestDetails?.fullName || "",
-      totalPrice: ticket.totalPrice,
+      dates: updated.selectedDates,
+      guestName: updated.guestDetails?.fullName || "",
+      totalPrice: updated.totalPrice,
       reason: reason || "Declined by organizer",
     });
 
     return res.status(200).json({
       success: true,
       message: "Booking declined.",
-      data: ticket,
+      data: updated,
     });
   } catch (err) {
     console.error("[DECLINE BOOKING ERROR]", err);

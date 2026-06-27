@@ -1,9 +1,9 @@
 const User = require("../../models/user/user.schema");
-const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
+const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const Notification = require("../../models/user/notification.schema");
 
 /**
- * 📧 Check if a user exists by email
+ * Check if a user exists by email
  */
 const checkUserByEmail = async (req, res) => {
   try {
@@ -29,24 +29,24 @@ const checkUserByEmail = async (req, res) => {
 };
 
 /**
- * 📩 Invite a Co-Host
+ * Invite a Co-Organiser
  */
-const inviteCoHost = async (req, res) => {
+const inviteCoOrganiser = async (req, res) => {
   try {
-    const { coHostEmail, listings, permissions } = req.body;
+    const { coOrganiserEmail, listings, permissions } = req.body;
     const hostId = req.user.id;
 
-    if (!coHostEmail || !listings || !permissions) {
+    if (!coOrganiserEmail || !listings || !permissions) {
       return res.status(400).json({
         success: false,
         message: "Co-organiser email, listings, and permissions are required",
       });
     }
 
-    // 1. Prevent duplicate active pending invitations for the same co-host
-    const existingInvitation = await CoHostInvitation.findOne({
+    // 1. Prevent duplicate active pending invitations for the same co-organiser
+    const existingInvitation = await CoOrganiserInvitation.findOne({
       host: hostId,
-      coHostEmail: coHostEmail.toLowerCase(),
+      coOrganiserEmail: coOrganiserEmail.toLowerCase(),
       status: "PENDING",
     });
 
@@ -76,24 +76,24 @@ const inviteCoHost = async (req, res) => {
       }
     }
 
-    // Check if co-host exists in the system
-    const coHost = await User.findOne({ email: coHostEmail.toLowerCase() });
+    // Check if co-organiser exists in the system
+    const coOrganiser = await User.findOne({ email: coOrganiserEmail.toLowerCase() });
 
     // Create the invitation
-    const invitation = await CoHostInvitation.create({
+    const invitation = await CoOrganiserInvitation.create({
       host: hostId,
-      coHostEmail: coHostEmail.toLowerCase(),
-      coHost: coHost ? coHost._id : null,
+      coOrganiserEmail: coOrganiserEmail.toLowerCase(),
+      coOrganiser: coOrganiser ? coOrganiser._id : null,
       listings,
       permissions,
       status: "PENDING",
     });
 
-    if (coHost) {
+    if (coOrganiser) {
       await Notification.create({
-        recipient: coHost._id,
+        recipient: coOrganiser._id,
         sender: hostId,
-        type: "COHOST_INVITATION",
+        type: "CO_ORGANISER_INVITATION",
         title: "New Co-organiser Invitation",
         message: "You have been invited to be a co-organiser for one or more listings.",
         referenceId: invitation._id,
@@ -106,19 +106,19 @@ const inviteCoHost = async (req, res) => {
       data: invitation,
     });
   } catch (error) {
-    console.error("[INVITE CO-HOST] ERROR:", error);
+    console.error("[INVITE CO-ORGANISER] ERROR:", error);
     res.status(500).json({ success: false, message: "Server error" });
   }
 };
 
 /**
- * 📜 Get Co-Host Invitations (for the Host)
+ * Get Co-Organiser Invitations (for the Host)
  */
 const getMyCoOrganiserInvitations = async (req, res) => {
   try {
     const hostId = req.user.id;
-    const invitations = await CoHostInvitation.find({ host: hostId })
-      .populate("coHost", "firstName surname email profilePicture")
+    const invitations = await CoOrganiserInvitation.find({ host: hostId })
+      .populate("coOrganiser", "firstName surname email profilePicture")
       .sort({ createdAt: -1 });
 
     res.json({
@@ -126,18 +126,18 @@ const getMyCoOrganiserInvitations = async (req, res) => {
       data: invitations,
     });
   } catch (error) {
-    console.error("[GET MY CO-HOST INVITATIONS] ERROR:", error);
+    console.error("[GET MY CO-ORGANISER INVITATIONS] ERROR:", error);
     res.status(500).json({ success: false, message: "Server error" });
   }
 };
 
 /**
- * 📜 Get a specific Co-Host Invitation
+ * Get a specific Co-Organiser Invitation
  */
 const getInvitationById = async (req, res) => {
   try {
     const { id } = req.params;
-    const invitation = await CoHostInvitation.findById(id)
+    const invitation = await CoOrganiserInvitation.findById(id)
       .populate("host", "firstName surname profilePicture")
       .populate("listings.listingId", "title venueName images type");
 
@@ -156,7 +156,7 @@ const getInvitationById = async (req, res) => {
 };
 
 /**
- * 📩 Accept or Decline Invitation
+ * Accept or Decline Invitation
  */
 const respondToInvitation = async (req, res) => {
   try {
@@ -168,8 +168,8 @@ const respondToInvitation = async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid action" });
     }
 
-    const invitation = await CoHostInvitation.findOneAndUpdate(
-      { _id: id, coHost: userId, status: "PENDING" },
+    const invitation = await CoOrganiserInvitation.findOneAndUpdate(
+      { _id: id, coOrganiser: userId, status: "PENDING" },
       { status: action },
       { new: true }
     );
@@ -178,7 +178,7 @@ const respondToInvitation = async (req, res) => {
       return res.status(404).json({ success: false, message: "Invitation not found or already processed" });
     }
 
-    // 🚀 If accepted, add co-host to the actual listings
+    // If accepted, add co-organiser to the actual listings
     if (action === "ACCEPTED") {
       const Event = require("../../models/user/event.schema");
       const EventCenter = require("../../models/user/eventCenter.schema");
@@ -186,11 +186,11 @@ const respondToInvitation = async (req, res) => {
       for (const item of invitation.listings) {
         if (item.listingType === "Event") {
           await Event.findByIdAndUpdate(item.listingId, {
-            $addToSet: { coHosts: userId },
+            $addToSet: { coOrganisers: userId },
           });
         } else if (item.listingType === "EventCenter") {
           await EventCenter.findByIdAndUpdate(item.listingId, {
-            $addToSet: { coHosts: userId },
+            $addToSet: { coOrganisers: userId },
           });
         }
       }
@@ -208,14 +208,14 @@ const respondToInvitation = async (req, res) => {
 };
 
 /**
- * 🗑️ Remove a Co-Host from a listing
+ * Remove a Co-Organiser from a listing
  */
 const removeCoOrganiser = async (req, res) => {
   try {
-    const { listingId, listingType, coHostId } = req.body;
+    const { listingId, listingType, coOrganiserId } = req.body;
     const hostId = req.user.id;
 
-    if (!listingId || !listingType || !coHostId) {
+    if (!listingId || !listingType || !coOrganiserId) {
       return res.status(400).json({ success: false, message: "Missing required fields" });
     }
 
@@ -234,15 +234,15 @@ const removeCoOrganiser = async (req, res) => {
     }
 
     // Authorize: Either the user is the original owner (createdBy === hostId)
-    // OR the user is the co-host removing themselves (coHostId === hostId)
+    // OR the user is the co-organiser removing themselves (coOrganiserId === hostId)
     const isOwner = listing.createdBy && listing.createdBy.toString() === hostId;
-    const isRemovingSelf = coHostId === hostId;
+    const isRemovingSelf = coOrganiserId === hostId;
 
     if (!isOwner && !isRemovingSelf) {
       return res.status(403).json({ success: false, message: "Not authorized to manage this listing" });
     }
 
-    // If a co-host is removing themselves, require password verification
+    // If a co-organiser is removing themselves, require password verification
     if (isRemovingSelf) {
       const User = require("../../models/user/user.schema");
       const user = await User.findById(hostId).select("password authProvider");
@@ -270,14 +270,14 @@ const removeCoOrganiser = async (req, res) => {
 
     // Remove from listing
     if (listingType === "Event") {
-      await Event.findByIdAndUpdate(listingId, { $pull: { coHosts: coHostId } });
+      await Event.findByIdAndUpdate(listingId, { $pull: { coOrganisers: coOrganiserId } });
     } else {
-      await EventCenter.findByIdAndUpdate(listingId, { $pull: { coHosts: coHostId } });
+      await EventCenter.findByIdAndUpdate(listingId, { $pull: { coOrganisers: coOrganiserId } });
     }
 
     // Update invitation status: remove listing from invitation, set to DECLINED only if no listings left
-    const invitation = await CoHostInvitation.findOne({
-      coHost: coHostId,
+    const invitation = await CoOrganiserInvitation.findOne({
+      coOrganiser: coOrganiserId,
       "listings.listingId": listingId,
       status: "ACCEPTED"
     });
@@ -299,28 +299,28 @@ const removeCoOrganiser = async (req, res) => {
       message: isRemovingSelf ? "You have successfully left the listing" : "Co-organiser removed successfully",
     });
   } catch (error) {
-    console.error("[REMOVE CO-HOST] ERROR:", error);
+    console.error("[REMOVE CO-ORGANISER] ERROR:", error);
     res.status(500).json({ success: false, message: "Server error" });
   }
 };
 
 /**
- * 🛠️ Update Co-Host Permissions
+ * Update Co-Organiser Permissions
  */
 const updateCoOrganiserPermissions = async (req, res) => {
   try {
-    const { listingId, coHostId, permissions } = req.body;
+    const { listingId, coOrganiserId, permissions } = req.body;
     const hostId = req.user.id;
 
-    if (!listingId || !coHostId || !permissions) {
+    if (!listingId || !coOrganiserId || !permissions) {
       return res.status(400).json({ success: false, message: "Missing required fields" });
     }
 
-    // Find the active invitation for this co-host and listing
-    const invitation = await CoHostInvitation.findOneAndUpdate(
+    // Find the active invitation for this co-organiser and listing
+    const invitation = await CoOrganiserInvitation.findOneAndUpdate(
       { 
         host: hostId, 
-        coHost: coHostId, 
+        coOrganiser: coOrganiserId, 
         "listings.listingId": listingId,
         status: "ACCEPTED" 
       },
@@ -344,14 +344,14 @@ const updateCoOrganiserPermissions = async (req, res) => {
 };
 
 /**
- * 🗑️ Cancel a pending invitation (by the Host)
+ * Cancel a pending invitation (by the Host)
  */
 const cancelInvitation = async (req, res) => {
   try {
     const { id } = req.params;
     const hostId = req.user.id;
 
-    const invitation = await CoHostInvitation.findOneAndDelete({
+    const invitation = await CoOrganiserInvitation.findOneAndDelete({
       _id: id,
       host: hostId,
       status: "PENDING"
@@ -375,7 +375,7 @@ const cancelInvitation = async (req, res) => {
 };
 
 /**
- * 📜 Get Received Co-Host Invitations (for the Co-Host)
+ * Get Received Co-Organiser Invitations (for the Co-Organiser)
  */
 const getReceivedInvitations = async (req, res) => {
   try {
@@ -385,13 +385,13 @@ const getReceivedInvitations = async (req, res) => {
       return res.status(404).json({ success: false, message: "User not found" });
     }
 
-    // 🚀 Proactively bind invitations that were sent to this user's email before they registered
-    await CoHostInvitation.updateMany(
-      { coHostEmail: user.email.toLowerCase(), coHost: null },
-      { $set: { coHost: userId } }
+    // Proactively bind invitations that were sent to this user's email before they registered
+    await CoOrganiserInvitation.updateMany(
+      { coOrganiserEmail: user.email.toLowerCase(), coOrganiser: null },
+      { $set: { coOrganiser: userId } }
     );
 
-    const invitations = await CoHostInvitation.find({ coHost: userId })
+    const invitations = await CoOrganiserInvitation.find({ coOrganiser: userId })
       .populate("host", "firstName surname email profilePicture")
       .populate("listings.listingId", "title venueName images type")
       .sort({ createdAt: -1 });
@@ -408,7 +408,7 @@ const getReceivedInvitations = async (req, res) => {
 
 module.exports = {
   checkUserByEmail,
-  inviteCoHost,
+  inviteCoOrganiser,
   getMyCoOrganiserInvitations,
   getInvitationById,
   respondToInvitation,

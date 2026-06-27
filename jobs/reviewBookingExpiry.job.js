@@ -7,7 +7,15 @@ const { logBookingHistory } = require("../controllers/user/bookingHistory.contro
 
 const gateway = getPaymentGateway();
 
+let isRunning = false; // Concurrency guard
+
 const expirePendingBookings = async () => {
+  if (isRunning) {
+    console.log("[Review Expiry] Previous run still in progress, skipping.");
+    return;
+  }
+  isRunning = true;
+
   try {
     const now = new Date();
 
@@ -19,31 +27,47 @@ const expirePendingBookings = async () => {
 
     for (const ticket of expiredBookings) {
       try {
-        // Refund payment if it was completed
-        if (ticket.paymentStatus === "COMPLETED" && ticket.paymentReference) {
-          try {
-            await gateway.refundPayment(ticket.paymentReference);
-            ticket.paymentStatus = "REFUNDED";
-          } catch (refundErr) {
-            console.error(`[Review Expiry] Refund failed for ticket ${ticket._id}:`, refundErr.message);
-          }
+        // Atomic status transition: only process if still PENDING_REVIEW
+        const updated = await EventCenterBooking.findOneAndUpdate(
+          { _id: ticket._id, status: "PENDING_REVIEW" },
+          {
+            $set: {
+              status: "CANCELLED",
+              reviewedAt: now,
+            },
+          },
+          { new: true },
+        );
+
+        if (!updated) {
+          // Another process already handled this booking (accept/decline)
+          console.log(`[Review Expiry] Booking ${ticket._id} already processed, skipping.`);
+          continue;
         }
 
-        ticket.status = "CANCELLED";
-        ticket.reviewedAt = now;
-        await ticket.save();
+        // Refund payment if it was completed
+        if (updated.paymentStatus === "COMPLETED" && updated.paymentReference) {
+          try {
+            await gateway.refundPayment(updated.paymentReference);
+            updated.paymentStatus = "REFUNDED";
+          } catch (refundErr) {
+            console.error(`[Review Expiry] Refund failed for ticket ${updated._id}:`, refundErr.message);
+            updated.paymentStatus = "FAILED_REFUND";
+          }
+          await updated.save();
+        }
 
         // Remove date/slot blocks from EventCenter
-        const ecDoc = await EventCenter.findById(ticket.eventCenter);
+        const ecDoc = await EventCenter.findById(updated.eventCenter);
         if (ecDoc?.availability) {
-          const ticketIdStr = String(ticket._id);
+          const ticketIdStr = String(updated._id);
 
-          if (ticket.bookingUnit === "day" && ecDoc.availability.unavailableDates) {
+          if (updated.bookingUnit === "day" && ecDoc.availability.unavailableDates) {
             ecDoc.availability.unavailableDates =
               ecDoc.availability.unavailableDates.filter(
                 (d) => String(d.bookingId) !== ticketIdStr
               );
-          } else if (ticket.bookingUnit === "hour" && ecDoc.availability.unavailableSlots) {
+          } else if (updated.bookingUnit === "hour" && ecDoc.availability.unavailableSlots) {
             ecDoc.availability.unavailableSlots =
               ecDoc.availability.unavailableSlots.filter(
                 (s) => String(s.bookingId) !== ticketIdStr
@@ -55,39 +79,40 @@ const expirePendingBookings = async () => {
 
         // Notify buyer
         const venueName = ticket.eventCenter?.venueName || "your venue";
-        const refundNote = ticket.paymentStatus === "REFUNDED" ? " A full refund has been issued." : "";
+        const refundNote = updated.paymentStatus === "REFUNDED" ? " A full refund has been issued." : "";
         await Notification.create({
-          recipient: ticket.buyer,
+          recipient: updated.buyer,
           type: "BOOKING_UPDATE",
           title: "Booking Expired",
           message: `Your booking at ${venueName} expired because the host did not respond in time.${refundNote}`,
-          referenceId: ticket._id,
+          referenceId: updated._id,
         });
 
         // Notify organizer
         await Notification.create({
-          recipient: ticket.organiser,
+          recipient: updated.organiser,
           type: "BOOKING_UPDATE",
           title: "Booking Request Expired",
-          message: `Booking request from ${ticket.guestDetails?.fullName || "a guest"} for ${venueName} has expired.`,
-          referenceId: ticket._id,
+          message: `Booking request from ${updated.guestDetails?.fullName || "a guest"} for ${venueName} has expired.`,
+          referenceId: updated._id,
         });
 
         // Log booking history
         logBookingHistory({
-          eventCenter: ticket.eventCenter._id || ticket.eventCenter,
-          ticket: ticket._id,
-          bookingId: String(ticket._id),
+          eventCenter: updated.eventCenter._id || updated.eventCenter,
+          ticket: updated._id,
+          bookingId: String(updated._id),
           bookingType: "PLATFORM",
+          bookingUnit: updated.bookingUnit,
           action: "CANCELLED",
           performedBy: null,
-          dates: ticket.selectedDates,
-          guestName: ticket.guestDetails?.fullName || "",
-          totalPrice: ticket.totalPrice,
+          dates: updated.selectedDates,
+          guestName: updated.guestDetails?.fullName || "",
+          totalPrice: updated.totalPrice,
           reason: "Review deadline expired",
         });
 
-        console.log(`[Review Expiry] Expired booking ${ticket._id} for venue ${venueName}`);
+        console.log(`[Review Expiry] Expired booking ${updated._id} for venue ${venueName}`);
       } catch (err) {
         console.error(`[Review Expiry] Error processing ticket ${ticket._id}:`, err);
       }
@@ -98,6 +123,8 @@ const expirePendingBookings = async () => {
     }
   } catch (error) {
     console.error("[CRON JOB ERROR - expirePendingBookings]", error);
+  } finally {
+    isRunning = false;
   }
 };
 

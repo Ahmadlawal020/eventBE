@@ -478,7 +478,7 @@ const eventCenterSchema = new mongoose.Schema(
       required: true,
     },
 
-    coHosts: [
+    coOrganisers: [
       {
         type: mongoose.Schema.Types.ObjectId,
         ref: "User",

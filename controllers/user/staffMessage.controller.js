@@ -3,6 +3,7 @@ const Conversation = require("../../models/user/conversation.schema");
 const Event = require("../../models/user/event.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
+const { logActivity } = require("./staffDashboard.controller");
 
 // Helper function to check if a staff is authorized for CUSTOMER_CARE
 const checkStaffCareAccess = async (userId, listingId) => {
@@ -73,31 +74,17 @@ const getStaffMessages = async (req, res) => {
       .populate("sender", "firstName surname profilePicture")
       .populate("receiver", "firstName surname profilePicture");
 
-    // Mark messages as read (Note: This marks it read for the organiser essentially)
-    // We update the unread count in the conversation for the organiser's side
+    // Mark messages as read for the staff member
+    await Message.updateMany(
+      { conversationId, contextId: listingId, receiver: staffId, read: false },
+      { $set: { read: true } }
+    );
+
+    // Clear unread count for the staff member who is reading
     const conversation = await Conversation.findOne({ _id: conversationId, contextId: listingId });
     if (conversation) {
-      const organiserId = conversation.contextId && conversation.contextId.createdBy ? conversation.contextId.createdBy : null; // Typically the listing owner receives inquiries
-      
-      // We will just clear all unread counts since staff is reading it on behalf of the host
-      // If we want to be specific, we need the organiser ID
-      let orgId;
-      if (conversation.contextType === "Event") {
-        const event = await Event.findById(listingId);
-        orgId = event?.createdBy;
-      } else {
-        const eventCenter = await EventCenter.findById(listingId);
-        orgId = eventCenter?.createdBy;
-      }
-
-      if (orgId) {
-        await Message.updateMany(
-          { conversationId, receiver: orgId, read: false },
-          { $set: { read: true } }
-        );
-        conversation.unreadCount.set(orgId.toString(), 0);
-        await conversation.save();
-      }
+      conversation.unreadCount.set(staffId.toString(), 0);
+      await conversation.save();
     }
 
     res.json({
@@ -196,6 +183,16 @@ const sendStaffMessage = async (req, res) => {
       message: "Message sent successfully by staff",
       data: savedMessage,
     });
+
+    // Log activity (fire-and-forget)
+    logActivity(
+      staffId,
+      context.createdBy,
+      "TASK_COMPLETE",
+      "Message Sent",
+      `Replied to a conversation on behalf of the listing`,
+      { conversationId: conversation._id, contextId, contextType }
+    );
   } catch (err) {
     console.error("[SEND STAFF MESSAGE ERROR]", err);
     res.status(500).json({ success: false, message: "Server error" });

@@ -1,7 +1,7 @@
 const User = require("../../models/user/user.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
 const Notification = require("../../models/user/notification.schema");
-const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
+const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const Event = require("../../models/user/event.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
 
@@ -49,15 +49,15 @@ const inviteStaff = async (req, res) => {
     // 1. Resolve staff user if they already exist
     const staffUser = await User.findOne({ email: staffEmail.toLowerCase() });
 
-    // 2. Prevent co-hosts from being invited as staff for the same listing
+    // 2. Prevent co-organisers from being invited as staff for the same listing
 
     for (const item of listings) {
-      // A. Securely validate that the inviting user is either the listing Owner or a Co-Host with MANAGE_STAFF permission
+      // A. Securely validate that the inviting user is either the listing Owner or a Co-Organiser with MANAGE_STAFF permission
       let listingObj;
       if (item.listingType === "Event") {
-        listingObj = await Event.findById(item.listingId).select("createdBy coHosts staff");
+        listingObj = await Event.findById(item.listingId).select("createdBy coOrganisers staff");
       } else {
-        listingObj = await EventCenter.findById(item.listingId).select("createdBy coHosts staff");
+        listingObj = await EventCenter.findById(item.listingId).select("createdBy coOrganisers staff");
       }
 
       if (!listingObj) {
@@ -70,15 +70,15 @@ const inviteStaff = async (req, res) => {
       const isOwner = listingObj.createdBy && listingObj.createdBy.toString() === organiserId;
 
       if (!isOwner) {
-        // If not the owner, verify they are an authorized Co-Host with MANAGE_STAFF permission
-        const acceptedCoHostInvite = await CoHostInvitation.findOne({
+        // If not the owner, verify they are an authorized Co-Organiser with MANAGE_STAFF permission
+        const acceptedCoOrganiserInvite = await CoOrganiserInvitation.findOne({
           "listings.listingId": item.listingId,
-          coHost: organiserId,
+          coOrganiser: organiserId,
           status: "ACCEPTED",
           permissions: { $in: ["MANAGE_STAFF", "ALL_ACCESS"] }
         });
 
-        if (!acceptedCoHostInvite) {
+        if (!acceptedCoOrganiserInvite) {
           return res.status(403).json({
             success: false,
             message: `Authorization failed: You do not have permission to manage staff for listing ${item.listingId}`,
@@ -86,17 +86,17 @@ const inviteStaff = async (req, res) => {
         }
       }
 
-      // B. Check for any PENDING or ACCEPTED Co-Host invitations to prevent inviting co-hosts as staff
-      const existingCoHostInvite = await CoHostInvitation.findOne({
-        coHostEmail: staffEmail.toLowerCase(),
+      // B. Check for any PENDING or ACCEPTED Co-Organiser invitations to prevent inviting co-organisers as staff
+      const existingCoOrganiserInvite = await CoOrganiserInvitation.findOne({
+        coOrganiserEmail: staffEmail.toLowerCase(),
         "listings.listingId": item.listingId,
         status: { $in: ["PENDING", "ACCEPTED"] },
       });
 
-      if (existingCoHostInvite) {
+      if (existingCoOrganiserInvite) {
         return res.status(400).json({
           success: false,
-          message: `User is already invited or accepted as a co-host for this listing (${item.listingId}). They cannot be invited as staff.`,
+          message: `User is already invited or accepted as a co-organiser for this listing (${item.listingId}). They cannot be invited as staff.`,
         });
       }
 
@@ -114,12 +114,12 @@ const inviteStaff = async (req, res) => {
         });
       }
 
-      // D. If user exists, check direct co-host/staff inclusion in the listing
+      // D. If user exists, check direct co-organiser/staff inclusion in the listing
       if (staffUser) {
-        if (listingObj.coHosts && listingObj.coHosts.some(id => id.equals(staffUser._id))) {
+        if (listingObj.coOrganisers && listingObj.coOrganisers.some(id => id.equals(staffUser._id))) {
           return res.status(400).json({
             success: false,
-            message: "User is already a co-host for this listing. They cannot be invited as staff.",
+            message: "User is already a co-organiser for this listing. They cannot be invited as staff.",
           });
         }
         if (listingObj.staff && listingObj.staff.some(id => id.equals(staffUser._id))) {
@@ -169,11 +169,12 @@ const inviteStaff = async (req, res) => {
 const getMyStaffInvitations = async (req, res) => {
   try {
     const organiserId = req.user.id;
+    const { page = 1, limit = 20 } = req.query;
 
-    // Fetch all events and centers owned or co-hosted by the user
+    // Fetch all events and centers owned or co-organised by the user
     const [events, centers] = await Promise.all([
-      Event.find({ $or: [{ createdBy: organiserId }, { coHosts: organiserId }] }).select("_id"),
-      EventCenter.find({ $or: [{ createdBy: organiserId }, { coHosts: organiserId }] }).select("_id"),
+      Event.find({ $or: [{ createdBy: organiserId }, { coOrganisers: organiserId }] }).select("_id"),
+      EventCenter.find({ $or: [{ createdBy: organiserId }, { coOrganisers: organiserId }] }).select("_id"),
     ]);
 
     const listingIds = [
@@ -181,20 +182,35 @@ const getMyStaffInvitations = async (req, res) => {
       ...centers.map(c => c._id)
     ];
 
-    // Find all invitations matching either being the creator OR matching any of the user's listings
-    const invitations = await StaffInvitation.find({
+    const query = {
       $or: [
         { organiser: organiserId },
         { "listings.listingId": { $in: listingIds } }
-      ]
-    })
-      .populate("staff", "firstName surname email profilePicture")
-      .populate("listings.listingId", "title venueName images type")
-      .sort({ createdAt: -1 });
+      ],
+      status: { $ne: "LEFT" },
+    };
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const [invitations, total] = await Promise.all([
+      StaffInvitation.find(query)
+        .populate("staff", "firstName surname email profilePicture")
+        .populate("listings.listingId", "title venueName images type")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit)),
+      StaffInvitation.countDocuments(query),
+    ]);
 
     res.json({
       success: true,
       data: invitations,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / parseInt(limit)),
+      },
     });
   } catch (error) {
     console.error("[GET MY STAFF INVITATIONS] ERROR:", error);
@@ -227,7 +243,7 @@ const respondToInvitation = async (req, res) => {
     );
 
     const invitation = await StaffInvitation.findOneAndUpdate(
-      { _id: id, staff: userId, status: "PENDING" },
+      { _id: id, staff: userId, status: "PENDING", expiresAt: { $gt: new Date() } },
       { status: action },
       { new: true }
     );
@@ -279,9 +295,7 @@ const removeStaff = async (req, res) => {
     const { listingId, listingType, staffId } = req.body;
     const organiserId = req.user.id;
 
-    const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
-    const Event = require("../../models/user/event.schema");
-    const EventCenter = require("../../models/user/eventCenter.schema");
+const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
 
     let listing;
     if (listingType === "Event") {
@@ -297,31 +311,58 @@ const removeStaff = async (req, res) => {
     const isOwner = listing.createdBy && listing.createdBy.toString() === organiserId;
 
     if (!isOwner) {
-      // Check if they are a co-host with MANAGE_STAFF permission
-      const acceptedCoHostInvite = await CoHostInvitation.findOne({
+      const acceptedCoOrganiserInvite = await CoOrganiserInvitation.findOne({
         "listings.listingId": listingId,
-        coHost: organiserId,
+        coOrganiser: organiserId,
         status: "ACCEPTED",
         permissions: { $in: ["MANAGE_STAFF", "ALL_ACCESS"] }
       });
 
-      if (!acceptedCoHostInvite) {
+      if (!acceptedCoOrganiserInvite) {
         return res.status(403).json({ success: false, message: "Not authorized to manage staff for this listing" });
       }
     }
 
-    // Remove from listing
+    // Remove staff from the listing's staff array
     if (listingType === "Event") {
       await Event.findByIdAndUpdate(listingId, { $pull: { staff: staffId } });
     } else {
       await EventCenter.findByIdAndUpdate(listingId, { $pull: { staff: staffId } });
     }
 
-    // Delete the corresponding staff invitation
-    await StaffInvitation.findOneAndDelete({
+    // Find the invitation containing this listing
+    const invitation = await StaffInvitation.findOne({
       staff: staffId,
-      "listings.listingId": listingId
+      "listings.listingId": listingId,
     });
+
+    if (invitation) {
+      // Remove only this listing from the invitation
+      invitation.listings = invitation.listings.filter(
+        (l) => l.listingId.toString() !== listingId
+      );
+
+      if (invitation.listings.length === 0) {
+        // No listings left — delete the invitation entirely
+        await StaffInvitation.findByIdAndDelete(invitation._id);
+      } else {
+        await invitation.save();
+      }
+
+      // Check if the staff member has any other ACCEPTED invitations
+      const otherActive = await StaffInvitation.countDocuments({
+        staff: staffId,
+        status: "ACCEPTED",
+      });
+
+      if (otherActive === 0) {
+        const user = await User.findById(staffId).select("roles");
+        if (user && user.roles.includes("staff")) {
+          user.roles = user.roles.filter((r) => r !== "staff");
+          await user.save();
+        }
+      }
+    }
 
     res.json({
       success: true,
@@ -334,11 +375,72 @@ const removeStaff = async (req, res) => {
 };
 
 /**
+ * 🚫 Revoke All Access — Remove a staff member from ALL listings for this organiser
+ */
+const revokeAllAccess = async (req, res) => {
+  try {
+    const { staffId } = req.params;
+    const organiserId = req.user.id;
+
+    // Find all ACCEPTED invitations for this staff member with this organiser
+    const invitations = await StaffInvitation.find({
+      staff: staffId,
+      organiser: organiserId,
+      status: "ACCEPTED",
+    });
+
+    if (invitations.length === 0) {
+      return res.status(404).json({ success: false, message: "No active staff relationship found" });
+    }
+
+    // Remove staff from all listings across all invitations
+    for (const invitation of invitations) {
+      for (const item of invitation.listings) {
+        if (item.listingType === "Event") {
+          await Event.findByIdAndUpdate(item.listingId, { $pull: { staff: staffId } });
+        } else if (item.listingType === "EventCenter") {
+          await EventCenter.findByIdAndUpdate(item.listingId, { $pull: { staff: staffId } });
+        }
+      }
+    }
+
+    // Delete all invitations for this staff-organiser pair
+    await StaffInvitation.deleteMany({
+      staff: staffId,
+      organiser: organiserId,
+    });
+
+    // Check if the staff member has any other ACCEPTED invitations from other organisers
+    const otherActive = await StaffInvitation.countDocuments({
+      staff: staffId,
+      status: "ACCEPTED",
+    });
+
+    if (otherActive === 0) {
+      const user = await User.findById(staffId).select("roles");
+      if (user && user.roles.includes("staff")) {
+        user.roles = user.roles.filter((r) => r !== "staff");
+        await user.save();
+      }
+    }
+
+    res.json({
+      success: true,
+      message: "All staff access revoked successfully",
+    });
+  } catch (error) {
+    console.error("[REVOKE ALL ACCESS] ERROR:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+/**
  * 📜 Get Received Staff Invitations (for the Staff member)
  */
 const getReceivedStaffInvitations = async (req, res) => {
   try {
     const userId = req.user.id;
+    const { page = 1, limit = 20 } = req.query;
     const user = await User.findById(userId).select("email");
     if (!user) {
       return res.status(404).json({ success: false, message: "User not found" });
@@ -350,14 +452,28 @@ const getReceivedStaffInvitations = async (req, res) => {
       { $set: { staff: userId } }
     );
 
-    const invitations = await StaffInvitation.find({ staff: userId })
-      .populate("organiser", "firstName surname email profilePicture")
-      .populate("listings.listingId", "title venueName images type")
-      .sort({ createdAt: -1 });
+    const query = { staff: userId, status: { $ne: "LEFT" } };
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const [invitations, total] = await Promise.all([
+      StaffInvitation.find(query)
+        .populate("organiser", "firstName surname email profilePicture")
+        .populate("listings.listingId", "title venueName images type")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit)),
+      StaffInvitation.countDocuments(query),
+    ]);
 
     res.json({
       success: true,
       data: invitations,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / parseInt(limit)),
+      },
     });
   } catch (error) {
     console.error("[GET RECEIVED STAFF INVITATIONS] ERROR:", error);
@@ -440,25 +556,25 @@ const getStaffDashboardStats = async (req, res) => {
 
     // Get all events and event centers owned by this organiser
     const [events, eventCenters] = await Promise.all([
-      Event.find({ createdBy: organiserId }).select("staff coHosts"),
-      EventCenter.find({ createdBy: organiserId }).select("staff coHosts"),
+      Event.find({ createdBy: organiserId }).select("staff coOrganisers"),
+      EventCenter.find({ createdBy: organiserId }).select("staff coOrganisers"),
     ]);
 
-    // Extract unique staff IDs and co-hosts to exclude them
+    // Extract unique staff IDs and co-organisers to exclude them
     const staffIds = new Set();
-    const coHostIds = new Set();
+    const coOrganiserIds = new Set();
 
     events.forEach((e) => {
       e.staff.forEach((id) => staffIds.add(id.toString()));
-      if (e.coHosts) e.coHosts.forEach((id) => coHostIds.add(id.toString()));
+      if (e.coOrganisers) e.coOrganisers.forEach((id) => coOrganiserIds.add(id.toString()));
     });
     eventCenters.forEach((ec) => {
       ec.staff.forEach((id) => staffIds.add(id.toString()));
-      if (ec.coHosts) ec.coHosts.forEach((id) => coHostIds.add(id.toString()));
+      if (ec.coOrganisers) ec.coOrganisers.forEach((id) => coOrganiserIds.add(id.toString()));
     });
 
-    // Remove any overlapping co-host IDs from the staff count
-    coHostIds.forEach((id) => staffIds.delete(id));
+    // Remove any overlapping co-organiser IDs from the staff count
+    coOrganiserIds.forEach((id) => staffIds.delete(id));
 
     const totalStaffCount = staffIds.size;
 
@@ -494,36 +610,47 @@ const getStaffDashboardStats = async (req, res) => {
 const getAllStaff = async (req, res) => {
   try {
     const organiserId = req.user.id;
-    const Event = require("../../models/user/event.schema");
-    const EventCenter = require("../../models/user/eventCenter.schema");
+    const { page = 1, limit = 20 } = req.query;
 
     const [events, eventCenters] = await Promise.all([
-      Event.find({ createdBy: organiserId }).select("staff coHosts"),
-      EventCenter.find({ createdBy: organiserId }).select("staff coHosts"),
+      Event.find({ createdBy: organiserId }).select("staff coOrganisers"),
+      EventCenter.find({ createdBy: organiserId }).select("staff coOrganisers"),
     ]);
 
     const staffIds = new Set();
-    const coHostIds = new Set();
+    const coOrganiserIds = new Set();
 
     events.forEach((e) => {
       e.staff.forEach((id) => staffIds.add(id.toString()));
-      if (e.coHosts) e.coHosts.forEach((id) => coHostIds.add(id.toString()));
+      if (e.coOrganisers) e.coOrganisers.forEach((id) => coOrganiserIds.add(id.toString()));
     });
     eventCenters.forEach((ec) => {
       ec.staff.forEach((id) => staffIds.add(id.toString()));
-      if (ec.coHosts) ec.coHosts.forEach((id) => coHostIds.add(id.toString()));
+      if (ec.coOrganisers) ec.coOrganisers.forEach((id) => coOrganiserIds.add(id.toString()));
     });
 
-    // Strictly separate co-hosts from the staff list representation
-    coHostIds.forEach((id) => staffIds.delete(id));
+    coOrganiserIds.forEach((id) => staffIds.delete(id));
 
-    const staff = await User.find({ _id: { $in: Array.from(staffIds) } }).select(
-      "firstName surname email profilePicture isActive roles"
-    );
+    const query = { _id: { $in: Array.from(staffIds) } };
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const [staff, total] = await Promise.all([
+      User.find(query)
+        .select("firstName surname email profilePicture isActive roles createdAt")
+        .skip(skip)
+        .limit(parseInt(limit)),
+      User.countDocuments(query),
+    ]);
 
     res.json({
       success: true,
       data: staff,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        totalPages: Math.ceil(total / parseInt(limit)),
+      },
     });
   } catch (error) {
     console.error("[GET ALL STAFF] ERROR:", error);
@@ -612,6 +739,7 @@ module.exports = {
   respondToInvitation,
   cancelInvitation,
   removeStaff,
+  revokeAllAccess,
   leaveStaff,
   getStaffDashboardStats,
   getAllStaff,

@@ -7,7 +7,7 @@ const EventCenterBooking = require("../../models/user/eventCenterBooking.schema"
 const Ticket = require("../../models/user/eventTicketType.schema");
 const UserEventTicket = require("../../models/user/userEventTicket.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
-const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
+const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const AdminAuditLog = require("../../models/admin/adminAuditLog.schema");
 
 const getAdminOverview = async (req, res) => {
@@ -28,7 +28,7 @@ const getAdminOverview = async (req, res) => {
       soldEventTickets,
       ticketTypes,
       pendingStaffInvites,
-      pendingCoHostInvites,
+      pendingCoOrganiserInvites,
       recentUsers,
       recentEvents,
       recentEventCenters,
@@ -51,7 +51,7 @@ const getAdminOverview = async (req, res) => {
       UserEventTicket.countDocuments(),
       Ticket.countDocuments(),
       StaffInvitation.countDocuments({ status: "PENDING" }),
-      CoHostInvitation.countDocuments({ status: "PENDING" }),
+      CoOrganiserInvitation.countDocuments({ status: "PENDING" }),
       User.find().select("firstName surname email roles isActive createdAt").sort({ createdAt: -1 }).limit(5).lean(),
       Event.find().select("title status createdAt createdBy").populate("createdBy", "firstName surname email").sort({ createdAt: -1 }).limit(5).lean(),
       EventCenter.find().select("venueName status createdAt createdBy").populate("createdBy", "firstName surname email").sort({ createdAt: -1 }).limit(5).lean(),
@@ -67,7 +67,7 @@ const getAdminOverview = async (req, res) => {
     ]);
 
     const actionRequiredListings = actionRequiredEvents + actionRequiredEventCenters;
-    const pendingInvites = pendingStaffInvites + pendingCoHostInvites;
+    const pendingInvites = pendingStaffInvites + pendingCoOrganiserInvites;
 
     res.status(200).json({
       success: true,

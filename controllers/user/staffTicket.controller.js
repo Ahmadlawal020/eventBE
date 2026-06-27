@@ -2,6 +2,7 @@ const Event = require("../../models/user/event.schema");
 const Ticket = require("../../models/user/eventTicketType.schema");
 const UserEventTicket = require("../../models/user/userEventTicket.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
+const { logActivity } = require("./staffDashboard.controller");
 const mongoose = require("mongoose");
 
 /**
@@ -157,7 +158,7 @@ exports.getStaffEventTickets = async (req, res) => {
     const skip = (parseInt(page) - 1) * parseInt(limit);
 
     const tickets = await UserEventTicket.find(query)
-      .populate("owner", "firstName lastName email profileImage phoneNumber")
+      .populate("owner", "firstName surname email profilePicture phoneNumber")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(parseInt(limit));
@@ -195,7 +196,7 @@ exports.getStaffTicketDetails = async (req, res) => {
     }
 
     const ticket = await UserEventTicket.findById(ticketId)
-      .populate("owner", "firstName lastName email profileImage phoneNumber")
+      .populate("owner", "firstName surname email profilePicture phoneNumber")
       .populate("eventId", "title status images schedule");
 
     if (!ticket) {
@@ -242,7 +243,7 @@ exports.searchStaffTickets = async (req, res) => {
     let tickets = await UserEventTicket.find({
       eventId: new mongoose.Types.ObjectId(eventId),
       ticketNumber: { $regex: searchQuery, $options: "i" },
-    }).populate("owner", "firstName lastName email profileImage phoneNumber");
+    }).populate("owner", "firstName surname email profilePicture phoneNumber");
 
     // If not found, search by owner details (using populated field won't work, use aggregate)
     if (tickets.length === 0) {
@@ -261,7 +262,7 @@ exports.searchStaffTickets = async (req, res) => {
           $match: {
             $or: [
               { "owner.firstName": { $regex: searchQuery, $options: "i" } },
-              { "owner.lastName": { $regex: searchQuery, $options: "i" } },
+              { "owner.surname": { $regex: searchQuery, $options: "i" } },
               { "owner.email": { $regex: searchQuery, $options: "i" } },
             ],
           },
@@ -278,9 +279,9 @@ exports.searchStaffTickets = async (req, res) => {
             ticketSnapshot: 1,
             "owner._id": 1,
             "owner.firstName": 1,
-            "owner.lastName": 1,
+            "owner.surname": 1,
             "owner.email": 1,
-            "owner.profileImage": 1,
+            "owner.profilePicture": 1,
             "owner.phoneNumber": 1,
           },
         },
@@ -348,6 +349,19 @@ exports.staffTicketCheckIn = async (req, res) => {
       message: "Guest successfully checked in.",
       data: ticket,
     });
+
+    // Log activity (fire-and-forget)
+    const eventDoc = await Event.findById(ticket.eventId).select("createdBy").lean();
+    if (eventDoc) {
+      logActivity(
+        staffId,
+        eventDoc.createdBy,
+        "CHECK_IN",
+        "Manual Check-In",
+        `Checked in ticket ${ticket.ticketNumber} (${ticket.ticketName})`,
+        { ticketId: ticket._id, eventId: ticket.eventId, method: "MANUAL" }
+      );
+    }
   } catch (error) {
     console.error("[STAFF TICKET CHECK-IN ERROR]", error);
     res.status(500).json({ success: false, message: "Server error." });
@@ -396,6 +410,19 @@ exports.staffCancelTicket = async (req, res) => {
       message: "Ticket successfully cancelled.",
       data: ticket,
     });
+
+    // Log activity (fire-and-forget)
+    const cancelEventDoc = await Event.findById(ticket.eventId).select("createdBy").lean();
+    if (cancelEventDoc) {
+      logActivity(
+        staffId,
+        cancelEventDoc.createdBy,
+        "TASK_COMPLETE",
+        "Ticket Cancelled",
+        `Cancelled ticket ${ticket.ticketNumber} (${ticket.ticketName})`,
+        { ticketId: ticket._id, eventId: ticket.eventId }
+      );
+    }
   } catch (error) {
     console.error("[STAFF CANCEL TICKET ERROR]", error);
     res.status(500).json({ success: false, message: "Server error." });

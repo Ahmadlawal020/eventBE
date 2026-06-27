@@ -1,7 +1,7 @@
 const EventCenter = require("../../models/user/eventCenter.schema");
 const EventCenterBooking = require("../../models/user/eventCenterBooking.schema");
 const mongoose = require("mongoose");
-const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
+const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
 
 /**
@@ -13,11 +13,11 @@ const getOrganiserBookingStats = async (req, res) => {
   const organiserId = req.user.id;
 
   try {
-    // 1. Find all event centers managed by this organiser (Created or Co-hosted, NOT where user is staff)
+    // 1. Find all event centers managed by this organiser (Created or Co-organised, NOT where user is staff)
     const venuesRaw = await EventCenter.find({
       $or: [
         { createdBy: organiserId },
-        { coHosts: organiserId },
+        { coOrganisers: organiserId },
       ],
       staff: { $ne: organiserId },
     })
@@ -25,14 +25,14 @@ const getOrganiserBookingStats = async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    // Fetch accepted invitations for co-host and staff to check permissions
-    const [coHostInvites, staffInvites] = await Promise.all([
-      CoHostInvitation.find({ coHost: organiserId, status: "ACCEPTED" }).lean(),
+    // Fetch accepted invitations for co-organiser and staff to check permissions
+    const [coOrganiserInvites, staffInvites] = await Promise.all([
+      CoOrganiserInvitation.find({ coOrganiser: organiserId, status: "ACCEPTED" }).lean(),
       StaffInvitation.find({ staff: organiserId, status: "ACCEPTED" }).lean(),
     ]);
 
     const permissionsMap = {};
-    coHostInvites.forEach(invite => {
+    coOrganiserInvites.forEach(invite => {
       if (invite.listings) {
         invite.listings.forEach(item => {
           if (item.listingType === "EventCenter" && item.listingId) {
@@ -287,7 +287,7 @@ const getOrganiserBookingStats = async (req, res) => {
 /**
  * @desc    Get detailed bookings for a single event center
  * @route   GET /api/organiser/booking-stats/:venueId
- * @access  Private (Organiser/Co-host/Staff)
+ * @access  Private (Organiser/Co-organiser/Staff)
  */
 const getSingleVenueBookingStats = async (req, res) => {
   const { venueId } = req.params;
@@ -298,7 +298,7 @@ const getSingleVenueBookingStats = async (req, res) => {
       _id: venueId,
       $or: [
         { createdBy: organiserId },
-        { coHosts: organiserId },
+        { coOrganisers: organiserId },
         { staff: organiserId },
       ],
     }).select("_id venueName images status createdBy bookingSettings").lean();
@@ -307,15 +307,15 @@ const getSingleVenueBookingStats = async (req, res) => {
       return res.status(404).json({ success: false, message: "Venue not found or access denied" });
     }
 
-    // Owner/creator has full access. Otherwise, verify permissions for co-host or staff.
+    // Owner/creator has full access. Otherwise, verify permissions for co-organiser or staff.
     let hasFinancePerm = true;
     if (venue.createdBy && venue.createdBy.toString() !== organiserId.toString()) {
-      const [coHostInvite, staffInvite] = await Promise.all([
-        CoHostInvitation.findOne({ coHost: organiserId, status: "ACCEPTED", "listings.listingId": venueId }).lean(),
+      const [coOrganiserInvite, staffInvite] = await Promise.all([
+        CoOrganiserInvitation.findOne({ coOrganiser: organiserId, status: "ACCEPTED", "listings.listingId": venueId }).lean(),
         StaffInvitation.findOne({ staff: organiserId, status: "ACCEPTED", "listings.listingId": venueId }).lean(),
       ]);
 
-      const userPerms = (coHostInvite?.permissions || []).concat(staffInvite?.permissions || []);
+      const userPerms = (coOrganiserInvite?.permissions || []).concat(staffInvite?.permissions || []);
       const hasCalendarPerm = userPerms.includes("VIEW_CALENDAR") || userPerms.includes("MANAGE_CALENDAR");
       const hasFinancePermCheck = userPerms.includes("VIEW_FINANCES") || userPerms.includes("ALL_ACCESS");
 

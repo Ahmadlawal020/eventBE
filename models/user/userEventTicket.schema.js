@@ -15,7 +15,7 @@ const userEventTicketSchema = new Schema(
     },
     ticketTypeId: {
       type: Schema.Types.ObjectId,
-      ref: "Ticket",
+      ref: "EventTicketType",
       required: true,
     },
     owner: {
@@ -98,6 +98,16 @@ const userEventTicketSchema = new Schema(
         symbol: String,
       },
     },
+
+    // TRANSFER HISTORY — immutable audit trail
+    transferHistory: [
+      {
+        fromUser: { type: Schema.Types.ObjectId, ref: "User", required: true },
+        toUser: { type: Schema.Types.ObjectId, ref: "User", required: true },
+        transferredAt: { type: Date, default: Date.now },
+        previousTicketNumber: { type: String },
+      },
+    ],
 
   },
 

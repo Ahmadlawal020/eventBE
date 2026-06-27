@@ -14,7 +14,7 @@ const notificationSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ["COHOST_INVITATION", "STAFF_INVITATION", "SYSTEM", "BOOKING_UPDATE"],
+      enum: ["CO_ORGANISER_INVITATION", "STAFF_INVITATION", "SYSTEM", "BOOKING_UPDATE", "TICKET_TRANSFER_REQUEST", "TICKET_TRANSFER_ACCEPTED", "TICKET_TRANSFER_DECLINED"],
       required: true,
     },
     title: {
@@ -26,7 +26,7 @@ const notificationSchema = new mongoose.Schema(
       required: true,
     },
     referenceId: {
-      type: mongoose.Schema.Types.ObjectId, // E.g., CoHostInvitation ID
+      type: mongoose.Schema.Types.ObjectId, // E.g., CoOrganiserInvitation ID
     },
     isRead: {
       type: Boolean,

@@ -1,19 +1,19 @@
 const mongoose = require("mongoose");
 
-const coHostInvitationSchema = new mongoose.Schema(
+const coOrganiserInvitationSchema = new mongoose.Schema(
   {
     host: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
     },
-    coHostEmail: {
+    coOrganiserEmail: {
       type: String,
       required: true,
       lowercase: true,
       trim: true,
     },
-    coHost: {
+    coOrganiser: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       default: null,
@@ -58,4 +58,4 @@ const coHostInvitationSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-module.exports = mongoose.model("CoHostInvitation", coHostInvitationSchema);
+module.exports = mongoose.model("CoOrganiserInvitation", coOrganiserInvitationSchema);

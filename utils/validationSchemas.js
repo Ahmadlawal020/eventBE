@@ -49,6 +49,20 @@ const updatePasswordSchema = Joi.object({
   newPassword: Joi.string().min(6).required()
 });
 
+const sendMessageSchema = Joi.object({
+  content: Joi.string().trim().min(1).max(2000).required(),
+  contextType: Joi.string().valid("Event", "EventCenter").required(),
+  contextId: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).required(),
+  conversationId: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).optional(),
+});
+
+const sendStaffMessageSchema = Joi.object({
+  content: Joi.string().trim().min(1).max(2000).required(),
+  contextType: Joi.string().valid("Event", "EventCenter").required(),
+  contextId: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).required(),
+  conversationId: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).required(),
+});
+
 module.exports = {
   signupSchema,
   loginSchema,
@@ -58,5 +72,7 @@ module.exports = {
   otpRequestSchema,
   otpVerifySchema,
   passwordChangeRequestSchema,
-  updatePasswordSchema
+  updatePasswordSchema,
+  sendMessageSchema,
+  sendStaffMessageSchema,
 };

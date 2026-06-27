@@ -344,7 +344,7 @@ const eventSchema = new mongoose.Schema(
       ref: "User",
     },
 
-    coHosts: [
+    coOrganisers: [
       {
         type: mongoose.Schema.Types.ObjectId,
         ref: "User",

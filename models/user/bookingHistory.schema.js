@@ -10,7 +10,7 @@ const bookingHistorySchema = new mongoose.Schema(
     },
     ticket: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "EventCenterTicket",
+      ref: "EventCenterBooking",
       default: null,
     },
     bookingId: {
@@ -30,7 +30,7 @@ const bookingHistorySchema = new mongoose.Schema(
     },
     action: {
       type: String,
-      enum: ["CREATED", "RESCHEDULED", "CANCELLED", "CHECKED_IN", "PAYMENT_UPDATED"],
+      enum: ["CREATED", "RESCHEDULED", "CANCELLED", "CHECKED_IN", "PAYMENT_UPDATED", "ACCEPTED", "DECLINED"],
       required: true,
     },
     performedBy: {

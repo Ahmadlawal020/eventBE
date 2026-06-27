@@ -41,4 +41,9 @@ const messageSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// Index for paginated message retrieval within a conversation
+messageSchema.index({ conversationId: 1, createdAt: -1 });
+// Index for unread message queries
+messageSchema.index({ receiver: 1, read: 1 });
+
 module.exports = mongoose.model("Message", messageSchema);

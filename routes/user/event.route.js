@@ -85,6 +85,7 @@ const {
   getMyDraftEvents,
   updateEvent,
   updateEventPerformer,
+  deletePerformerImage,
   deleteEvent,
   getMyEvents,
   getPersonalEventListings,
@@ -107,6 +108,7 @@ router.get("/my-events", verifyJWT, getMyEvents);
 router.patch("/:id/images/reorder", verifyJWT, reorderEventImages);
 router.patch("/:id/images/delete", verifyJWT, deleteEventImage);
 
+router.patch("/:id/performers/:performerId/image/delete", verifyJWT, deletePerformerImage);
 router.patch("/:id/performers/:performerId", verifyJWT, updateEventPerformer);
 router.delete("/:id/performers/:performerId", verifyJWT, deleteEventPerformer);
 

@@ -30,6 +30,8 @@
     "mongoose": "^8.12.1",
     "mongoose-sequence": "^6.0.1",
     "nodemailer": "^8.0.5",
+    "pdfkit": "^0.19.1",
+    "qrcode": "^1.5.4",
     "uuid": "^11.1.0"
   }
 }

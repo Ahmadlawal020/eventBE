@@ -97,6 +97,16 @@ const eventCenterTicketSchema = new mongoose.Schema(
         enum: ["QR", "MANUAL"],
       },
     },
+
+    // TRANSFER HISTORY — immutable audit trail
+    transferHistory: [
+      {
+        fromUser: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+        toUser: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+        transferredAt: { type: Date, default: Date.now },
+        previousTicketNumber: { type: String },
+      },
+    ],
   },
   { timestamps: true }
 );

@@ -103,10 +103,10 @@ exports.getStaffDetailedProfile = async (req, res) => {
       }
     ]);
 
-    // Fetch all events and centers owned or co-hosted by the user
+    // Fetch all events and centers owned or co-organised by the user
     const [events, centers] = await Promise.all([
-      Event.find({ $or: [{ createdBy: organiserId }, { coHosts: organiserId }] }).select("_id"),
-      EventCenter.find({ $or: [{ createdBy: organiserId }, { coHosts: organiserId }] }).select("_id"),
+      Event.find({ $or: [{ createdBy: organiserId }, { coOrganisers: organiserId }] }).select("_id"),
+      EventCenter.find({ $or: [{ createdBy: organiserId }, { coOrganisers: organiserId }] }).select("_id"),
     ]);
 
     const listingIds = [
@@ -160,8 +160,8 @@ exports.updateStaffAccess = async (req, res) => {
     const { permissions, listings } = req.body;
     const organiserId = req.user.id;
 
-    // Verify user has authority (owner or co-host with MANAGE_STAFF/ALL_ACCESS) for all requested listings
-    const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
+    // Verify user has authority (owner or co-organiser with MANAGE_STAFF/ALL_ACCESS) for all requested listings
+    const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
     
     for (const item of listings) {
       let listingObj;
@@ -178,14 +178,14 @@ exports.updateStaffAccess = async (req, res) => {
       const isOwner = listingObj.createdBy && listingObj.createdBy.toString() === organiserId;
 
       if (!isOwner) {
-        const acceptedCoHostInvite = await CoHostInvitation.findOne({
+        const acceptedCoOrganiserInvite = await CoOrganiserInvitation.findOne({
           "listings.listingId": item.listingId,
-          coHost: organiserId,
+          coOrganiser: organiserId,
           status: "ACCEPTED",
           permissions: { $in: ["MANAGE_STAFF", "ALL_ACCESS"] }
         });
 
-        if (!acceptedCoHostInvite) {
+        if (!acceptedCoOrganiserInvite) {
           return res.status(403).json({
             success: false,
             message: `Authorization failed: You do not have permission to manage staff for listing ${item.listingId}`,

@@ -36,12 +36,14 @@ const staffInvitationSchema = new mongoose.Schema(
       {
         type: String,
         enum: [
+          "ALL_ACCESS",
           "MANAGE_LISTING",
           "MANAGE_CALENDAR",
           "MANAGE_BOOKINGS",
           "MANAGE_TICKETS",
           "SCAN_TICKET",
           "CUSTOMER_CARE",
+          "MANAGE_CUSTOMER_CARE",
         ],
       },
     ],
@@ -49,6 +51,10 @@ const staffInvitationSchema = new mongoose.Schema(
       type: String,
       enum: ["PENDING", "ACCEPTED", "DECLINED", "LEFT"],
       default: "PENDING",
+    },
+    expiresAt: {
+      type: Date,
+      default: () => new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
     },
   },
   { timestamps: true }

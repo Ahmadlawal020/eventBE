@@ -2,7 +2,7 @@ const Event = require("../../models/user/event.schema");
 const Ticket = require("../../models/user/eventTicketType.schema");
 const UserEventTicket = require("../../models/user/userEventTicket.schema");
 const EventBooking = require("../../models/user/eventBooking.schema");
-const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
+const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
 
 /**
@@ -14,11 +14,11 @@ const getOrganiserTicketStats = async (req, res) => {
   const organiserId = req.user.id;
 
   try {
-    // 1. Find all events managed by this organiser (Created or Co-hosted, NOT where user is staff)
+    // 1. Find all events managed by this organiser (Created or Co-organised, NOT where user is staff)
     const eventsRaw = await Event.find({
       $or: [
         { createdBy: organiserId },
-        { coHosts: organiserId },
+        { coOrganisers: organiserId },
       ],
       staff: { $ne: organiserId },
     })
@@ -26,14 +26,14 @@ const getOrganiserTicketStats = async (req, res) => {
       .sort({ "schedule.from": -1 })
       .lean();
 
-    // Fetch accepted invitations for co-host and staff to check permissions
-    const [coHostInvites, staffInvites] = await Promise.all([
-      CoHostInvitation.find({ coHost: organiserId, status: "ACCEPTED" }).lean(),
+    // Fetch accepted invitations for co-organiser and staff to check permissions
+    const [coOrganiserInvites, staffInvites] = await Promise.all([
+      CoOrganiserInvitation.find({ coOrganiser: organiserId, status: "ACCEPTED" }).lean(),
       StaffInvitation.find({ staff: organiserId, status: "ACCEPTED" }).lean(),
     ]);
 
     const permissionsMap = {};
-    coHostInvites.forEach(invite => {
+    coOrganiserInvites.forEach(invite => {
       if (invite.listings) {
         invite.listings.forEach(item => {
           if (item.listingType === "Event" && item.listingId) {
@@ -341,7 +341,7 @@ const getOrganiserTicketStats = async (req, res) => {
 /**
  * @desc    Get detailed ticket statistics for a single event
  * @route   GET /api/organiser/ticket-stats/:eventId
- * @access  Private (Organiser/Co-host/Staff)
+ * @access  Private (Organiser/Co-organiser/Staff)
  */
 const getSingleEventTicketStats = async (req, res) => {
   const { eventId } = req.params;
@@ -353,7 +353,7 @@ const getSingleEventTicketStats = async (req, res) => {
       _id: eventId,
       $or: [
         { createdBy: organiserId },
-        { coHosts: organiserId },
+        { coOrganisers: organiserId },
         { staff: organiserId },
       ],
     }).select("_id title status schedule location images createdBy").lean();
@@ -364,12 +364,12 @@ const getSingleEventTicketStats = async (req, res) => {
 
     let hasFinancePerm = true;
     if (event.createdBy && event.createdBy.toString() !== organiserId.toString()) {
-      const [coHostInvite, staffInvite] = await Promise.all([
-        CoHostInvitation.findOne({ coHost: organiserId, status: "ACCEPTED", "listings.listingId": eventId }).lean(),
+      const [coOrganiserInvite, staffInvite] = await Promise.all([
+        CoOrganiserInvitation.findOne({ coOrganiser: organiserId, status: "ACCEPTED", "listings.listingId": eventId }).lean(),
         StaffInvitation.findOne({ staff: organiserId, status: "ACCEPTED", "listings.listingId": eventId }).lean(),
       ]);
 
-      const userPerms = (coHostInvite?.permissions || []).concat(staffInvite?.permissions || []);
+      const userPerms = (coOrganiserInvite?.permissions || []).concat(staffInvite?.permissions || []);
       hasFinancePerm = userPerms.includes("VIEW_FINANCES") || userPerms.includes("ALL_ACCESS");
     }
 
@@ -563,7 +563,7 @@ const getSingleEventTicketStats = async (req, res) => {
 /**
  * @desc    Get list of attendees/tickets for a single event
  * @route   GET /api/organiser/ticket-stats/:eventId/attendees
- * @access  Private (Organiser/Co-host/Staff)
+ * @access  Private (Organiser/Co-organiser/Staff)
  */
 const getEventAttendees = async (req, res) => {
   const { eventId } = req.params;
@@ -576,7 +576,7 @@ const getEventAttendees = async (req, res) => {
       _id: eventId,
       $or: [
         { createdBy: organiserId },
-        { coHosts: organiserId },
+        { coOrganisers: organiserId },
         { staff: organiserId },
       ],
     }).select("_id title").lean();

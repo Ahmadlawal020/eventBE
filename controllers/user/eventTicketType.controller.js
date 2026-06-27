@@ -1,19 +1,19 @@
 const Ticket = require("../../models/user/eventTicketType.schema");
 const Event = require("../../models/user/event.schema");
-const CoHostInvitation = require("../../models/user/coOrganiserInvitation.schema");
+const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
 
 const canManageEventTickets = async (event, userId) => {
   if (event.createdBy?.toString() === userId.toString()) {
     return true;
   }
 
-  const coHostInvite = await CoHostInvitation.findOne({
-    coHost: userId,
+  const coOrganiserInvite = await CoOrganiserInvitation.findOne({
+    coOrganiser: userId,
     status: "ACCEPTED",
     "listings.listingId": event._id,
   }).lean();
 
-  const permissions = coHostInvite?.permissions || [];
+  const permissions = coOrganiserInvite?.permissions || [];
   return (
     permissions.includes("MANAGE_LISTING") ||
     permissions.includes("MANAGE_TICKETS") ||

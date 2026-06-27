@@ -2,6 +2,7 @@ const UserEventTicket = require("../../models/user/userEventTicket.schema");
 const EventCenterBooking = require("../../models/user/eventCenterBooking.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
 const { verifyQRPayload } = require("../../utils/qr");
+const { logActivity } = require("./staffDashboard.controller");
 
 /**
  * Verify staff permissions for scanning tickets for a specific listing
@@ -28,8 +29,10 @@ const checkStaffScannerPermission = async (staffId, listingId, listingType) => {
     return { hasPermission: false, message: "Listing assignment not found." };
   }
 
-  const assignedType = listingEntry.listingType.toLowerCase() === "event" ? "event" : "event-center";
-  const requestedType = listingType.toLowerCase() === "event" ? "event" : "event-center";
+  // Normalize both to PascalCase for comparison
+  const normalizeType = (t) => t.toLowerCase() === "event" ? "Event" : "EventCenter";
+  const assignedType = normalizeType(listingEntry.listingType);
+  const requestedType = normalizeType(listingType);
 
   if (assignedType !== requestedType) {
     return { hasPermission: false, message: "Listing type mismatch." };
@@ -42,9 +45,12 @@ const checkStaffScannerPermission = async (staffId, listingId, listingType) => {
  * Verify a ticket (Non-destructive lookup for Staff)
  */
 const verifyTicketStaff = async (req, res) => {
-  const { listingId, listingType } = req.params;
+  let { listingId, listingType } = req.params;
   const { ticketNumber, qrPayload } = req.body;
   const staffId = req.user.id;
+
+  // Normalize listingType to lowercase for consistent comparison
+  listingType = listingType.toLowerCase();
 
   try {
     const permCheck = await checkStaffScannerPermission(staffId, listingId, listingType);
@@ -147,9 +153,12 @@ const verifyTicketStaff = async (req, res) => {
  * Validate and Check-in a ticket (Destructive operation for Staff)
  */
 const validateTicketStaff = async (req, res) => {
-  const { listingId, listingType } = req.params;
+  let { listingId, listingType } = req.params;
   const { ticketNumber, qrPayload } = req.body;
   const staffId = req.user.id;
+
+  // Normalize listingType to lowercase for consistent comparison
+  listingType = listingType.toLowerCase();
 
   try {
     const permCheck = await checkStaffScannerPermission(staffId, listingId, listingType);
@@ -244,6 +253,20 @@ const validateTicketStaff = async (req, res) => {
         },
       });
 
+      // Log activity (fire-and-forget)
+      const Event = require("../../models/user/event.schema");
+      const eventDoc = await Event.findById(listingId).select("createdBy").lean();
+      if (eventDoc) {
+        logActivity(
+          staffId,
+          eventDoc.createdBy,
+          "SCAN",
+          "Ticket Scanned",
+          `Checked in ticket ${ticket.ticketNumber} (${ticket.ticketName})`,
+          { ticketId: ticket._id, eventId: listingId, method: qrPayload ? "QR" : "MANUAL" }
+        );
+      }
+
     } else if (listingType === "event-center") {
       const ticket = await EventCenterBooking.findOneAndUpdate(
         {
@@ -310,6 +333,20 @@ const validateTicketStaff = async (req, res) => {
           checkedInAt: ticket.checkIn?.checkedInAt,
         },
       });
+
+      // Log activity (fire-and-forget)
+      const EventCenter = require("../../models/user/eventCenter.schema");
+      const centerDoc = await EventCenter.findById(listingId).select("createdBy").lean();
+      if (centerDoc) {
+        logActivity(
+          staffId,
+          centerDoc.createdBy,
+          "SCAN",
+          "Booking Pass Scanned",
+          `Checked in booking ${ticket.ticketNumber}`,
+          { bookingId: ticket._id, eventCenterId: listingId, method: qrPayload ? "QR" : "MANUAL" }
+        );
+      }
     } else {
       return res.status(400).json({ success: false, message: "Invalid listing type." });
     }

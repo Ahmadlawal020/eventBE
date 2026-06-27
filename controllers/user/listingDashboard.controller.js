@@ -11,20 +11,20 @@ const getOrganiserListingStats = async (req, res) => {
   const organiserId = req.user.id;
 
   try {
-    // 1. Fetch Organiser's Events (Created or Co-hosted, NOT where user is staff)
+    // 1. Fetch Organiser's Events (Created or Co-organised, NOT where user is staff)
     const events = await Event.find({
       $or: [
         { createdBy: organiserId },
-        { coHosts: organiserId },
+        { coOrganisers: organiserId },
       ],
       staff: { $ne: organiserId },
     }).select("performance status").lean();
 
-    // 2. Fetch Organiser's Event Centers (Created or Co-hosted, NOT where user is staff)
+    // 2. Fetch Organiser's Event Centers (Created or Co-organised, NOT where user is staff)
     const eventCenters = await EventCenter.find({
       $or: [
         { createdBy: organiserId },
-        { coHosts: organiserId },
+        { coOrganisers: organiserId },
       ],
       staff: { $ne: organiserId },
     }).select("performance status").lean();
@@ -93,7 +93,7 @@ const getOrganiserListingStats = async (req, res) => {
 /**
  * @desc    Get detailed performance statistics for a single listing (Event or Event Center)
  * @route   GET /api/organiser/listing-stats/:id
- * @access  Private (Organiser/Co-host/Staff)
+ * @access  Private (Organiser/Co-organiser/Staff)
  */
 const getSingleListingStats = async (req, res) => {
   const { id } = req.params;
@@ -108,7 +108,7 @@ const getSingleListingStats = async (req, res) => {
         _id: id,
         $or: [
           { createdBy: organiserId },
-          { coHosts: organiserId },
+          { coOrganisers: organiserId },
           { staff: organiserId },
         ],
       }).select("title images status performance performers eventType schedule location").lean();
@@ -117,7 +117,7 @@ const getSingleListingStats = async (req, res) => {
         _id: id,
         $or: [
           { createdBy: organiserId },
-          { coHosts: organiserId },
+          { coOrganisers: organiserId },
           { staff: organiserId },
         ],
       }).select("venueName images status performance venueType location").lean();

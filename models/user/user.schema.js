@@ -172,10 +172,10 @@ userSchema.virtual("createdEvents", {
   foreignField: "createdBy",
 });
 
-userSchema.virtual("coHostedEvents", {
+userSchema.virtual("coOrganisedEvents", {
   ref: "Event",
   localField: "_id",
-  foreignField: "coHosts",
+  foreignField: "coOrganisers",
 });
 
 userSchema.virtual("staffedEvents", {
@@ -190,10 +190,10 @@ userSchema.virtual("createdEventCenters", {
   foreignField: "createdBy",
 });
 
-userSchema.virtual("coHostedEventCenters", {
+userSchema.virtual("coOrganisedEventCenters", {
   ref: "EventCenter",
   localField: "_id",
-  foreignField: "coHosts",
+  foreignField: "coOrganisers",
 });
 
 userSchema.virtual("staffedEventCenters", {

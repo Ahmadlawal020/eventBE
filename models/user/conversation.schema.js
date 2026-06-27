@@ -38,8 +38,9 @@ const conversationSchema = new mongoose.Schema(
 
 // Index for quick lookup of conversations for a user
 conversationSchema.index({ participants: 1 });
-// Index for unique conversation per user-organiser-context triplet
-// Actually, it's safer to just check this in the controller before creating
+// Index for conversations by context
 conversationSchema.index({ contextId: 1, contextType: 1 });
+// Compound index for duplicate conversation prevention check
+conversationSchema.index({ participants: 1, contextType: 1, contextId: 1 });
 
 module.exports = mongoose.model("Conversation", conversationSchema);
