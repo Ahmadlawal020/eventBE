@@ -1,23 +1,12 @@
 const asyncHandler = require("express-async-handler");
 const Admin = require("../../models/admin/admin.schema");
 const { recordAdminAction } = require("../../services/admin/adminAudit.service");
+const { sendEmail } = require("../../services/email.service");
 
 // Escape search string
 const escapeRegex = (value = "") => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-const nodemailer = require("nodemailer");
 const crypto = require("crypto");
-
-// Setup transporter for invitations
-const transporter = nodemailer.createTransport({
-  host: process.env.EMAIL_HOST || "smtp.gmail.com",
-  port: process.env.EMAIL_PORT || 465,
-  secure: true, // true for 465, false for other ports
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
 
 // @desc Get all staff members (Admins)
 // @route GET /api/admin/staff
@@ -116,47 +105,43 @@ const inviteStaff = asyncHandler(async (req, res) => {
 
   // Send the invitation email
   const inviteLink = `http://localhost:3000/admin/accept-invite?token=${inviteToken}`;
-  const mailOptions = {
-    from: `"Munasaba App" <${process.env.EMAIL_USER}>`,
-    to: email.toLowerCase(),
-    subject: "Munasaba Staff Invitation",
-    html: `
-      <div style="font-family: 'Outfit', 'Inter', sans-serif; max-width: 600px; margin: 0 auto; padding: 40px 20px; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 24px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.05);">
-        <div style="text-align: center; margin-bottom: 32px;">
-          <h1 style="font-size: 28px; font-weight: 800; color: #0f172a; margin: 0; letter-spacing: -0.025em;">Munasaba</h1>
-          <p style="font-size: 14px; color: #64748b; margin-top: 4px;">Staff Onboarding Portal</p>
-        </div>
-        <h2 style="font-size: 20px; font-weight: 700; color: #1e293b; margin-top: 0; margin-bottom: 16px;">Hello ${firstName},</h2>
-        <p style="font-size: 16px; line-height: 1.6; color: #475569; margin-bottom: 24px;">
-          You have been invited to join the Munasaba team as a staff member with access to the admin panel. Please click the button below to set up your account and password.
-        </p>
-        <div style="text-align: center; margin: 32px 0;">
-          <a href="${inviteLink}" style="display: inline-block; background-color: #2563eb; color: #ffffff; font-weight: 600; font-size: 15px; text-decoration: none; padding: 14px 32px; border-radius: 12px; transition: background-color 0.2s; box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.2);">
-            Accept Invitation & Setup Account
-          </a>
-        </div>
-        <p style="font-size: 14px; line-height: 1.6; color: #64748b; margin-bottom: 24px;">
-          This secure invitation link is unique to you and will expire in 48 hours. If you did not expect this invitation, please ignore this email.
-        </p>
-        <div style="background-color: #f8fafc; border: 1px dashed #cbd5e1; padding: 16px; border-radius: 12px; margin-bottom: 32px;">
-          <p style="font-size: 12px; color: #64748b; margin: 0; word-break: break-all;">
-            If the button above does not work, copy and paste this URL into your browser:<br>
-            <a href="${inviteLink}" style="color: #2563eb; text-decoration: none;">${inviteLink}</a>
-          </p>
-        </div>
-        <hr style="border: 0; border-top: 1px solid #e2e8f0; margin-bottom: 24px;">
-        <p style="font-size: 12px; color: #94a3b8; text-align: center; margin: 0;">&copy; 2026 Munasaba. All rights reserved.</p>
-      </div>
-    `,
-  };
 
   try {
-    await transporter.sendMail(mailOptions);
+    await sendEmail({
+      to: email.toLowerCase(),
+      subject: "Munasaba Staff Invitation",
+      html: `
+        <div style="font-family: 'Outfit', 'Inter', sans-serif; max-width: 600px; margin: 0 auto; padding: 40px 20px; background-color: #ffffff; border: 1px solid #e2e8f0; border-radius: 24px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.05);">
+          <div style="text-align: center; margin-bottom: 32px;">
+            <h1 style="font-size: 28px; font-weight: 800; color: #0f172a; margin: 0; letter-spacing: -0.025em;">Munasaba</h1>
+            <p style="font-size: 14px; color: #64748b; margin-top: 4px;">Staff Onboarding Portal</p>
+          </div>
+          <h2 style="font-size: 20px; font-weight: 700; color: #1e293b; margin-top: 0; margin-bottom: 16px;">Hello ${firstName},</h2>
+          <p style="font-size: 16px; line-height: 1.6; color: #475569; margin-bottom: 24px;">
+            You have been invited to join the Munasaba team as a staff member with access to the admin panel. Please click the button below to set up your account and password.
+          </p>
+          <div style="text-align: center; margin: 32px 0;">
+            <a href="${inviteLink}" style="display: inline-block; background-color: #2563eb; color: #ffffff; font-weight: 600; font-size: 15px; text-decoration: none; padding: 14px 32px; border-radius: 12px; transition: background-color 0.2s; box-shadow: 0 4px 6px -1px rgba(37, 99, 235, 0.2);">
+              Accept Invitation & Setup Account
+            </a>
+          </div>
+          <p style="font-size: 14px; line-height: 1.6; color: #64748b; margin-bottom: 24px;">
+            This secure invitation link is unique to you and will expire in 48 hours. If you did not expect this invitation, please ignore this email.
+          </p>
+          <div style="background-color: #f8fafc; border: 1px dashed #cbd5e1; padding: 16px; border-radius: 12px; margin-bottom: 32px;">
+            <p style="font-size: 12px; color: #64748b; margin: 0; word-break: break-all;">
+              If the button above does not work, copy and paste this URL into your browser:<br>
+              <a href="${inviteLink}" style="color: #2563eb; text-decoration: none;">${inviteLink}</a>
+            </p>
+          </div>
+          <hr style="border: 0; border-top: 1px solid #e2e8f0; margin-bottom: 24px;">
+          <p style="font-size: 12px; color: #94a3b8; text-align: center; margin: 0;">&copy; 2026 Munasaba. All rights reserved.</p>
+        </div>
+      `,
+    });
     console.log(`Staff invitation sent to ${email}`);
   } catch (error) {
     console.error("Error sending staff invitation email:", error);
-    // Note: User record remains created as pending, they can be re-invited or we can delete it.
-    // For now, let's allow it but log the error.
   }
 
   await recordAdminAction({

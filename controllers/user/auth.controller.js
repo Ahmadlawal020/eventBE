@@ -345,12 +345,16 @@ const otpService = require("../../services/otp.service");
 const handleRequestOTP = asyncHandler(async (req, res) => {
   const { identifier, type } = req.body;
 
-  await otpService.requestOTP(identifier, type);
-
-  res.json({
-    success: true,
-    message: `OTP sent to ${identifier}`,
-  });
+  try {
+    await otpService.requestOTP(identifier, type);
+    res.json({
+      success: true,
+      message: `OTP sent to ${identifier}`,
+    });
+  } catch (error) {
+    res.status(400);
+    throw error;
+  }
 });
 
 // ✅ Verify OTP
@@ -367,30 +371,32 @@ const handleVerifyOTP = asyncHandler(async (req, res) => {
   }
 
   // Update user record depending on type
+  let updatedUser = null;
   if (type === "email" || type === "phone") {
     const updateQuery = type === "email" ? { email: identifier } : { phoneNumber: identifier };
     const updateField = type === "email"
       ? { isEmailVerified: true, emailVerifiedAt: new Date() }
-      : { isPhoneVerified: true, phoneVerifiedAt: new Date() };
+      : { phoneNumber: identifier, isPhoneVerified: true, phoneVerifiedAt: new Date() };
 
-    const user = await User.findOneAndUpdate(
+    updatedUser = await User.findOneAndUpdate(
       updateQuery,
       updateField,
       { new: true }
     );
 
     // Auto-sync event centers and events status on verification
-    if (user) {
+    if (updatedUser) {
       const { syncUserEventCenters } = require("./eventCenter.controller");
       const { syncUserEvents } = require("./event.controller");
-      await syncUserEventCenters(user._id);
-      await syncUserEvents(user._id);
+      await syncUserEventCenters(updatedUser._id);
+      await syncUserEvents(updatedUser._id);
     }
   }
 
   res.json({
     success: true,
     message: "Verification successful",
+    user: updatedUser,
   });
 });
 

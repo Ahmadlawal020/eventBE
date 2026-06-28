@@ -1,4 +1,4 @@
-const nodemailer = require("nodemailer");
+const { sendEmail } = require("./email.service");
 const OTP = require("../models/user/otp.schema");
 const crypto = require("crypto");
 
@@ -6,18 +6,6 @@ const crypto = require("crypto");
  * Service to manage One-Time Passwords (OTP)
  */
 class OTPService {
-  constructor() {
-    this.transporter = nodemailer.createTransport({
-      host: process.env.EMAIL_HOST || "smtp.gmail.com",
-      port: process.env.EMAIL_PORT || 465,
-      secure: true, // true for 465, false for other ports
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS,
-      },
-    });
-  }
-
   /**
    * Generates a 6-digit numeric OTP
    */
@@ -37,27 +25,24 @@ class OTPService {
       ? "changing your password"
       : "verifying your email address";
 
-    const mailOptions = {
-      from: `"Munasaba App" <${process.env.EMAIL_USER}>`,
-      to: email,
-      subject: subject,
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 10px;">
-          <h2 style="color: #333; text-align: center;">${isPasswordChange ? "Reset Your Password" : "Verify Your Email"}</h2>
-          <p style="font-size: 16px; color: #555;">Hello,</p>
-          <p style="font-size: 16px; color: #555;">Use the following code for ${actionText}. This code is valid for 10 minutes.</p>
-          <div style="background-color: #f7f7f7; padding: 20px; text-align: center; font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #2d3436; border-radius: 5px; margin: 20px 0;">
-            ${code}
-          </div>
-          <p style="font-size: 14px; color: #888; text-align: center;">If you didn't request this code, please ignore this email.</p>
-          <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
-          <p style="font-size: 12px; color: #aaa; text-align: center;">&copy; 2024 Munasaba App. All rights reserved.</p>
-        </div>
-      `,
-    };
-
     try {
-      await this.transporter.sendMail(mailOptions);
+      await sendEmail({
+        to: email,
+        subject,
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e0e0e0; border-radius: 10px;">
+            <h2 style="color: #333; text-align: center;">${isPasswordChange ? "Reset Your Password" : "Verify Your Email"}</h2>
+            <p style="font-size: 16px; color: #555;">Hello,</p>
+            <p style="font-size: 16px; color: #555;">Use the following code for ${actionText}. This code is valid for 10 minutes.</p>
+            <div style="background-color: #f7f7f7; padding: 20px; text-align: center; font-size: 32px; font-weight: bold; letter-spacing: 5px; color: #2d3436; border-radius: 5px; margin: 20px 0;">
+              ${code}
+            </div>
+            <p style="font-size: 14px; color: #888; text-align: center;">If you didn't request this code, please ignore this email.</p>
+            <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
+            <p style="font-size: 12px; color: #aaa; text-align: center;">&copy; 2024 Munasaba App. All rights reserved.</p>
+          </div>
+        `,
+      });
       console.log(`OTP (${type}) sent to ${email}`);
       return true;
     } catch (error) {
@@ -86,9 +71,7 @@ class OTPService {
     if (type === "email" || type === "password_change") {
       return await this.sendEmailOTP(identifier, code, type);
     } else if (type === "phone") {
-      // Placeholder: Logic for Firebase SMS Delivery Pipe would go here
-      console.log(`[SMS PIPE] Redirecting to SMS provider for: ${identifier} with code: ${code}`);
-      return true; // We assume the SMS will be handled by the frontend/bridge
+      throw new Error("SMS verification is not available. Please use email verification instead.");
     }
 
     throw new Error("Invalid OTP type");
