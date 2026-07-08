@@ -4,6 +4,7 @@ const verifyAdmin = require("../../middleware/admin/verifyAdmin");
 const {
   getStaffs,
   getStaffById,
+  updateStaffProfile,
   inviteStaff,
   updateStaffRole,
   updateStaffStatus,
@@ -17,6 +18,7 @@ router.use(verifyAdmin); // Protect all routes
 router.get("/", getStaffs);
 router.post("/invite", inviteStaff);
 router.get("/:id", getStaffById);
+router.patch("/:id", updateStaffProfile);
 router.patch("/:id/roles", updateStaffRole);
 router.patch("/:id/status", updateStaffStatus);
 router.patch("/:id/password", updateStaffPassword);

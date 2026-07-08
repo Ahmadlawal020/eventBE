@@ -385,6 +385,14 @@ const verifyPayment = async (req, res) => {
 
     // 3. Extract booking details from Paystack Metadata
     const meta = paymentData.metadata;
+    if (!meta || !meta.eventCenterId || !meta.organiserId || !meta.buyerId) {
+      console.error(`[VERIFY PAYMENT] Missing required metadata for ref ${reference}:`, JSON.stringify(paymentData.metadata));
+      return res.status(400).json({
+        success: false,
+        message: "Payment verification failed: incomplete booking metadata. Please contact support.",
+      });
+    }
+
     const {
       eventCenterId,
       organiserId,

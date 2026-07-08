@@ -33,6 +33,11 @@ function generateTicketNumber(prefix = "MNB") {
  * @returns {string} JSON string with embedded signature
  */
 function generateQRPayload(ticketNumber, entityId, type) {
+  if (!entityId) {
+    throw new Error(
+      `Cannot generate QR payload: entityId is missing for ticket ${ticketNumber}`
+    );
+  }
   const payload = {
     tn: ticketNumber,
     [type === "EVENT" ? "eid" : "ecid"]: entityId.toString(),

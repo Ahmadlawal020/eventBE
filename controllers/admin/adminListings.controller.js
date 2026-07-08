@@ -157,8 +157,76 @@ const updateListingStatus = async (req, res) => {
   }
 };
 
+const EVENT_ALLOWED_FIELDS = [
+  "title", "shortDescription", "description", "eventType",
+  "ageRestriction", "schedule", "location", "capacity",
+  "highlights", "amenities", "safety", "entry",
+];
+
+const VENUE_ALLOWED_FIELDS = [
+  "venueName", "shortDescription", "description", "venueType",
+  "location", "capacity", "totalArea", "amenities", "supportedEvents",
+  "basePrice", "weekendPrice", "venueRules", "customVenueRules",
+  "safety", "safetyConsiderations", "bookingSettings",
+  "checkIn", "checkOut",
+];
+
+const updateListing = async (req, res) => {
+  try {
+    const { type, id } = req.params;
+    const config = LISTING_MODELS[type];
+
+    if (!config) {
+      return res.status(400).json({ success: false, message: "Invalid listing type" });
+    }
+
+    const listing = await config.model.findById(id);
+    if (!listing) {
+      return res.status(404).json({ success: false, message: "Listing not found" });
+    }
+
+    const allowedFields = type === "event" ? EVENT_ALLOWED_FIELDS : VENUE_ALLOWED_FIELDS;
+    const previousValue = {};
+    const newValue = {};
+
+    for (const field of allowedFields) {
+      if (req.body[field] !== undefined) {
+        previousValue[field] = listing[field];
+        listing[field] = req.body[field];
+        newValue[field] = req.body[field];
+      }
+    }
+
+    if (Object.keys(newValue).length === 0) {
+      return res.status(400).json({ success: false, message: "No valid fields to update" });
+    }
+
+    await listing.save();
+
+    await recordAdminAction({
+      req,
+      action: "LISTING_DETAILS_UPDATED",
+      targetType: config.targetType,
+      targetId: listing._id,
+      previousValue,
+      newValue,
+      metadata: { listingType: type },
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Listing updated successfully",
+      data: { id: listing._id },
+    });
+  } catch (error) {
+    console.error("[ADMIN UPDATE LISTING ERROR]", error);
+    res.status(500).json({ success: false, message: "Server error updating listing" });
+  }
+};
+
 module.exports = {
   getListings,
   getListingDetails,
   updateListingStatus,
+  updateListing,
 };

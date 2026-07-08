@@ -12,6 +12,12 @@ const AdminAuditLog = require("../../models/admin/adminAuditLog.schema");
 
 const getAdminOverview = async (req, res) => {
   try {
+    const now = new Date();
+    const thirtyDaysAgo = new Date(now);
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    const sixtyDaysAgo = new Date(now);
+    sixtyDaysAgo.setDate(sixtyDaysAgo.getDate() - 60);
+
     const [
       totalUsers,
       activeUsers,
@@ -35,6 +41,18 @@ const getAdminOverview = async (req, res) => {
       recentAuditLogs,
       eventRevenue,
       venueRevenue,
+      // Deltas: this period vs previous period (last 30 days vs 30-60 days ago)
+      newUsersThisPeriod,
+      newUsersLastPeriod,
+      newEventsThisPeriod,
+      newEventsLastPeriod,
+      newBookingsThisPeriod,
+      newBookingsLastPeriod,
+      newVenueBookingsThisPeriod,
+      newVenueBookingsLastPeriod,
+      // Revenue trend: daily revenue for last 30 days
+      dailyEventRevenue,
+      dailyVenueRevenue,
     ] = await Promise.all([
       User.countDocuments(),
       User.countDocuments({ isActive: true }),
@@ -64,10 +82,59 @@ const getAdminOverview = async (req, res) => {
         { $match: { paymentStatus: "COMPLETED" } },
         { $group: { _id: "$totalPrice.currency", total: { $sum: "$totalPrice.amount" }, count: { $sum: 1 } } },
       ]),
+      // Delta queries
+      User.countDocuments({ createdAt: { $gte: thirtyDaysAgo } }),
+      User.countDocuments({ createdAt: { $gte: sixtyDaysAgo, $lt: thirtyDaysAgo } }),
+      Event.countDocuments({ createdAt: { $gte: thirtyDaysAgo } }),
+      Event.countDocuments({ createdAt: { $gte: sixtyDaysAgo, $lt: thirtyDaysAgo } }),
+      EventBooking.countDocuments({ createdAt: { $gte: thirtyDaysAgo } }),
+      EventBooking.countDocuments({ createdAt: { $gte: sixtyDaysAgo, $lt: thirtyDaysAgo } }),
+      EventCenterBooking.countDocuments({ createdAt: { $gte: thirtyDaysAgo } }),
+      EventCenterBooking.countDocuments({ createdAt: { $gte: sixtyDaysAgo, $lt: thirtyDaysAgo } }),
+      // Revenue trend (daily, last 30 days)
+      EventBooking.aggregate([
+        { $match: { paymentStatus: "COMPLETED", createdAt: { $gte: thirtyDaysAgo } } },
+        { $group: {
+          _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+          total: { $sum: "$totalAmount" },
+          count: { $sum: 1 },
+        }},
+        { $sort: { _id: 1 } },
+      ]),
+      EventCenterBooking.aggregate([
+        { $match: { paymentStatus: "COMPLETED", createdAt: { $gte: thirtyDaysAgo } } },
+        { $group: {
+          _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+          total: { $sum: "$totalPrice.amount" },
+          count: { $sum: 1 },
+        }},
+        { $sort: { _id: 1 } },
+      ]),
     ]);
 
     const actionRequiredListings = actionRequiredEvents + actionRequiredEventCenters;
     const pendingInvites = pendingStaffInvites + pendingCoOrganiserInvites;
+
+    // Calculate deltas
+    const calcDelta = (current, previous) => {
+      if (previous === 0) return current > 0 ? 100 : 0;
+      return Math.round(((current - previous) / previous) * 100);
+    };
+
+    // Merge daily revenue into a single trend
+    const trendMap = {};
+    for (const entry of dailyEventRevenue) {
+      trendMap[entry._id] = { date: entry._id, eventRevenue: entry.total, eventCount: entry.count, venueRevenue: 0, venueCount: 0 };
+    }
+    for (const entry of dailyVenueRevenue) {
+      if (!trendMap[entry._id]) {
+        trendMap[entry._id] = { date: entry._id, eventRevenue: 0, eventCount: 0, venueRevenue: entry.total, venueCount: entry.count };
+      } else {
+        trendMap[entry._id].venueRevenue = entry.total;
+        trendMap[entry._id].venueCount = entry.count;
+      }
+    }
+    const revenueTrend = Object.values(trendMap).sort((a, b) => a.date.localeCompare(b.date));
 
     res.status(200).json({
       success: true,
@@ -87,6 +154,13 @@ const getAdminOverview = async (req, res) => {
           ticketTypes,
           pendingInvites,
         },
+        deltas: {
+          users: { current: newUsersThisPeriod, previous: newUsersLastPeriod, delta: calcDelta(newUsersThisPeriod, newUsersLastPeriod) },
+          events: { current: newEventsThisPeriod, previous: newEventsLastPeriod, delta: calcDelta(newEventsThisPeriod, newEventsLastPeriod) },
+          eventBookings: { current: newBookingsThisPeriod, previous: newBookingsLastPeriod, delta: calcDelta(newBookingsThisPeriod, newBookingsLastPeriod) },
+          venueBookings: { current: newVenueBookingsThisPeriod, previous: newVenueBookingsLastPeriod, delta: calcDelta(newVenueBookingsThisPeriod, newVenueBookingsLastPeriod) },
+        },
+        revenueTrend,
         revenue: {
           eventRevenue,
           venueRevenue,

@@ -4,6 +4,7 @@ const asyncHandler = require("express-async-handler");
 const Admin = require("../../models/admin/admin.schema");
 const { ADMIN_ROLES } = require("../../middleware/admin/verifyAdmin");
 const { recordAdminAction } = require("../../services/admin/adminAudit.service");
+const OTPService = require("../../services/otp.service");
 
 const generateTokens = (user) => {
   const { _id: id, email, roles } = user;
@@ -267,6 +268,69 @@ const acceptInvite = asyncHandler(async (req, res) => {
   });
 });
 
+const requestPasswordReset = asyncHandler(async (req, res) => {
+  let { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ success: false, message: "Email is required" });
+  }
+
+  email = email.trim().toLowerCase();
+
+  const foundAdmin = await Admin.findOne({ email }).exec();
+  if (!foundAdmin) {
+    return res.status(404).json({ success: false, message: "No admin account found with this email" });
+  }
+
+  const hasAdminRole = foundAdmin.roles?.some((role) => ADMIN_ROLES.includes(role));
+  if (!hasAdminRole) {
+    return res.status(403).json({ success: false, message: "Admin access required" });
+  }
+
+  await OTPService.requestOTP(email, "password_change");
+
+  res.status(200).json({
+    success: true,
+    message: "Password reset code sent to your email",
+  });
+});
+
+const updatePassword = asyncHandler(async (req, res) => {
+  let { email, code, newPassword } = req.body;
+
+  if (!email || !code || !newPassword) {
+    return res.status(400).json({ success: false, message: "Email, code, and new password are required" });
+  }
+
+  if (newPassword.length < 8) {
+    return res.status(400).json({ success: false, message: "Password must be at least 8 characters" });
+  }
+
+  email = email.trim().toLowerCase();
+
+  const otpResult = await OTPService.verifyOTP(email, code, "password_change");
+  if (!otpResult.success) {
+    return res.status(400).json({ success: false, message: otpResult.message });
+  }
+
+  const foundAdmin = await Admin.findOne({ email }).exec();
+  if (!foundAdmin) {
+    return res.status(404).json({ success: false, message: "Admin not found" });
+  }
+
+  foundAdmin.password = newPassword;
+  foundAdmin.failedLoginAttempts = 0;
+  await foundAdmin.save();
+
+  const OTP = require("../../models/user/otp.schema");
+  await OTP.deleteMany({ identifier: email, type: "password_change" });
+
+  res.status(200).json({
+    success: true,
+    message: "Password updated successfully",
+  });
+});
+
 module.exports = {
   handleAdminLogin,
   handleAdminRefreshToken,
@@ -274,4 +338,6 @@ module.exports = {
   registerAdmin,
   verifyInviteToken,
   acceptInvite,
+  requestPasswordReset,
+  updatePassword,
 };

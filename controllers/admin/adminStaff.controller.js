@@ -341,6 +341,59 @@ const getStaffActivity = asyncHandler(async (req, res) => {
   });
 });
 
+// @desc Update staff profile
+// @route PATCH /api/admin/staff/:id
+const updateStaffProfile = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const { firstName, surname, phoneNumber, gender, dob, department, jobTitle, employmentType, branch } = req.body;
+
+  const staff = await Admin.findById(id);
+  if (!staff) {
+    return res.status(404).json({ success: false, message: "Staff member not found" });
+  }
+
+  const previousValue = {
+    firstName: staff.firstName,
+    surname: staff.surname,
+    phoneNumber: staff.phoneNumber,
+    gender: staff.gender,
+    dateOfBirth: staff.dateOfBirth,
+    department: staff.department,
+    jobTitle: staff.jobTitle,
+    employmentType: staff.employmentType,
+    branch: staff.branch,
+  };
+
+  if (firstName !== undefined) staff.firstName = firstName;
+  if (surname !== undefined) staff.surname = surname;
+  if (phoneNumber !== undefined) staff.phoneNumber = phoneNumber;
+  if (gender !== undefined) staff.gender = gender;
+  if (dob !== undefined) staff.dateOfBirth = new Date(dob);
+  if (department !== undefined) staff.department = department;
+  if (jobTitle !== undefined) staff.jobTitle = jobTitle;
+  if (employmentType !== undefined) staff.employmentType = employmentType;
+  if (branch !== undefined) staff.branch = branch;
+
+  await staff.save();
+
+  const updated = await Admin.findById(id).select("-password -refreshToken").lean();
+
+  await recordAdminAction({
+    req,
+    action: "STAFF_PROFILE_UPDATED",
+    targetType: "Admin",
+    targetId: staff._id,
+    previousValue,
+    newValue: { firstName: staff.firstName, surname: staff.surname, department: staff.department },
+  });
+
+  res.status(200).json({
+    success: true,
+    message: "Staff profile updated",
+    data: { staff: updated },
+  });
+});
+
 // @desc Delete staff member
 // @route DELETE /api/admin/staff/:id
 const deleteStaff = asyncHandler(async (req, res) => {
@@ -372,6 +425,7 @@ const deleteStaff = asyncHandler(async (req, res) => {
 module.exports = {
   getStaffs,
   getStaffById,
+  updateStaffProfile,
   inviteStaff,
   updateStaffRole,
   updateStaffStatus,

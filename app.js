@@ -1,6 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const app = express();
+app.set("trust proxy", 1);
 const path = require("path");
 const { logger } = require("./middleware/logger");
 const errorHandler = require("./middleware/errorHandler");
@@ -73,6 +74,11 @@ app.use("/api/admin/platform-fees", require("./routes/admin/platformFees.route")
 app.use("/api/admin/staff", require("./routes/admin/staff.route"));
 app.use("/api/admin/kyc", require("./routes/admin/kyc.route"));
 app.use("/api/admin/settings", require("./routes/admin/settings.route"));
+app.use("/api/admin/support", require("./routes/admin/support.route"));
+app.use("/api/admin/transfers", require("./routes/admin/transfers.route"));
+app.use("/api/admin/refunds", require("./routes/admin/refunds.route"));
+app.use("/api/admin/co-organisers", require("./routes/admin/coOrganisers.route"));
+app.use("/api/admin/search", require("./routes/admin/search.route"));
 
 
 

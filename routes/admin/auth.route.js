@@ -7,6 +7,8 @@ const {
   registerAdmin,
   verifyInviteToken,
   acceptInvite,
+  requestPasswordReset,
+  updatePassword,
 } = require("../../controllers/admin/adminAuth.controller");
 const generateLimiter = require("../../middleware/generateLimiter");
 
@@ -17,11 +19,19 @@ const adminLoginLimiter = generateLimiter({
   message: "Too many admin login attempts. Please try again after 60 seconds.",
 });
 
+const passwordResetLimiter = generateLimiter({
+  windowMs: 60 * 1000,
+  max: 3,
+  message: "Too many password reset attempts. Please try again after 60 seconds.",
+});
+
 router.post("/login", adminLoginLimiter, handleAdminLogin);
 router.post("/refresh", handleAdminRefreshToken);
 router.post("/logout", handleAdminLogout);
 router.post("/register", registerAdmin);
 router.get("/invite/verify", verifyInviteToken);
 router.post("/invite/accept", acceptInvite);
+router.post("/password/request", passwordResetLimiter, requestPasswordReset);
+router.post("/password/update", passwordResetLimiter, updatePassword);
 
 module.exports = router;

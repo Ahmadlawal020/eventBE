@@ -121,6 +121,11 @@ const handlePaymentWebhook = async (req, res) => {
       return res.status(200).send("Already processed");
     }
 
+    if (!metadata.eventCenterId || !metadata.organiserId || !metadata.buyerId) {
+      console.error(`[WEBHOOK] Missing required metadata for ref ${reference}:`, JSON.stringify(metadata));
+      return res.status(400).send("Incomplete metadata");
+    }
+
     const {
       eventCenterId,
       organiserId,
