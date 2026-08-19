@@ -1,7 +1,7 @@
 const { CronJob } = require("cron");
 const EventCenterBooking = require("../models/user/eventCenterBooking.schema");
 const EventCenter = require("../models/user/eventCenter.schema");
-const Notification = require("../models/user/notification.schema");
+const { dispatchNotification, NOTIFICATION_TYPES, emailTemplates } = require("../services/notification");
 const { getPaymentGateway } = require("../services/payment");
 const { logBookingHistory } = require("../controllers/user/bookingHistory.controller");
 
@@ -77,24 +77,45 @@ const expirePendingBookings = async () => {
           await ecDoc.save();
         }
 
-        // Notify buyer
+        // Notify buyer via Notification Engine
         const venueName = ticket.eventCenter?.venueName || "your venue";
         const refundNote = updated.paymentStatus === "REFUNDED" ? " A full refund has been issued." : "";
-        await Notification.create({
+        await dispatchNotification({
           recipient: updated.buyer,
-          type: "BOOKING_UPDATE",
+          type: NOTIFICATION_TYPES.BOOKING_EXPIRED,
           title: "Booking Expired",
           message: `Your booking at ${venueName} expired because the host did not respond in time.${refundNote}`,
           referenceId: updated._id,
+          referenceType: "EventCenterBooking",
+          data: {
+            screen: "BookingDetails",
+            ticketId: String(updated._id),
+          },
+          email: {
+            subject: `Booking Request Expired: ${venueName} - Munasaba`,
+            html: emailTemplates.venueBookingTemplate({
+              recipientName: updated.guestDetails?.fullName || "Guest",
+              title: "Booking Expired",
+              message: `Your booking request at ${venueName} expired because the host did not respond in time.${refundNote}`,
+              venueName,
+              totalAmount: updated.totalPrice,
+              status: "EXPIRED",
+            }),
+          },
         });
 
         // Notify organizer
-        await Notification.create({
+        await dispatchNotification({
           recipient: updated.organiser,
-          type: "BOOKING_UPDATE",
+          type: NOTIFICATION_TYPES.BOOKING_EXPIRED,
           title: "Booking Request Expired",
           message: `Booking request from ${updated.guestDetails?.fullName || "a guest"} for ${venueName} has expired.`,
           referenceId: updated._id,
+          referenceType: "EventCenterBooking",
+          data: {
+            screen: "BookingDetails",
+            ticketId: String(updated._id),
+          },
         });
 
         // Log booking history

@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 const Conversation = require("../../models/user/conversation.schema");
 const Message = require("../../models/user/message.schema");
-const Notification = require("../../models/user/notification.schema");
+const { dispatchBulkNotifications, NOTIFICATION_TYPES } = require("../../services/notification");
 const User = require("../../models/user/user.schema");
 
 const getConversations = async (req, res) => {
@@ -186,21 +186,24 @@ const broadcastNotification = async (req, res) => {
     }
 
     const users = await User.find(userQuery).select("_id").lean();
-    const notifications = users.map((u) => ({
-      recipient: u._id,
+    const recipientIds = users.map((u) => u._id);
+
+    const result = await dispatchBulkNotifications({
+      recipients: recipientIds,
       sender: req.user.id,
-      type: "SYSTEM",
+      type: NOTIFICATION_TYPES.ANNOUNCEMENT,
       title: title.trim(),
       message: message.trim(),
-    }));
-
-    if (notifications.length > 0) {
-      await Notification.insertMany(notifications);
-    }
+      channels: ["in_app", "push"],
+    });
 
     res.status(201).json({
       success: true,
-      data: { sent: notifications.length, targetGroup },
+      data: {
+        sent: result.inAppCount,
+        pushSent: result.pushCount,
+        targetGroup,
+      },
     });
   } catch (error) {
     console.error("[ADMIN SUPPORT - BROADCAST]", error);

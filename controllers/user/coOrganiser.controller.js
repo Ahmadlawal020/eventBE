@@ -1,5 +1,6 @@
 const User = require("../../models/user/user.schema");
 const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
+const { dispatchNotification, NOTIFICATION_TYPES, emailTemplates } = require("../../services/notification");
 const Notification = require("../../models/user/notification.schema");
 
 /**
@@ -90,13 +91,30 @@ const inviteCoOrganiser = async (req, res) => {
     });
 
     if (coOrganiser) {
-      await Notification.create({
+      const hostUser = await User.findById(hostId).select("firstName surname").lean();
+      const hostName = `${hostUser?.firstName || ""} ${hostUser?.surname || ""}`.trim() || "A host";
+
+      await dispatchNotification({
         recipient: coOrganiser._id,
         sender: hostId,
-        type: "CO_ORGANISER_INVITATION",
-        title: "New Co-organiser Invitation",
-        message: "You have been invited to be a co-organiser for one or more listings.",
+        type: NOTIFICATION_TYPES.CO_ORGANISER_INVITATION,
+        title: "New Co-organiser Invitation 🤝",
+        message: `${hostName} invited you to be a co-organiser for one or more listings. Tap to review.`,
         referenceId: invitation._id,
+        referenceType: "CoOrganiserInvitation",
+        data: {
+          screen: "CoOrganiserInvite",
+          invitationId: String(invitation._id),
+        },
+        email: {
+          subject: `Co-organiser Invitation from ${hostName} - Munasaba`,
+          html: emailTemplates.invitationTemplate({
+            recipientName: coOrganiser.firstName,
+            senderName: hostName,
+            roleName: "Co-Organiser",
+            listingNames: `${listings.length} listing(s)`,
+          }),
+        },
       });
     }
 
@@ -194,6 +212,28 @@ const respondToInvitation = async (req, res) => {
           });
         }
       }
+    }
+
+    // Notify the host about the response
+    try {
+      const respondingUser = await User.findById(userId).select("firstName surname").lean();
+      const responderName = `${respondingUser?.firstName || ""} ${respondingUser?.surname || ""}`.trim() || "Invitee";
+
+      await dispatchNotification({
+        recipient: invitation.host,
+        sender: userId,
+        type: action === "ACCEPTED" ? NOTIFICATION_TYPES.CO_ORGANISER_ACCEPTED : NOTIFICATION_TYPES.CO_ORGANISER_DECLINED,
+        title: action === "ACCEPTED" ? "Co-Organiser Accepted ✅" : "Co-Organiser Declined ❌",
+        message: `${responderName} has ${action.toLowerCase()} your co-organiser invitation.`,
+        referenceId: invitation._id,
+        referenceType: "CoOrganiserInvitation",
+        data: {
+          screen: "CoOrganiserList",
+          invitationId: String(invitation._id),
+        },
+      });
+    } catch (notifErr) {
+      console.error("[CO-ORGANISER NOTIFICATION ERROR]", notifErr);
     }
 
     res.json({

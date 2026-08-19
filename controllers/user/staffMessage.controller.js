@@ -3,16 +3,20 @@ const Conversation = require("../../models/user/conversation.schema");
 const Event = require("../../models/user/event.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
+const User = require("../../models/user/user.schema");
+const { dispatchNotification, NOTIFICATION_TYPES } = require("../../services/notification");
 const { logActivity } = require("./staffDashboard.controller");
 
 // Helper function to check if a staff is authorized for CUSTOMER_CARE
 const checkStaffCareAccess = async (userId, listingId) => {
   try {
+    if (!userId || !listingId) return false;
+
     const staffInvite = await StaffInvitation.findOne({
       staff: userId,
       "listings.listingId": listingId,
       status: "ACCEPTED",
-      permissions: { $in: ["CUSTOMER_CARE", "MANAGE_CUSTOMER_CARE"] }
+      permissions: { $in: ["CUSTOMER_CARE", "MANAGE_CUSTOMER_CARE", "ALL_ACCESS"] },
     });
     return !!staffInvite;
   } catch (err) {
@@ -28,24 +32,25 @@ const getStaffConversations = async (req, res) => {
 
   try {
     const hasAccess = await checkStaffCareAccess(staffId, listingId);
-    
+
     if (!hasAccess) {
       return res.status(403).json({ success: false, message: "Unauthorized access to these messages" });
     }
 
     const conversations = await Conversation.find({
-      contextId: listingId
+      contextId: listingId,
     })
       .populate("participants", "firstName surname profilePicture")
       .populate({
         path: "lastMessage",
-        select: "content createdAt sender",
+        select: "content createdAt sender read",
       })
       .populate({
         path: "contextId",
         select: "title venueName images createdBy",
       })
-      .sort({ updatedAt: -1 });
+      .sort({ updatedAt: -1 })
+      .lean();
 
     res.json({
       success: true,
@@ -69,23 +74,42 @@ const getStaffMessages = async (req, res) => {
       return res.status(403).json({ success: false, message: "Unauthorized access to these messages" });
     }
 
-    const messages = await Message.find({ conversationId, contextId: listingId })
-      .sort({ createdAt: 1 })
-      .populate("sender", "firstName surname profilePicture")
-      .populate("receiver", "firstName surname profilePicture");
+    const [messages, conversation] = await Promise.all([
+      Message.find({ conversationId, contextId: listingId })
+        .sort({ createdAt: 1 })
+        .populate("sender", "firstName surname profilePicture")
+        .populate("receiver", "firstName surname profilePicture")
+        .lean(),
+      Conversation.findOne({ _id: conversationId, contextId: listingId }),
+    ]);
 
-    // Mark messages as read for the staff member
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "Conversation not found" });
+    }
+
+    // Mark guest messages as read
     await Message.updateMany(
-      { conversationId, contextId: listingId, receiver: staffId, read: false },
+      { conversationId, contextId: listingId, sender: { $ne: staffId }, read: false },
       { $set: { read: true } }
     );
 
-    // Clear unread count for the staff member who is reading
-    const conversation = await Conversation.findOne({ _id: conversationId, contextId: listingId });
-    if (conversation) {
-      conversation.unreadCount.set(staffId.toString(), 0);
-      await conversation.save();
+    // Clear unread count for staff and the listing owner
+    const unreadMap = conversation.unreadCount instanceof Map
+      ? conversation.unreadCount
+      : new Map(Object.entries(conversation.unreadCount || {}));
+
+    unreadMap.set(staffId.toString(), 0);
+
+    let contextListing = await Event.findById(listingId).select("createdBy");
+    if (!contextListing) {
+      contextListing = await EventCenter.findById(listingId).select("createdBy");
     }
+    if (contextListing?.createdBy) {
+      unreadMap.set(contextListing.createdBy.toString(), 0);
+    }
+
+    conversation.unreadCount = unreadMap;
+    await conversation.save();
 
     res.json({
       success: true,
@@ -108,26 +132,25 @@ const sendStaffMessage = async (req, res) => {
       return res.status(400).json({ success: false, message: "conversationId is required for staff replies." });
     }
 
-    const hasAccess = await checkStaffCareAccess(staffId, contextId);
-    if (!hasAccess) {
-      return res.status(403).json({ success: false, message: "Unauthorized to reply on behalf of this listing" });
-    }
-
-    let conversation = await Conversation.findById(conversationId);
+    const conversation = await Conversation.findById(conversationId);
     if (!conversation) {
       return res.status(404).json({ success: false, message: "Conversation not found" });
     }
 
-    if (conversation.contextId.toString() !== contextId.toString()) {
-      return res.status(400).json({ success: false, message: "Conversation does not match the provided contextId." });
+    const finalContextId = contextId || conversation.contextId;
+    const finalContextType = contextType || conversation.contextType;
+
+    const hasAccess = await checkStaffCareAccess(staffId, finalContextId);
+    if (!hasAccess) {
+      return res.status(403).json({ success: false, message: "Unauthorized to reply on behalf of this listing" });
     }
 
-    // Determine the receiver (the guest user)
+    // Determine the listing context and organiser
     let context;
-    if (contextType === "Event") {
-      context = await Event.findById(contextId);
+    if (finalContextType === "Event") {
+      context = await Event.findById(finalContextId);
     } else {
-      context = await EventCenter.findById(contextId);
+      context = await EventCenter.findById(finalContextId);
     }
 
     if (!context) {
@@ -138,11 +161,15 @@ const sendStaffMessage = async (req, res) => {
     if (!organiserId) {
       return res.status(400).json({ success: false, message: "Listing creator not found" });
     }
-    
-    // Find the participant who is not the organiser (the user who inquired)
-    let receiverId = conversation.participants.find(p => p && p.toString() !== organiserId);
-    if (!receiverId && conversation.participants.length === 2) {
-      receiverId = conversation.participants[0].toString() === organiserId ? conversation.participants[1] : conversation.participants[0];
+
+    // Find the recipient (the guest who inquired)
+    let receiverId = conversation.participants.find(
+      (p) => p && p.toString() !== organiserId && p.toString() !== staffId.toString()
+    );
+    if (!receiverId && conversation.participants.length >= 2) {
+      receiverId = conversation.participants[0].toString() === organiserId
+        ? conversation.participants[1]
+        : conversation.participants[0];
     }
 
     if (!receiverId) {
@@ -152,36 +179,68 @@ const sendStaffMessage = async (req, res) => {
     // Reply tracking
     if (!conversation.isReplied) {
       conversation.isReplied = true;
-      if (context.performance) {
-        context.performance.pendingInquiries = Math.max(0, (context.performance.pendingInquiries || 0) - 1);
-        context.performance.responseRate = 100;
-        await context.save();
-      }
+      if (!context.performance) context.performance = {};
+      context.performance.pendingInquiries = Math.max(0, (context.performance.pendingInquiries || 0) - 1);
+      context.performance.responseRate = 100;
+      await context.save();
     }
 
-    // Note: The message is saved with sender as staffId so we know who sent it,
-    // but the receiver is the user who started the conversation
     const newMessage = new Message({
       conversationId: conversation._id,
       sender: staffId,
       receiver: receiverId,
-      content,
-      contextType,
-      contextId,
+      content: content.trim(),
+      contextType: finalContextType,
+      contextId: finalContextId,
     });
 
     const savedMessage = await newMessage.save();
 
     conversation.lastMessage = savedMessage._id;
-    const currentUnread = conversation.unreadCount.get(receiverId.toString()) || 0;
-    conversation.unreadCount.set(receiverId.toString(), currentUnread + 1);
-    
+
+    const unreadMap = conversation.unreadCount instanceof Map
+      ? conversation.unreadCount
+      : new Map(Object.entries(conversation.unreadCount || {}));
+    const currentUnread = unreadMap.get(receiverId.toString()) || 0;
+    unreadMap.set(receiverId.toString(), currentUnread + 1);
+    conversation.unreadCount = unreadMap;
+
     await conversation.save();
+
+    // Dispatch notification to guest
+    try {
+      const staffUser = await User.findById(staffId).select("firstName surname profilePicture").lean();
+      const staffName = `${staffUser?.firstName || ""} ${staffUser?.surname || ""}`.trim() || "Support Staff";
+      const snippet = content.length > 80 ? `${content.substring(0, 80)}...` : content;
+
+      await dispatchNotification({
+        recipient: receiverId,
+        sender: staffId,
+        type: NOTIFICATION_TYPES.MESSAGE_RECEIVED,
+        title: `Message from ${staffName}`,
+        message: snippet,
+        referenceId: conversation._id,
+        referenceType: "Conversation",
+        data: {
+          screen: "ChatScreen",
+          conversationId: String(conversation._id),
+          senderId: String(staffId),
+        },
+        priority: "high",
+      });
+    } catch (notifErr) {
+      console.error("[STAFF MESSAGE NOTIFICATION ERROR]", notifErr);
+    }
+
+    const populatedMessage = await Message.findById(savedMessage._id)
+      .populate("sender", "firstName surname profilePicture")
+      .populate("receiver", "firstName surname profilePicture")
+      .lean();
 
     res.status(201).json({
       success: true,
       message: "Message sent successfully by staff",
-      data: savedMessage,
+      data: populatedMessage || savedMessage,
     });
 
     // Log activity (fire-and-forget)
@@ -191,7 +250,7 @@ const sendStaffMessage = async (req, res) => {
       "TASK_COMPLETE",
       "Message Sent",
       `Replied to a conversation on behalf of the listing`,
-      { conversationId: conversation._id, contextId, contextType }
+      { conversationId: conversation._id, contextId: finalContextId, contextType: finalContextType }
     );
   } catch (err) {
     console.error("[SEND STAFF MESSAGE ERROR]", err);

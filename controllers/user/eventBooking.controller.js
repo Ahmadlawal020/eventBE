@@ -3,6 +3,7 @@ const UserEventTicket = require("../../models/user/userEventTicket.schema");
 const Ticket = require("../../models/user/eventTicketType.schema");
 const Event = require("../../models/user/event.schema");
 const User = require("../../models/user/user.schema");
+const { dispatchNotification, NOTIFICATION_TYPES, emailTemplates } = require("../../services/notification");
 const { getPaymentGateway } = require("../../services/payment");
 const { createTicketsForBooking } = require("./userEventTicket.controller");
 const crypto = require("crypto");
@@ -192,6 +193,20 @@ const createBooking = async (req, res) => {
     // If Free booking, generate tickets immediately
     if (savedBooking && savedBooking.paymentStatus === "COMPLETED") {
       const tickets = await createTicketsForBooking(savedBooking);
+
+      // Dispatch Notifications & Confirmation Email for Free Tickets
+      try {
+        const eventDoc = await Event.findById(eventId).select("title schedule location venueName createdBy").lean();
+        await notifyTicketPurchased({
+          booking: savedBooking,
+          event: eventDoc,
+          buyer: user,
+          reference: savedBooking.paymentReference,
+        });
+      } catch (notifErr) {
+        console.error("[EVENT BOOKING] Error dispatching free ticket notification:", notifErr);
+      }
+
       return res.json({
         success: true,
         message: "Booking successful and tickets generated",
@@ -329,6 +344,19 @@ const verifyBooking = async (req, res) => {
         tickets = existingTickets;
       } else {
         tickets = await createTicketsForBooking(booking);
+
+        // Dispatch confirmation notifications if newly generated
+        try {
+          const eventDoc = await Event.findById(booking.eventId).select("title schedule location venueName createdBy").lean();
+          await notifyTicketPurchased({
+            booking,
+            event: eventDoc,
+            buyer: { _id: booking.buyer, fullName: booking.guestDetails?.fullName },
+            reference: booking.paymentReference,
+          });
+        } catch (notifErr) {
+          console.error("[VERIFY BOOKING] Notification dispatch error:", notifErr);
+        }
       }
     } catch (ticketError) {
       console.error(`[VERIFY BOOKING] Ticket generation failed for ref ${reference}:`, ticketError);

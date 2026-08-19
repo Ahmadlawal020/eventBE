@@ -1,8 +1,13 @@
 const EventCenterBooking = require("../../models/user/eventCenterBooking.schema");
 const EventBooking = require("../../models/user/eventBooking.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
+const Event = require("../../models/user/event.schema");
 const User = require("../../models/user/user.schema");
-const Notification = require("../../models/user/notification.schema");
+const {
+  notifyTicketPurchased,
+  notifyVenueBookingRequest,
+  notifyVenueBookingInstant,
+} = require("../../services/notification");
 const { generateTicketNumber, generateQRPayload } = require("../../utils/qr");
 const { hasSlotConflict } = require("../../utils/slotConflict");
 const { logBookingHistory } = require("./bookingHistory.controller");
@@ -68,6 +73,19 @@ const handleEventTicketWebhook = async (reference, metadata, customer) => {
       await createTicketsForBooking(booking);
     }
     console.log(`[WEBHOOK] Tickets generated for event booking ref ${reference}`);
+
+    // 4. Dispatch Notifications & Confirmation Emails
+    try {
+      const eventDoc = await Event.findById(eventId).select("title schedule location venueName createdBy").lean();
+      await notifyTicketPurchased({
+        booking,
+        event: eventDoc,
+        buyer: { _id: buyerId, fullName, email: customer?.email },
+        reference,
+      });
+    } catch (notifErr) {
+      console.error("[WEBHOOK] Error dispatching event ticket notifications:", notifErr);
+    }
   }
 };
 
@@ -270,27 +288,24 @@ const handlePaymentWebhook = async (req, res) => {
       }
     }
 
-    // 8. Send notifications
+    // 8. Send notifications via Notification Engine
     const guestName = fullName || ticket.guestDetails?.fullName || "A guest";
-    const venueName = eventCenter?.venueName || "your venue";
 
     if (isReviewMode) {
-      await Notification.create({
-        recipient: organiserId,
-        sender: buyerId,
-        type: "BOOKING_UPDATE",
-        title: "New Booking Request",
-        message: `${guestName} requested to book ${venueName}. Review within 24 hours.`,
-        referenceId: ticket._id,
+      await notifyVenueBookingRequest({
+        booking: ticket,
+        eventCenter,
+        guestName,
+        buyerId,
+        organiserId,
       });
     } else {
-      await Notification.create({
-        recipient: organiserId,
-        sender: buyerId,
-        type: "BOOKING_UPDATE",
-        title: "New Booking!",
-        message: `${guestName} booked ${venueName}.`,
-        referenceId: ticket._id,
+      await notifyVenueBookingInstant({
+        booking: ticket,
+        eventCenter,
+        guestName,
+        buyerId,
+        organiserId,
       });
     }
 

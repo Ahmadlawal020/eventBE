@@ -104,7 +104,8 @@ const inviteStaff = asyncHandler(async (req, res) => {
   });
 
   // Send the invitation email
-  const inviteLink = `http://localhost:3000/admin/accept-invite?token=${inviteToken}`;
+  const baseUrl = process.env.ADMIN_WEB_URL || process.env.CLIENT_URL || "http://localhost:3000";
+  const inviteLink = `${baseUrl.replace(/\/+$/, "")}/admin/accept-invite?token=${inviteToken}`;
 
   try {
     await sendEmail({

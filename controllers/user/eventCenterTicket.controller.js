@@ -1,7 +1,7 @@
 const EventCenterBooking = require("../../models/user/eventCenterBooking.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
 const User = require("../../models/user/user.schema");
-const Notification = require("../../models/user/notification.schema");
+const { dispatchNotification, NOTIFICATION_TYPES, emailTemplates } = require("../../services/notification");
 const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
 const mongoose = require("mongoose");
@@ -309,13 +309,19 @@ const createTicket = async (req, res) => {
       const transferGuestName = fullName || savedTicket.guestDetails?.fullName || "A guest";
       const transferVenueName = (await EventCenter.findById(eventCenterId).select("venueName").lean())?.venueName || "your venue";
       if (isReviewModeTransfer) {
-        await Notification.create({
+        await dispatchNotification({
           recipient: eventCenter.createdBy,
           sender: buyerId,
-          type: "BOOKING_UPDATE",
-          title: "New Booking Request",
+          type: NOTIFICATION_TYPES.BOOKING_REQUEST,
+          title: "New Booking Request ⏳",
           message: `${transferGuestName} requested to book ${transferVenueName}. Review within 24 hours.`,
           referenceId: savedTicket._id,
+          referenceType: "EventCenterBooking",
+          data: {
+            screen: "BookingReview",
+            ticketId: String(savedTicket._id),
+            eventCenterId: String(eventCenterId),
+          },
         });
       }
 
@@ -570,22 +576,60 @@ const verifyPayment = async (req, res) => {
     const venueName = eventCenter?.venueName || "your venue";
 
     if (isReviewMode) {
-      await Notification.create({
+      await dispatchNotification({
         recipient: organiserId,
         sender: buyerId,
-        type: "BOOKING_UPDATE",
-        title: "New Booking Request",
+        type: NOTIFICATION_TYPES.BOOKING_REQUEST,
+        title: "New Booking Request ⏳",
         message: `${guestName} requested to book ${venueName}. Review within 24 hours.`,
         referenceId: ticket._id,
+        referenceType: "EventCenterBooking",
+        data: {
+          screen: "BookingReview",
+          ticketId: String(ticket._id),
+          eventCenterId: String(ticket.eventCenter),
+        },
+      });
+
+      await dispatchNotification({
+        recipient: buyerId,
+        type: NOTIFICATION_TYPES.BOOKING_CREATED,
+        title: "Booking Request Submitted",
+        message: `Your booking request for ${venueName} has been submitted. The host will review it.`,
+        referenceId: ticket._id,
+        referenceType: "EventCenterBooking",
+        data: {
+          screen: "BookingDetails",
+          ticketId: String(ticket._id),
+        },
       });
     } else {
-      await Notification.create({
+      await dispatchNotification({
         recipient: organiserId,
         sender: buyerId,
-        type: "BOOKING_UPDATE",
-        title: "New Booking!",
+        type: NOTIFICATION_TYPES.BOOKING_CREATED,
+        title: "New Venue Booking! 🏛️",
         message: `${guestName} booked ${venueName}.`,
         referenceId: ticket._id,
+        referenceType: "EventCenterBooking",
+        data: {
+          screen: "BookingDetails",
+          ticketId: String(ticket._id),
+          eventCenterId: String(ticket.eventCenter),
+        },
+      });
+
+      await dispatchNotification({
+        recipient: buyerId,
+        type: NOTIFICATION_TYPES.BOOKING_CONFIRMED,
+        title: "Venue Booking Confirmed! 🎉",
+        message: `Your booking for ${venueName} is confirmed. Your ticket is ready.`,
+        referenceId: ticket._id,
+        referenceType: "EventCenterBooking",
+        data: {
+          screen: "TicketDetails",
+          ticketId: String(ticket._id),
+        },
       });
     }
 
@@ -996,13 +1040,34 @@ const acceptBooking = async (req, res) => {
 
     // Send notification to buyer
     const venueName = eventCenter?.venueName || "your venue";
-    await Notification.create({
+    const bookingDatesStr = Array.isArray(updated.selectedDates)
+      ? updated.selectedDates.map((d) => (d.date ? new Date(d.date).toLocaleDateString() : String(d))).join(", ")
+      : "";
+
+    await dispatchNotification({
       recipient: updated.buyer,
       sender: organiserId,
-      type: "BOOKING_UPDATE",
-      title: "Booking Confirmed!",
+      type: NOTIFICATION_TYPES.BOOKING_CONFIRMED,
+      title: "Booking Confirmed! 🎉",
       message: `Your booking at ${venueName} has been confirmed. Your ticket is ready.`,
       referenceId: updated._id,
+      referenceType: "EventCenterBooking",
+      data: {
+        screen: "TicketDetails",
+        ticketId: String(updated._id),
+      },
+      email: {
+        subject: `Booking Confirmed: ${venueName} - Munasaba`,
+        html: emailTemplates.venueBookingTemplate({
+          recipientName: updated.guestDetails?.fullName || "Guest",
+          title: "Booking Confirmed!",
+          message: `Your booking at ${venueName} has been confirmed by the host. Your digital ticket is ready in your app.`,
+          venueName,
+          bookingDates: bookingDatesStr,
+          totalAmount: updated.totalPrice,
+          status: "CONFIRMED",
+        }),
+      },
     });
 
     // Log booking history with correct action
@@ -1105,13 +1170,30 @@ const declineBooking = async (req, res) => {
       : updated.paymentStatus === "FAILED_REFUND"
         ? " A refund could not be processed automatically. Please contact support."
         : "";
-    await Notification.create({
+
+    await dispatchNotification({
       recipient: updated.buyer,
       sender: organiserId,
-      type: "BOOKING_UPDATE",
+      type: NOTIFICATION_TYPES.BOOKING_DECLINED,
       title: "Booking Declined",
       message: `Your booking at ${venueName} was declined.${refundNote}`,
       referenceId: updated._id,
+      referenceType: "EventCenterBooking",
+      data: {
+        screen: "BookingDetails",
+        ticketId: String(updated._id),
+      },
+      email: {
+        subject: `Booking Declined: ${venueName} - Munasaba`,
+        html: emailTemplates.venueBookingTemplate({
+          recipientName: updated.guestDetails?.fullName || "Guest",
+          title: "Booking Declined",
+          message: `Your booking request for ${venueName} was declined by the host.${refundNote}`,
+          venueName,
+          totalAmount: updated.totalPrice,
+          status: "DECLINED",
+        }),
+      },
     });
 
     // Log booking history with correct action

@@ -51,16 +51,24 @@ const updatePasswordSchema = Joi.object({
 
 const sendMessageSchema = Joi.object({
   content: Joi.string().trim().min(1).max(2000).required(),
-  contextType: Joi.string().valid("Event", "EventCenter").required(),
-  contextId: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).required(),
-  conversationId: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).optional(),
+  conversationId: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).optional().allow(null, ""),
+  contextType: Joi.string().valid("Event", "EventCenter").when("conversationId", {
+    is: Joi.string().pattern(/^[0-9a-fA-F]{24}$/),
+    then: Joi.optional().allow(null, ""),
+    otherwise: Joi.required(),
+  }),
+  contextId: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).when("conversationId", {
+    is: Joi.string().pattern(/^[0-9a-fA-F]{24}$/),
+    then: Joi.optional().allow(null, ""),
+    otherwise: Joi.required(),
+  }),
 });
 
 const sendStaffMessageSchema = Joi.object({
   content: Joi.string().trim().min(1).max(2000).required(),
-  contextType: Joi.string().valid("Event", "EventCenter").required(),
-  contextId: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).required(),
   conversationId: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).required(),
+  contextType: Joi.string().valid("Event", "EventCenter").optional().allow(null, ""),
+  contextId: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).optional().allow(null, ""),
 });
 
 module.exports = {

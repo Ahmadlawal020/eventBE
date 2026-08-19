@@ -161,12 +161,20 @@ class PaystackAdapter extends PaymentGateway {
   validateWebhookSignature(rawBody, headers) {
     this._ensureKey();
 
+    const signature = headers["x-paystack-signature"];
+    if (!signature || !rawBody) return false;
+
     const hash = crypto
       .createHmac("sha512", this.secretKey)
       .update(rawBody)
       .digest("hex");
 
-    return hash === headers["x-paystack-signature"];
+    const hashBuf = Buffer.from(hash, "utf8");
+    const sigBuf = Buffer.from(signature, "utf8");
+
+    if (hashBuf.length !== sigBuf.length) return false;
+
+    return crypto.timingSafeEqual(hashBuf, sigBuf);
   }
 
   parseWebhookEvent(body) {

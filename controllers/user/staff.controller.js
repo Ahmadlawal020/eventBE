@@ -1,5 +1,6 @@
 const User = require("../../models/user/user.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
+const { dispatchNotification, NOTIFICATION_TYPES, emailTemplates } = require("../../services/notification");
 const Notification = require("../../models/user/notification.schema");
 const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
 const Event = require("../../models/user/event.schema");
@@ -142,13 +143,30 @@ const inviteStaff = async (req, res) => {
     });
 
     if (staffUser) {
-      await Notification.create({
+      const organiserUser = await User.findById(organiserId).select("firstName surname").lean();
+      const organiserName = `${organiserUser?.firstName || ""} ${organiserUser?.surname || ""}`.trim() || "An organiser";
+
+      await dispatchNotification({
         recipient: staffUser._id,
         sender: organiserId,
-        type: "STAFF_INVITATION",
-        title: "New Staff Invitation",
-        message: "You have been invited to be a staff member for one or more listings.",
+        type: NOTIFICATION_TYPES.STAFF_INVITATION,
+        title: "New Staff Invitation 🎫",
+        message: `${organiserName} invited you to be a staff member for one or more listings. Tap to review.`,
         referenceId: invitation._id,
+        referenceType: "StaffInvitation",
+        data: {
+          screen: "StaffInvite",
+          invitationId: String(invitation._id),
+        },
+        email: {
+          subject: `Staff Invitation from ${organiserName} - Munasaba`,
+          html: emailTemplates.invitationTemplate({
+            recipientName: staffUser.firstName,
+            senderName: organiserName,
+            roleName: "Staff Member",
+            listingNames: `${listings.length} listing(s)`,
+          }),
+        },
       });
     }
 
@@ -274,6 +292,26 @@ const respondToInvitation = async (req, res) => {
         user.roles.push("staff");
         await user.save();
       }
+    }
+
+    // Notify the organiser about the response
+    try {
+      const staffName = `${user.firstName || ""} ${user.surname || ""}`.trim() || "Staff member";
+      await dispatchNotification({
+        recipient: invitation.organiser,
+        sender: userId,
+        type: action === "ACCEPTED" ? NOTIFICATION_TYPES.STAFF_ACCEPTED : NOTIFICATION_TYPES.STAFF_DECLINED,
+        title: action === "ACCEPTED" ? "Staff Accepted ✅" : "Staff Declined ❌",
+        message: `${staffName} has ${action.toLowerCase()} your staff invitation.`,
+        referenceId: invitation._id,
+        referenceType: "StaffInvitation",
+        data: {
+          screen: "StaffList",
+          invitationId: String(invitation._id),
+        },
+      });
+    } catch (notifErr) {
+      console.error("[STAFF NOTIFICATION ERROR]", notifErr);
     }
 
     res.json({
@@ -710,14 +748,22 @@ const leaveStaff = async (req, res) => {
       }
     }
 
-    // Notify the organiser
-    await Notification.create({
+    // Notify the organiser via Notification Engine
+    const leavingUser = await User.findById(userId).select("firstName surname").lean();
+    const staffName = `${leavingUser?.firstName || ""} ${leavingUser?.surname || ""}`.trim() || "A staff member";
+
+    await dispatchNotification({
       recipient: invitation.organiser,
       sender: userId,
-      type: "STAFF_INVITATION",
+      type: NOTIFICATION_TYPES.STAFF_LEFT,
       title: "Staff Member Left",
-      message: "A staff member has opted out of their role.",
+      message: `${staffName} has opted out of their staff role.`,
       referenceId: invitation._id,
+      referenceType: "StaffInvitation",
+      data: {
+        screen: "StaffList",
+        invitationId: String(invitation._id),
+      },
     });
 
     res.json({

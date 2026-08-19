@@ -177,6 +177,9 @@ const handleLogout = asyncHandler(async (req, res) => {
 
   // Delete refreshToken in db
   foundUser.refreshToken = '';
+  if (req.body.pushToken && Array.isArray(foundUser.pushTokens)) {
+    foundUser.pushTokens = foundUser.pushTokens.filter((t) => t.token !== req.body.pushToken);
+  }
   await foundUser.save();
 
   res.status(200).json({ success: true, message: "Logged out" });

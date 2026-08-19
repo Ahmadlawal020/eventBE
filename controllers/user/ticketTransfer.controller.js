@@ -2,6 +2,7 @@ const UserEventTicket = require("../../models/user/userEventTicket.schema");
 const EventCenterBooking = require("../../models/user/eventCenterBooking.schema");
 const TicketTransferRequest = require("../../models/user/ticketTransferRequest.schema");
 const User = require("../../models/user/user.schema");
+const { dispatchNotification, NOTIFICATION_TYPES, emailTemplates } = require("../../services/notification");
 const Notification = require("../../models/user/notification.schema");
 const { generateTicketNumber, generateQRPayload } = require("../../utils/qr");
 
@@ -132,15 +133,30 @@ const initiateTransfer = async (req, res) => {
       status: "PENDING",
     });
 
-    // 6. Notify recipient
+    // 6. Notify recipient via Notification Engine
     const recipientName = `${recipient.firstName || ""} ${recipient.surname || ""}`.trim();
-    await Notification.create({
+    await dispatchNotification({
       recipient: recipient._id,
       sender: senderId,
-      type: "TICKET_TRANSFER_REQUEST",
-      title: "Ticket Transfer Request",
+      type: NOTIFICATION_TYPES.TICKET_TRANSFER_REQUEST,
+      title: "Ticket Transfer Request 🎟️",
       message: `${senderName} wants to transfer a ticket for ${eventTitle} to you. Tap to review.`,
       referenceId: transferRequest._id,
+      referenceType: "TicketTransferRequest",
+      data: {
+        screen: "TransferReview",
+        requestId: String(transferRequest._id),
+      },
+      email: {
+        subject: `Ticket Transfer from ${senderName} - Munasaba`,
+        html: emailTemplates.ticketTransferTemplate({
+          recipientName,
+          title: "Ticket Transfer Request",
+          message: `${senderName} wants to transfer a ticket for ${eventTitle} to you.`,
+          senderName,
+          eventTitle,
+        }),
+      },
     });
 
     res.status(201).json({
@@ -255,13 +271,18 @@ const acceptTransfer = async (req, res) => {
     // 6. Notify sender
     const recipient = await User.findById(userId).select("firstName surname").lean();
     const recipientName = `${recipient?.firstName || ""} ${recipient?.surname || ""}`.trim();
-    await Notification.create({
+    await dispatchNotification({
       recipient: request.sender,
       sender: userId,
-      type: "TICKET_TRANSFER_ACCEPTED",
-      title: "Transfer Accepted",
+      type: NOTIFICATION_TYPES.TICKET_TRANSFER_ACCEPTED,
+      title: "Transfer Accepted ✅",
       message: `${recipientName} accepted your ticket transfer. The ticket has been transferred.`,
       referenceId: request._id,
+      referenceType: "TicketTransferRequest",
+      data: {
+        screen: "TransferDetails",
+        requestId: String(request._id),
+      },
     });
 
     res.status(200).json({
@@ -303,13 +324,18 @@ const declineTransfer = async (req, res) => {
     // Notify sender
     const recipient = await User.findById(userId).select("firstName surname").lean();
     const recipientName = `${recipient?.firstName || ""} ${recipient?.surname || ""}`.trim();
-    await Notification.create({
+    await dispatchNotification({
       recipient: request.sender,
       sender: userId,
-      type: "TICKET_TRANSFER_DECLINED",
-      title: "Transfer Declined",
+      type: NOTIFICATION_TYPES.TICKET_TRANSFER_DECLINED,
+      title: "Transfer Declined ❌",
       message: `${recipientName} declined your ticket transfer request.`,
       referenceId: request._id,
+      referenceType: "TicketTransferRequest",
+      data: {
+        screen: "TransferDetails",
+        requestId: String(request._id),
+      },
     });
 
     res.status(200).json({

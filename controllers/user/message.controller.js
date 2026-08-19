@@ -4,11 +4,15 @@ const Event = require("../../models/user/event.schema");
 const EventCenter = require("../../models/user/eventCenter.schema");
 const StaffInvitation = require("../../models/user/staffInvitation.schema");
 const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
+const User = require("../../models/user/user.schema");
+const { dispatchNotification, NOTIFICATION_TYPES } = require("../../services/notification");
 const mongoose = require("mongoose");
 
 // Helper function to check if a user is an authorized representative (Owner, Co-Organiser, or Staff with CUSTOMER_CARE permission)
 const checkCustomerCareAccess = async (userId, listingId, listingType) => {
   try {
+    if (!userId || !listingId) return false;
+
     let listing;
     if (listingType === "Event") {
       listing = await Event.findById(listingId);
@@ -23,21 +27,27 @@ const checkCustomerCareAccess = async (userId, listingId, listingType) => {
       return true;
     }
 
-    // 2. Is an active Staff with CUSTOMER_CARE permission?
-    if (listing.staff && listing.staff.includes(userId)) {
-      const staffInvite = await StaffInvitation.findOne({
-        staff: userId,
-        "listings.listingId": listingId,
-        status: "ACCEPTED",
-        permissions: "CUSTOMER_CARE"
-      });
-      if (staffInvite) return true;
-    }
+    // 2. Is an active Staff with customer care permission?
+    const staffInvite = await StaffInvitation.findOne({
+      staff: userId,
+      "listings.listingId": listingId,
+      status: "ACCEPTED",
+      permissions: { $in: ["CUSTOMER_CARE", "MANAGE_CUSTOMER_CARE", "ALL_ACCESS"] },
+    });
+    if (staffInvite) return true;
 
-    // 3. Is an active Co-Organiser? (Automatic full access to messages and replies)
-    if (listing.coOrganisers && listing.coOrganisers.includes(userId)) {
+    // 3. Is an active Co-Organiser?
+    if (listing.coOrganisers && listing.coOrganisers.some((id) => id.toString() === userId.toString())) {
       return true;
     }
+
+    const coOrganiserInvite = await CoOrganiserInvitation.findOne({
+      coOrganiser: userId,
+      "listings.listingId": listingId,
+      status: "ACCEPTED",
+      permissions: { $in: ["CUSTOMER_CARE", "MANAGE_CUSTOMER_CARE", "ALL_ACCESS"] },
+    });
+    if (coOrganiserInvite) return true;
 
     return false;
   } catch (err) {
@@ -75,7 +85,7 @@ const sendMessage = async (req, res) => {
     }
 
     if (!context) {
-      return res.status(404).json({ success: false, message: "Context not found" });
+      return res.status(404).json({ success: false, message: "Context listing not found" });
     }
 
     const organiserId = context.createdBy.toString();
@@ -84,8 +94,20 @@ const sendMessage = async (req, res) => {
     const isSenderRepresentative = await checkCustomerCareAccess(senderId, finalContextId, finalContextType);
 
     if (conversationId) {
-      receiverId = conversation.participants.find(p => p && p.toString() !== senderId.toString());
-      if (!receiverId && conversation.participants.length === 2) {
+      if (isSenderRepresentative) {
+        // If host representative replies, recipient is the guest participant
+        receiverId = conversation.participants.find(
+          (p) => p && p.toString() !== organiserId && p.toString() !== senderId.toString()
+        );
+        if (!receiverId) {
+          receiverId = conversation.participants.find((p) => p && p.toString() !== senderId.toString());
+        }
+      } else {
+        // If guest sends message, recipient is the organiser
+        receiverId = organiserId;
+      }
+
+      if (!receiverId && conversation.participants.length >= 2) {
         receiverId = conversation.participants[0].toString() === senderId.toString()
           ? conversation.participants[1]
           : conversation.participants[0];
@@ -93,33 +115,35 @@ const sendMessage = async (req, res) => {
     } else {
       receiverId = organiserId;
       if (isSenderRepresentative) {
-        return res.status(400).json({ success: false, message: "Organisers, Co-Organisers, and Staff cannot start conversations with their own listings" });
+        return res.status(400).json({
+          success: false,
+          message: "Organisers, Co-Organisers, and Staff cannot start conversations with their own listings",
+        });
       }
 
       conversation = await Conversation.findOne({
         participants: { $all: [senderId, receiverId] },
-        contextType,
-        contextId,
+        contextType: finalContextType,
+        contextId: finalContextId,
       });
 
       if (!conversation) {
         try {
           conversation = new Conversation({
             participants: [senderId, receiverId],
-            contextType,
-            contextId,
+            contextType: finalContextType,
+            contextId: finalContextId,
             isReplied: true,
           });
           await conversation.save();
-          // Increment total unique inquiries (messages)
+          if (!context.performance) context.performance = {};
           context.performance.messages = (context.performance.messages || 0) + 1;
         } catch (err) {
-          // Handle duplicate key error from race condition
           if (err.code === 11000) {
             conversation = await Conversation.findOne({
               participants: { $all: [senderId, receiverId] },
-              contextType,
-              contextId,
+              contextType: finalContextType,
+              contextId: finalContextId,
             });
           } else {
             throw err;
@@ -128,7 +152,15 @@ const sendMessage = async (req, res) => {
       }
     }
 
+    if (!receiverId) {
+      return res.status(400).json({ success: false, message: "Recipient could not be determined" });
+    }
+
     // 2. Update Performance Tracking (Pending Inquiries & Response Rate)
+    if (!context.performance) {
+      context.performance = { messages: 0, pendingInquiries: 0, responseRate: 100 };
+    }
+
     if (!isSenderRepresentative) {
       // Guest is sending a message
       if (conversation.isReplied) {
@@ -151,7 +183,7 @@ const sendMessage = async (req, res) => {
       conversationId: conversation._id,
       sender: senderId,
       receiver: receiverId,
-      content,
+      content: content.trim(),
       contextType: finalContextType,
       contextId: finalContextId,
     });
@@ -160,15 +192,50 @@ const sendMessage = async (req, res) => {
 
     // 4. Update Conversation
     conversation.lastMessage = savedMessage._id;
-    const currentUnread = conversation.unreadCount.get(receiverId.toString()) || 0;
-    conversation.unreadCount.set(receiverId.toString(), currentUnread + 1);
+
+    const unreadMap = conversation.unreadCount instanceof Map
+      ? conversation.unreadCount
+      : new Map(Object.entries(conversation.unreadCount || {}));
+    const currentUnread = unreadMap.get(receiverId.toString()) || 0;
+    unreadMap.set(receiverId.toString(), currentUnread + 1);
+    conversation.unreadCount = unreadMap;
 
     await conversation.save();
+
+    // 5. Dispatch Message Notification (Push & In-App)
+    try {
+      const senderUser = await User.findById(senderId).select("firstName surname profilePicture").lean();
+      const senderName = `${senderUser?.firstName || ""} ${senderUser?.surname || ""}`.trim() || "Someone";
+      const snippet = content.length > 80 ? `${content.substring(0, 80)}...` : content;
+
+      await dispatchNotification({
+        recipient: receiverId,
+        sender: senderId,
+        type: NOTIFICATION_TYPES.MESSAGE_RECEIVED,
+        title: `Message from ${senderName}`,
+        message: snippet,
+        referenceId: conversation._id,
+        referenceType: "Conversation",
+        data: {
+          screen: "ChatScreen",
+          conversationId: String(conversation._id),
+          senderId: String(senderId),
+        },
+        priority: "high",
+      });
+    } catch (notifErr) {
+      console.error("[MESSAGE NOTIFICATION ERROR]", notifErr);
+    }
+
+    const populatedMessage = await Message.findById(savedMessage._id)
+      .populate("sender", "firstName surname profilePicture")
+      .populate("receiver", "firstName surname profilePicture")
+      .lean();
 
     res.status(201).json({
       success: true,
       message: "Message sent successfully",
-      data: savedMessage,
+      data: populatedMessage || savedMessage,
     });
   } catch (err) {
     console.error("[SEND MESSAGE ERROR]", err);
@@ -187,34 +254,43 @@ const getConversations = async (req, res) => {
     const staffInvites = await StaffInvitation.find({
       staff: userId,
       status: "ACCEPTED",
-      permissions: "CUSTOMER_CARE"
+      permissions: { $in: ["CUSTOMER_CARE", "MANAGE_CUSTOMER_CARE", "ALL_ACCESS"] },
     }).select("listings.listingId");
 
     const coOrganiserInvites = await CoOrganiserInvitation.find({
       coOrganiser: userId,
       status: "ACCEPTED",
-      permissions: "CUSTOMER_CARE"
+      permissions: { $in: ["CUSTOMER_CARE", "MANAGE_CUSTOMER_CARE", "ALL_ACCESS"] },
     }).select("listings.listingId");
 
     const directCoOrganiserEventCenters = await EventCenter.find({ coOrganisers: userId }).select("_id");
     const directCoOrganiserEvents = await Event.find({ coOrganisers: userId }).select("_id");
+    const myOwnedEventCenters = await EventCenter.find({ createdBy: userId }).select("_id");
+    const myOwnedEvents = await Event.find({ createdBy: userId }).select("_id");
 
     const agentListingIds = [];
-    staffInvites.forEach(inv => inv.listings.forEach(l => agentListingIds.push(l.listingId)));
-    coOrganiserInvites.forEach(inv => inv.listings.forEach(l => agentListingIds.push(l.listingId)));
-    directCoOrganiserEventCenters.forEach(center => agentListingIds.push(center._id));
-    directCoOrganiserEvents.forEach(evt => agentListingIds.push(evt._id));
+    staffInvites.forEach((inv) => inv.listings.forEach((l) => agentListingIds.push(l.listingId.toString())));
+    coOrganiserInvites.forEach((inv) => inv.listings.forEach((l) => agentListingIds.push(l.listingId.toString())));
+    directCoOrganiserEventCenters.forEach((center) => agentListingIds.push(center._id.toString()));
+    directCoOrganiserEvents.forEach((evt) => agentListingIds.push(evt._id.toString()));
+
+    const ownedListingIds = [
+      ...myOwnedEventCenters.map((c) => c._id.toString()),
+      ...myOwnedEvents.map((e) => e._id.toString()),
+    ];
+
+    const allOrganiserListingIds = [...new Set([...agentListingIds, ...ownedListingIds])];
 
     const conversations = await Conversation.find({
       $or: [
         { participants: userId },
-        { contextId: { $in: agentListingIds } }
-      ]
+        { contextId: { $in: allOrganiserListingIds } },
+      ],
     })
       .populate("participants", "firstName surname profilePicture")
       .populate({
         path: "lastMessage",
-        select: "content createdAt sender",
+        select: "content createdAt sender read",
       })
       .populate({
         path: "contextId",
@@ -225,19 +301,20 @@ const getConversations = async (req, res) => {
 
     let filteredConversations = conversations;
 
-    if (role === 'organiser') {
-      filteredConversations = conversations.filter(conv => {
+    if (role === "organiser") {
+      filteredConversations = conversations.filter((conv) => {
         if (!conv.contextId) return false;
+        const convListingId = conv.contextId._id ? conv.contextId._id.toString() : conv.contextId.toString();
         const isOwner = conv.contextId.createdBy && conv.contextId.createdBy.toString() === userId.toString();
         if (isOwner) return true;
-        const isAgent = agentListingIds.some(id => id.toString() === conv.contextId._id.toString());
-        return isAgent;
+        return allOrganiserListingIds.includes(convListingId);
       });
-    } else if (role === 'user') {
-      filteredConversations = conversations.filter(conv => {
+    } else if (role === "user") {
+      filteredConversations = conversations.filter((conv) => {
         if (!conv.contextId) return false;
+        const convListingId = conv.contextId._id ? conv.contextId._id.toString() : conv.contextId.toString();
         const isOwner = conv.contextId.createdBy && conv.contextId.createdBy.toString() === userId.toString();
-        const isAgent = agentListingIds.some(id => id.toString() === conv.contextId._id.toString());
+        const isAgent = allOrganiserListingIds.includes(convListingId);
         return !isOwner && !isAgent;
       });
     }
@@ -268,9 +345,20 @@ const getMessages = async (req, res) => {
   const skip = (page - 1) * limit;
 
   try {
+    const conversation = await Conversation.findById(conversationId);
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: "Conversation not found" });
+    }
+
+    const isReaderRepresentative = await checkCustomerCareAccess(
+      userId,
+      conversation.contextId,
+      conversation.contextType
+    );
+
     const [messages, total] = await Promise.all([
       Message.find({ conversationId })
-        .sort({ createdAt: -1 }) // Newest first for efficient pagination
+        .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .populate("sender", "firstName surname profilePicture")
@@ -279,18 +367,42 @@ const getMessages = async (req, res) => {
       Message.countDocuments({ conversationId }),
     ]);
 
-    // Mark messages as read for the current user
-    await Message.updateMany(
-      { conversationId, receiver: userId, read: false },
-      { $set: { read: true } }
-    );
-
-    // Reset unread count for current user in conversation
-    const conversation = await Conversation.findById(conversationId);
-    if (conversation) {
-      conversation.unreadCount.set(userId.toString(), 0);
-      await conversation.save();
+    // Mark messages as read
+    if (isReaderRepresentative) {
+      // Mark all incoming guest messages as read
+      await Message.updateMany(
+        { conversationId, sender: { $ne: userId }, read: false },
+        { $set: { read: true } }
+      );
+    } else {
+      // Mark messages received by this user as read
+      await Message.updateMany(
+        { conversationId, receiver: userId, read: false },
+        { $set: { read: true } }
+      );
     }
+
+    // Reset unread count for reader and owner
+    const unreadMap = conversation.unreadCount instanceof Map
+      ? conversation.unreadCount
+      : new Map(Object.entries(conversation.unreadCount || {}));
+
+    unreadMap.set(userId.toString(), 0);
+
+    // If representative is reading, also clear listing owner unread count
+    let contextListing;
+    if (conversation.contextType === "Event") {
+      contextListing = await Event.findById(conversation.contextId).select("createdBy");
+    } else {
+      contextListing = await EventCenter.findById(conversation.contextId).select("createdBy");
+    }
+
+    if (isReaderRepresentative && contextListing?.createdBy) {
+      unreadMap.set(contextListing.createdBy.toString(), 0);
+    }
+
+    conversation.unreadCount = unreadMap;
+    await conversation.save();
 
     res.json({
       success: true,

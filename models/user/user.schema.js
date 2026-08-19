@@ -16,6 +16,31 @@ const emergencyContactSchema = new mongoose.Schema({
   phoneNumber: { type: String, trim: true },
 }, { _id: false });
 
+const pushTokenSchema = new mongoose.Schema({
+  token: { type: String, required: true, trim: true },
+  platform: { type: String, enum: ["ios", "android", "web"], default: "android" },
+  deviceId: { type: String, trim: true },
+  deviceModel: { type: String, trim: true },
+  lastUsedAt: { type: Date, default: Date.now },
+}, { _id: false });
+
+const notificationPreferencesSchema = new mongoose.Schema({
+  channels: {
+    push: { type: Boolean, default: true },
+    email: { type: Boolean, default: true },
+    sms: { type: Boolean, default: false },
+  },
+  categories: {
+    bookings: { type: Boolean, default: true },
+    tickets: { type: Boolean, default: true },
+    teamAndInvites: { type: Boolean, default: true },
+    messages: { type: Boolean, default: true },
+    reminders: { type: Boolean, default: true },
+    offersAndPromotions: { type: Boolean, default: true },
+    newsAndUpdates: { type: Boolean, default: true },
+  },
+}, { _id: false });
+
 const userSchema = new mongoose.Schema(
   {
     firstName: {
@@ -148,6 +173,15 @@ const userSchema = new mongoose.Schema(
       accountNumber: { type: String, trim: true },
       bankName: { type: String, trim: true },
       bankCode: { type: String, trim: true },
+    },
+    // Push Notifications & Preferences
+    pushTokens: {
+      type: [pushTokenSchema],
+      default: () => [],
+    },
+    notificationPreferences: {
+      type: notificationPreferencesSchema,
+      default: () => ({}),
     },
   },
   {

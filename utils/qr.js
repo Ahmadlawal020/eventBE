@@ -72,7 +72,18 @@ function verifyQRPayload(qrString) {
       .digest("hex")
       .slice(0, 12);
 
-    return { valid: sig === expectedSig, data: parsed };
+    if (!sig || typeof sig !== "string") {
+      return { valid: false, data: null };
+    }
+
+    const sigBuf = Buffer.from(sig, "utf8");
+    const expectedSigBuf = Buffer.from(expectedSig, "utf8");
+
+    const valid =
+      sigBuf.length === expectedSigBuf.length &&
+      crypto.timingSafeEqual(sigBuf, expectedSigBuf);
+
+    return { valid, data: parsed };
   } catch {
     return { valid: false, data: null };
   }
