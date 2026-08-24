@@ -13,7 +13,7 @@ const PlatformSettingsSchema = new Schema(
     },
     supportEmail: {
       type: String,
-      default: "support@munasaba.com",
+      default: "support@munasabahub.com",
     },
     supportPhone: {
       type: String,

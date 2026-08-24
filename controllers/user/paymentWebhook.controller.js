@@ -37,6 +37,14 @@ const handleEventTicketWebhook = async (reference, metadata, customer) => {
     booking = await existingBooking.save();
   } else {
     try {
+      const formattedItems = (items || []).map((item) => ({
+        ticketId: item.ticketId || item.ticketTypeId,
+        name: item.name || "Event Ticket",
+        quantity: Number(item.quantity || 1),
+        pricePerUnit: Number(item.pricePerUnit !== undefined ? item.pricePerUnit : (item.price || 0)),
+        totalPrice: Number(item.totalPrice !== undefined ? item.totalPrice : (item.price || 0) * (item.quantity || 1)),
+      }));
+
       booking = await EventBooking.create({
         eventId,
         buyer: buyerId,
@@ -45,7 +53,7 @@ const handleEventTicketWebhook = async (reference, metadata, customer) => {
           phoneNumber: phoneNumber || "",
           email: customer?.email || "",
         },
-        items: items || [],
+        items: formattedItems,
         totalAmount: totalAmount || 0,
         paymentMethod: "CARD",
         paymentReference: reference,
@@ -83,8 +91,22 @@ const handleEventTicketWebhook = async (reference, metadata, customer) => {
         buyer: { _id: buyerId, fullName, email: customer?.email },
         reference,
       });
+
+      // 5. Process Referral Commission for Organiser Referrer
+      if (eventDoc?.createdBy) {
+        const { processReferralCommission } = require("../../services/referral.service");
+        const amountInNaira = Number(totalAmount || booking.totalAmount || 0) / 100;
+        await processReferralCommission({
+          organiserId: eventDoc.createdBy,
+          sourceType: "EVENT_TICKET",
+          bookingId: booking._id,
+          bookingReference: reference,
+          totalAmount: amountInNaira,
+          eventId: eventDoc._id,
+        });
+      }
     } catch (notifErr) {
-      console.error("[WEBHOOK] Error dispatching event ticket notifications:", notifErr);
+      console.error("[WEBHOOK] Error dispatching event ticket notifications / referral commission:", notifErr);
     }
   }
 };
@@ -321,6 +343,24 @@ const handlePaymentWebhook = async (req, res) => {
       guestName: fullName || ticket.guestDetails?.fullName || "",
       totalPrice: ticket.totalPrice,
     });
+
+    // Process Referral Commission for Organiser Referrer (for INSTANT bookings where payment completes immediately)
+    if (!isReviewMode && ticket) {
+      try {
+        const { processReferralCommission } = require("../../services/referral.service");
+        const amountInNaira = Number(totalPrice?.amount || ticket.totalPrice?.amount || 0);
+        await processReferralCommission({
+          organiserId,
+          sourceType: "EVENT_CENTER_BOOKING",
+          bookingId: ticket._id,
+          bookingReference: reference,
+          totalAmount: amountInNaira,
+          eventCenterId,
+        });
+      } catch (refErr) {
+        console.error("[WEBHOOK] Error processing referral commission for venue booking:", refErr);
+      }
+    }
 
     console.log(`[${gateway.name.toUpperCase()} WEBHOOK] Successfully processed ref ${reference} (mode: ${isReviewMode ? "REVIEW" : "INSTANT"})`);
     return res.status(200).send("OK");

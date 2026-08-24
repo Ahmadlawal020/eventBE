@@ -183,6 +183,29 @@ const userSchema = new mongoose.Schema(
       type: notificationPreferencesSchema,
       default: () => ({}),
     },
+    // Referral Program Fields
+    referralCode: {
+      type: String,
+      unique: true,
+      sparse: true,
+      uppercase: true,
+      trim: true,
+      index: true,
+    },
+    referredBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+      index: true,
+    },
+    referredAt: {
+      type: Date,
+      default: null,
+    },
+    referralEarnings: {
+      type: Number,
+      default: 0,
+    },
   },
   {
     timestamps: true, // Adds createdAt and updatedAt automatically

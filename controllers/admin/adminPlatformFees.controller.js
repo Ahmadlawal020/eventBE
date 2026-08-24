@@ -16,6 +16,9 @@ const getPlatformFees = async (req, res) => {
       data: {
         eventCommission: fees.eventCommission,
         eventCenterCommission: fees.eventCenterCommission,
+        referralCommission: fees.referralCommission ?? 5,
+        referralDurationDays: fees.referralDurationDays ?? 90,
+        referralProgramEnabled: fees.referralProgramEnabled !== false,
       },
     });
   } catch (error) {
@@ -27,7 +30,13 @@ const getPlatformFees = async (req, res) => {
 // PUT /api/admin/platform-fees
 const updatePlatformFees = async (req, res) => {
   try {
-    const { eventCommission, eventCenterCommission } = req.body;
+    const {
+      eventCommission,
+      eventCenterCommission,
+      referralCommission,
+      referralDurationDays,
+      referralProgramEnabled,
+    } = req.body;
 
     const update = {};
     if (eventCommission !== undefined) {
@@ -48,6 +57,27 @@ const updatePlatformFees = async (req, res) => {
       }
       update.eventCenterCommission = eventCenterCommission;
     }
+    if (referralCommission !== undefined) {
+      if (referralCommission < 0 || referralCommission > 100) {
+        return res.status(400).json({
+          success: false,
+          message: "referralCommission must be between 0 and 100",
+        });
+      }
+      update.referralCommission = referralCommission;
+    }
+    if (referralDurationDays !== undefined) {
+      if (referralDurationDays < 0) {
+        return res.status(400).json({
+          success: false,
+          message: "referralDurationDays must be 0 (unlimited) or greater",
+        });
+      }
+      update.referralDurationDays = referralDurationDays;
+    }
+    if (referralProgramEnabled !== undefined) {
+      update.referralProgramEnabled = Boolean(referralProgramEnabled);
+    }
 
     if (Object.keys(update).length === 0) {
       return res.status(400).json({
@@ -67,7 +97,13 @@ const updatePlatformFees = async (req, res) => {
       action: "PLATFORM_FEES_UPDATED",
       targetType: "System",
       targetId: fees._id,
-      previousValue: { eventCommission: fees.eventCommission, eventCenterCommission: fees.eventCenterCommission },
+      previousValue: {
+        eventCommission: fees.eventCommission,
+        eventCenterCommission: fees.eventCenterCommission,
+        referralCommission: fees.referralCommission,
+        referralDurationDays: fees.referralDurationDays,
+        referralProgramEnabled: fees.referralProgramEnabled,
+      },
       newValue: update,
     });
 
@@ -76,6 +112,9 @@ const updatePlatformFees = async (req, res) => {
       data: {
         eventCommission: fees.eventCommission,
         eventCenterCommission: fees.eventCenterCommission,
+        referralCommission: fees.referralCommission,
+        referralDurationDays: fees.referralDurationDays,
+        referralProgramEnabled: fees.referralProgramEnabled,
       },
     });
   } catch (error) {

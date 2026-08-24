@@ -103,7 +103,7 @@ const getEventCenterById = async (req, res) => {
 
   try {
     const center = await EventCenter.findById(id)
-      .populate("createdBy", "firstName surname email profilePicture")
+      .populate("createdBy", "firstName surname email profilePicture isIdentityVerified isPhoneVerified")
       .populate("coOrganisers", "firstName surname email profilePicture")
       .populate("staff", "firstName surname email profilePicture");
 

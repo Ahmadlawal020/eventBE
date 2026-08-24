@@ -44,7 +44,16 @@ const inviteCoOrganiser = async (req, res) => {
       });
     }
 
-    // 1. Prevent duplicate active pending invitations for the same co-organiser
+    // 1. Prevent host from inviting themselves
+    const hostUser = await User.findById(hostId).select("firstName surname email").lean();
+    if (hostUser && hostUser.email && hostUser.email.toLowerCase() === coOrganiserEmail.toLowerCase()) {
+      return res.status(400).json({
+        success: false,
+        message: "You cannot invite yourself as a co-organiser",
+      });
+    }
+
+    // 2. Prevent duplicate active pending invitations for the same co-organiser
     const existingInvitation = await CoOrganiserInvitation.findOne({
       host: hostId,
       coOrganiserEmail: coOrganiserEmail.toLowerCase(),
@@ -58,7 +67,10 @@ const inviteCoOrganiser = async (req, res) => {
       });
     }
 
-    // 2. Securely validate listing ownership (prevent authorization spoofing)
+    // Check if co-organiser exists in the system
+    const coOrganiser = await User.findOne({ email: coOrganiserEmail.toLowerCase() });
+
+    // 3. Securely validate listing ownership & prevent inviting existing active co-organisers
     const Event = require("../../models/user/event.schema");
     const EventCenter = require("../../models/user/eventCenter.schema");
 
@@ -75,10 +87,14 @@ const inviteCoOrganiser = async (req, res) => {
           message: `Authorization failed: You do not own listing ${item.listingId}`,
         });
       }
-    }
 
-    // Check if co-organiser exists in the system
-    const coOrganiser = await User.findOne({ email: coOrganiserEmail.toLowerCase() });
+      if (coOrganiser && listing.coOrganisers && listing.coOrganisers.some(id => id.toString() === coOrganiser._id.toString())) {
+        return res.status(400).json({
+          success: false,
+          message: `User is already an active co-organiser for listing ${listing.title || listing.name || item.listingId}.`,
+        });
+      }
+    }
 
     // Create the invitation
     const invitation = await CoOrganiserInvitation.create({
@@ -91,7 +107,6 @@ const inviteCoOrganiser = async (req, res) => {
     });
 
     if (coOrganiser) {
-      const hostUser = await User.findById(hostId).select("firstName surname").lean();
       const hostName = `${hostUser?.firstName || ""} ${hostUser?.surname || ""}`.trim() || "A host";
 
       await dispatchNotification({
@@ -157,7 +172,7 @@ const getInvitationById = async (req, res) => {
     const { id } = req.params;
     const invitation = await CoOrganiserInvitation.findById(id)
       .populate("host", "firstName surname profilePicture")
-      .populate("listings.listingId", "title venueName images type");
+      .populate("listings.listingId", "title name venueName images bannerImage type");
 
     if (!invitation) {
       return res.status(404).json({ success: false, message: "Invitation not found" });
@@ -275,8 +290,8 @@ const removeCoOrganiser = async (req, res) => {
 
     // Authorize: Either the user is the original owner (createdBy === hostId)
     // OR the user is the co-organiser removing themselves (coOrganiserId === hostId)
-    const isOwner = listing.createdBy && listing.createdBy.toString() === hostId;
-    const isRemovingSelf = coOrganiserId === hostId;
+    const isOwner = listing.createdBy && listing.createdBy.toString() === hostId.toString();
+    const isRemovingSelf = coOrganiserId && coOrganiserId.toString() === hostId.toString();
 
     if (!isOwner && !isRemovingSelf) {
       return res.status(403).json({ success: false, message: "Not authorized to manage this listing" });
@@ -433,7 +448,7 @@ const getReceivedInvitations = async (req, res) => {
 
     const invitations = await CoOrganiserInvitation.find({ coOrganiser: userId })
       .populate("host", "firstName surname email profilePicture")
-      .populate("listings.listingId", "title venueName images type")
+      .populate("listings.listingId", "title name venueName images bannerImage type")
       .sort({ createdAt: -1 });
 
     res.json({

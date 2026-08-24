@@ -4,6 +4,7 @@ const {
   lookupUserByEmail,
   getUserById,
   updateUser,
+  deleteUserAccount,
 } = require("../../controllers/user/userProfile.controller");
 const verifyJWT = require("../../middleware/verifyJWT");
 
@@ -21,5 +22,10 @@ router.get("/:id", verifyJWT, getUserById);
 // @desc    Update user
 // @access  Private
 router.patch("/:id", verifyJWT, updateUser);
+
+// @route   DELETE /api/user-info/:id
+// @desc    Delete user account and personal data
+// @access  Private
+router.delete("/:id", verifyJWT, deleteUserAccount);
 
 module.exports = router;

@@ -3,7 +3,12 @@ const UserEventTicket = require("../../models/user/userEventTicket.schema");
 const Ticket = require("../../models/user/eventTicketType.schema");
 const Event = require("../../models/user/event.schema");
 const User = require("../../models/user/user.schema");
-const { dispatchNotification, NOTIFICATION_TYPES, emailTemplates } = require("../../services/notification");
+const {
+  dispatchNotification,
+  NOTIFICATION_TYPES,
+  emailTemplates,
+  notifyTicketPurchased,
+} = require("../../services/notification");
 const { getPaymentGateway } = require("../../services/payment");
 const { createTicketsForBooking } = require("./userEventTicket.controller");
 const crypto = require("crypto");
@@ -354,8 +359,22 @@ const verifyBooking = async (req, res) => {
             buyer: { _id: booking.buyer, fullName: booking.guestDetails?.fullName },
             reference: booking.paymentReference,
           });
+
+          // Process referral commission for event owner's referrer
+          if (eventDoc?.createdBy) {
+            const { processReferralCommission } = require("../../services/referral.service");
+            const amountInNaira = Number(booking.totalAmount) / 100;
+            await processReferralCommission({
+              organiserId: eventDoc.createdBy,
+              sourceType: "EVENT_TICKET",
+              bookingId: booking._id,
+              bookingReference: booking.paymentReference,
+              totalAmount: amountInNaira,
+              eventId: eventDoc._id,
+            });
+          }
         } catch (notifErr) {
-          console.error("[VERIFY BOOKING] Notification dispatch error:", notifErr);
+          console.error("[VERIFY BOOKING] Notification / referral dispatch error:", notifErr);
         }
       }
     } catch (ticketError) {

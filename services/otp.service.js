@@ -39,7 +39,7 @@ class OTPService {
             </div>
             <p style="font-size: 14px; color: #888; text-align: center;">If you didn't request this code, please ignore this email.</p>
             <hr style="border: 0; border-top: 1px solid #eee; margin: 20px 0;">
-            <p style="font-size: 12px; color: #aaa; text-align: center;">&copy; 2024 Munasaba App. All rights reserved.</p>
+            <p style="font-size: 12px; color: #aaa; text-align: center;">&copy; ${new Date().getFullYear()} Munasaba. All rights reserved.</p>
           </div>
         `,
       });

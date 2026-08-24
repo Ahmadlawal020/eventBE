@@ -23,6 +23,28 @@ const PlatformFeesSchema = new Schema(
       min: 0,
       max: 100,
     },
+
+    // Referral Program Settings
+    // Percentage earned by referrer from each ticket / booking
+    referralCommission: {
+      type: Number,
+      default: 5,
+      min: 0,
+      max: 100,
+    },
+
+    // Referral duration window in days (0 means lifetime / unlimited)
+    referralDurationDays: {
+      type: Number,
+      default: 90,
+      min: 0,
+    },
+
+    // Toggle referral program on/off
+    referralProgramEnabled: {
+      type: Boolean,
+      default: true,
+    },
   },
   { timestamps: true }
 );

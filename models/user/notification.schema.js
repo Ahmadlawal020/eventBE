@@ -75,6 +75,7 @@ const notificationSchema = new mongoose.Schema(
         "StaffInvitation",
         "TicketTransferRequest",
         "Conversation",
+        "ReferralEarning",
         "Custom",
         null,
       ],

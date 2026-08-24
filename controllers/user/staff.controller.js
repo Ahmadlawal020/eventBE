@@ -40,18 +40,34 @@ const inviteStaff = async (req, res) => {
     const { staffEmail, listings, permissions } = req.body;
     const organiserId = req.user.id;
 
-    if (!staffEmail || !listings || !permissions) {
+    if (!staffEmail || !Array.isArray(listings) || listings.length === 0 || !Array.isArray(permissions) || permissions.length === 0) {
       return res.status(400).json({
         success: false,
-        message: "Staff email, listings, and permissions are required",
+        message: "Staff email, listings (non-empty array), and permissions (non-empty array) are required",
       });
     }
 
-    // 1. Resolve staff user if they already exist
+    // 1. Prevent host/organiser from inviting themselves
+    const organiserEmail = req.user?.email;
+    if (organiserEmail && organiserEmail.toLowerCase() === staffEmail.toLowerCase()) {
+      return res.status(400).json({
+        success: false,
+        message: "You cannot invite yourself as a staff member",
+      });
+    }
+
+    const organiserUser = await User.findById(organiserId).select("firstName surname email").lean();
+    if (organiserUser && organiserUser.email && organiserUser.email.toLowerCase() === staffEmail.toLowerCase()) {
+      return res.status(400).json({
+        success: false,
+        message: "You cannot invite yourself as a staff member",
+      });
+    }
+
+    // 2. Resolve staff user if they already exist
     const staffUser = await User.findOne({ email: staffEmail.toLowerCase() });
 
-    // 2. Prevent co-organisers from being invited as staff for the same listing
-
+    // 3. Prevent co-organisers from being invited as staff for the same listing
     for (const item of listings) {
       // A. Securely validate that the inviting user is either the listing Owner or a Co-Organiser with MANAGE_STAFF permission
       let listingObj;
@@ -249,7 +265,7 @@ const respondToInvitation = async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid action" });
     }
 
-    const user = await User.findById(userId).select("email roles");
+    const user = await User.findById(userId).select("firstName surname email roles profilePicture");
     if (!user) {
       return res.status(404).json({ success: false, message: "User not found" });
     }
@@ -260,15 +276,23 @@ const respondToInvitation = async (req, res) => {
       { $set: { staff: userId } }
     );
 
-    const invitation = await StaffInvitation.findOneAndUpdate(
-      { _id: id, staff: userId, status: "PENDING", expiresAt: { $gt: new Date() } },
-      { status: action },
-      { new: true }
-    );
+    const invitation = await StaffInvitation.findOne({
+      _id: id,
+      $or: [{ staff: userId }, { staffEmail: user.email.toLowerCase() }],
+      status: "PENDING",
+    });
 
     if (!invitation) {
       return res.status(404).json({ success: false, message: "Invitation not found or already processed" });
     }
+
+    if (invitation.expiresAt && new Date(invitation.expiresAt) < new Date()) {
+      return res.status(400).json({ success: false, message: "Invitation has expired" });
+    }
+
+    invitation.staff = userId;
+    invitation.status = action;
+    await invitation.save();
 
     // 🚀 If accepted, add staff to the actual listings
     if (action === "ACCEPTED") {
@@ -333,7 +357,14 @@ const removeStaff = async (req, res) => {
     const { listingId, listingType, staffId } = req.body;
     const organiserId = req.user.id;
 
-const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
+    if (!listingId || !listingType || !staffId) {
+      return res.status(400).json({
+        success: false,
+        message: "listingId, listingType, and staffId are required",
+      });
+    }
+
+    const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
 
     let listing;
     if (listingType === "Event") {
@@ -420,11 +451,11 @@ const revokeAllAccess = async (req, res) => {
     const { staffId } = req.params;
     const organiserId = req.user.id;
 
-    // Find all ACCEPTED invitations for this staff member with this organiser
+    // Find all invitations (ACCEPTED or PENDING) for this staff member with this organiser
     const invitations = await StaffInvitation.find({
       staff: staffId,
       organiser: organiserId,
-      status: "ACCEPTED",
+      status: { $in: ["ACCEPTED", "PENDING"] },
     });
 
     if (invitations.length === 0) {
@@ -433,7 +464,7 @@ const revokeAllAccess = async (req, res) => {
 
     // Remove staff from all listings across all invitations
     for (const invitation of invitations) {
-      for (const item of invitation.listings) {
+      for (const item of (invitation.listings || [])) {
         if (item.listingType === "Event") {
           await Event.findByIdAndUpdate(item.listingId, { $pull: { staff: staffId } });
         } else if (item.listingType === "EventCenter") {
@@ -603,15 +634,14 @@ const getStaffDashboardStats = async (req, res) => {
     const coOrganiserIds = new Set();
 
     events.forEach((e) => {
-      e.staff.forEach((id) => staffIds.add(id.toString()));
-      if (e.coOrganisers) e.coOrganisers.forEach((id) => coOrganiserIds.add(id.toString()));
+      (e.staff || []).forEach((id) => staffIds.add(id.toString()));
+      if (e.coOrganisers) (e.coOrganisers || []).forEach((id) => coOrganiserIds.add(id.toString()));
     });
     eventCenters.forEach((ec) => {
-      ec.staff.forEach((id) => staffIds.add(id.toString()));
-      if (ec.coOrganisers) ec.coOrganisers.forEach((id) => coOrganiserIds.add(id.toString()));
+      (ec.staff || []).forEach((id) => staffIds.add(id.toString()));
+      if (ec.coOrganisers) (ec.coOrganisers || []).forEach((id) => coOrganiserIds.add(id.toString()));
     });
 
-    // Remove any overlapping co-organiser IDs from the staff count
     coOrganiserIds.forEach((id) => staffIds.delete(id));
 
     const totalStaffCount = staffIds.size;
@@ -659,12 +689,12 @@ const getAllStaff = async (req, res) => {
     const coOrganiserIds = new Set();
 
     events.forEach((e) => {
-      e.staff.forEach((id) => staffIds.add(id.toString()));
-      if (e.coOrganisers) e.coOrganisers.forEach((id) => coOrganiserIds.add(id.toString()));
+      (e.staff || []).forEach((id) => staffIds.add(id.toString()));
+      if (e.coOrganisers) (e.coOrganisers || []).forEach((id) => coOrganiserIds.add(id.toString()));
     });
     eventCenters.forEach((ec) => {
-      ec.staff.forEach((id) => staffIds.add(id.toString()));
-      if (ec.coOrganisers) ec.coOrganisers.forEach((id) => coOrganiserIds.add(id.toString()));
+      (ec.staff || []).forEach((id) => staffIds.add(id.toString()));
+      if (ec.coOrganisers) (ec.coOrganisers || []).forEach((id) => coOrganiserIds.add(id.toString()));
     });
 
     coOrganiserIds.forEach((id) => staffIds.delete(id));

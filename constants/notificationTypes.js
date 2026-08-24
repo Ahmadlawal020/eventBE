@@ -54,6 +54,7 @@ const NOTIFICATION_TYPES = {
   SYSTEM: "SYSTEM",
   PROMOTION: "PROMOTION",
   ANNOUNCEMENT: "ANNOUNCEMENT",
+  REFERRAL_REWARD: "REFERRAL_REWARD",
 };
 
 /**
@@ -220,6 +221,11 @@ const TYPE_CONFIG = {
     category: NOTIFICATION_CATEGORIES.SYSTEM,
     defaultChannels: ["in_app", "push"],
     priority: "normal",
+  },
+  [NOTIFICATION_TYPES.REFERRAL_REWARD]: {
+    category: NOTIFICATION_CATEGORIES.PROMOTIONS,
+    defaultChannels: ["in_app", "push", "email"],
+    priority: "high",
   },
 };
 

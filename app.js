@@ -9,28 +9,50 @@ const cookieParser = require("cookie-parser");
 const cors = require("cors");
 const corsOptions = require("./config/corsOptions");
 const connectDB = require("./config/dbConn");
+const helmet = require("helmet");
 
 console.log(process.env.NODE_ENV);
 
-connectDB().catch(() => {
-  process.exit(1);
-});
-
-const helmet = require("helmet");
+if (process.env.NODE_ENV !== "test") {
+  connectDB().catch(() => {
+    process.exit(1);
+  });
+}
 
 // Middleware
 app.use(helmet());
 app.use(logger);
 app.use(cors(corsOptions));
-app.use(express.json({
-  verify: (req, _res, buf) => { req.rawBody = buf; },
-}));
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 app.use(cookieParser());
+
+// Health Check endpoint for load balancers & monitoring
+app.get(["/health", "/api/health"], (_req, res) => {
+  const mongoose = require("mongoose");
+  const dbState = mongoose.connection.readyState;
+  const dbStatusMap = { 0: "disconnected", 1: "connected", 2: "connecting", 3: "disconnecting" };
+  const isHealthy = dbState === 1 || process.env.NODE_ENV === "test";
+
+  res.status(isHealthy ? 200 : 503).json({
+    status: isHealthy ? "UP" : "DEGRADED",
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+    database: dbStatusMap[dbState] || "unknown",
+    environment: process.env.NODE_ENV || "development",
+  });
+});
 
 // Serve static files from the "public" directory
 app.use("/", express.static(path.join(__dirname, "public")));
 
 app.use("/", require("./routes/root"));
+
 // Mount user routes
 app.use("/api/auth", require("./routes/user/auth.route"));
 app.use("/api/user-info", require("./routes/user/userProfile.route"));
@@ -60,6 +82,7 @@ app.use("/api/platform-fees", require("./routes/user/platformFees.route"));
 app.use("/api/kyc", require("./routes/user/kyc.route"));
 app.use("/api/ticket-transfer", require("./routes/user/ticketTransfer.route"));
 app.use("/api/ticket-export", require("./routes/user/ticketExport.route"));
+app.use("/api/referrals", require("./routes/user/referral.route"));
 
 // Mount admin routes
 app.use("/api/admin/auth", require("./routes/admin/auth.route"));
@@ -79,8 +102,7 @@ app.use("/api/admin/transfers", require("./routes/admin/transfers.route"));
 app.use("/api/admin/refunds", require("./routes/admin/refunds.route"));
 app.use("/api/admin/co-organisers", require("./routes/admin/coOrganisers.route"));
 app.use("/api/admin/search", require("./routes/admin/search.route"));
-
-
+app.use("/api/admin/referrals", require("./routes/admin/referrals.route"));
 
 // 404 Handler - Catch-all for unmatched routes
 app.all("*", (req, res) => {
@@ -93,6 +115,7 @@ app.all("*", (req, res) => {
     res.type("txt").send("404 Not Found");
   }
 });
+
 // Error handling middleware
 app.use(errorHandler);
 

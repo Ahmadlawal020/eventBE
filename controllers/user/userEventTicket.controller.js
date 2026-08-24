@@ -124,8 +124,8 @@ const createTicketsForBooking = async (booking) => {
         },
       },
       schedule: {
-        startDate: event.schedule?.from,
-        endDate: event.schedule?.to,
+        startDate: event.schedule?.from || event.schedule?.startDate || new Date(),
+        endDate: event.schedule?.to || event.schedule?.endDate || new Date(),
       },
       arrivalGuide: {
         notes: event.arrivalGuide?.notes,
@@ -135,7 +135,11 @@ const createTicketsForBooking = async (booking) => {
     };
 
     // 2. Batch-fetch all ticket types in one query (avoids N+1)
-    const ticketTypeIds = booking.items.map((item) => item.ticketId);
+    const mongoose = require("mongoose");
+    const ticketTypeIds = (booking.items || [])
+      .map((item) => item.ticketId)
+      .filter((id) => mongoose.isValidObjectId(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
     const ticketTypes = await Ticket.find({ _id: { $in: ticketTypeIds } }).lean();
     const ticketTypeMap = {};
     ticketTypes.forEach((tt) => {

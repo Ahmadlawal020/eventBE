@@ -87,7 +87,8 @@ const verifyTicketStaff = async (req, res) => {
         return res.status(404).json({ success: false, message: "Ticket not found." });
       }
 
-      if (ticket.eventId._id.toString() !== listingId) {
+      const eventIdStr = (ticket.eventId?._id || ticket.eventId)?.toString();
+      if (eventIdStr !== listingId) {
         return res.status(400).json({ success: false, message: "This ticket does not belong to the currently active event." });
       }
 
@@ -117,7 +118,8 @@ const verifyTicketStaff = async (req, res) => {
         return res.status(404).json({ success: false, message: "Booking pass not found." });
       }
 
-      if (ticket.eventCenter._id.toString() !== listingId) {
+      const venueIdStr = (ticket.eventCenter?._id || ticket.eventCenter)?.toString();
+      if (venueIdStr !== listingId) {
         return res.status(400).json({ success: false, message: "This booking pass does not belong to the currently active event center." });
       }
 

@@ -646,6 +646,24 @@ const verifyPayment = async (req, res) => {
       totalPrice: ticket.totalPrice,
     });
 
+    // Process referral commission for instant bookings
+    if (!isReviewMode && ticket.organiser) {
+      try {
+        const { processReferralCommission } = require("../../services/referral.service");
+        const amountInNaira = Number(ticket.totalPrice?.amount || 0);
+        await processReferralCommission({
+          organiserId: ticket.organiser,
+          sourceType: "EVENT_CENTER_BOOKING",
+          bookingId: ticket._id,
+          bookingReference: ticket.paymentReference,
+          totalAmount: amountInNaira,
+          eventCenterId: ticket.eventCenter,
+        });
+      } catch (refErr) {
+        console.error("[EVENT CENTER PAYMENT] Error processing referral commission:", refErr);
+      }
+    }
+
     const successMessage = isReviewMode
       ? "Payment verified. Booking is pending organizer review."
       : "Payment verified and booking confirmed successfully.";
@@ -1083,6 +1101,24 @@ const acceptBooking = async (req, res) => {
       guestName: updated.guestDetails?.fullName || "",
       totalPrice: updated.totalPrice,
     });
+
+    // Process referral commission for accepted review bookings
+    if (updated.organiser) {
+      try {
+        const { processReferralCommission } = require("../../services/referral.service");
+        const amountInNaira = Number(updated.totalPrice?.amount || 0);
+        await processReferralCommission({
+          organiserId: updated.organiser,
+          sourceType: "EVENT_CENTER_BOOKING",
+          bookingId: updated._id,
+          bookingReference: updated.paymentReference,
+          totalAmount: amountInNaira,
+          eventCenterId: updated.eventCenter,
+        });
+      } catch (refErr) {
+        console.error("[ACCEPT BOOKING] Error processing referral commission:", refErr);
+      }
+    }
 
     return res.status(200).json({
       success: true,

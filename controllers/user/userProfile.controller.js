@@ -168,6 +168,8 @@ const updateUser = asyncHandler(async (req, res) => {
       preferredLanguage: updatedUser.preferredLanguage,
       isActive: updatedUser.isActive,
       isIdentityVerified: updatedUser.isIdentityVerified,
+      isEmailVerified: updatedUser.isEmailVerified,
+      emailVerifiedAt: updatedUser.emailVerifiedAt,
       isPhoneVerified: updatedUser.isPhoneVerified,
       phoneVerifiedAt: updatedUser.phoneVerifiedAt,
       hasPassword: !!updatedUser.password,
@@ -175,8 +177,42 @@ const updateUser = asyncHandler(async (req, res) => {
   });
 });
 
+// @desc    Delete user account and all personal data
+// @route   DELETE /api/user-info/:id
+// @access  Private (owner only)
+const deleteUserAccount = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  if (req.user.id !== id) {
+    return res.status(403).json({ message: "Not authorized to delete this account." });
+  }
+
+  const user = await User.findById(id).exec();
+  if (!user) {
+    return res.status(404).json({ message: "User not found." });
+  }
+
+  // Cleanup Cloudinary profile picture
+  if (user.profilePicture?.publicId) {
+    try {
+      await cloudinary.uploader.destroy(user.profilePicture.publicId);
+    } catch (err) {
+      console.error("[CLOUDINARY DELETE ERROR]", err);
+    }
+  }
+
+  // Delete the user record
+  await User.findByIdAndDelete(id);
+
+  res.status(200).json({
+    success: true,
+    message: "Your account and associated personal data have been permanently deleted.",
+  });
+});
+
 module.exports = {
   lookupUserByEmail,
   getUserById,
   updateUser,
+  deleteUserAccount,
 };

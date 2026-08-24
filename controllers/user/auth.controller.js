@@ -44,6 +44,8 @@ const handleCheckUser = asyncHandler(async (req, res) => {
   });
 });
 
+const { generateReferralCode } = require("../../services/referral.service");
+
 // authController.js - Update handleSignup
 const handleSignup = asyncHandler(async (req, res) => {
   let {
@@ -54,6 +56,7 @@ const handleSignup = asyncHandler(async (req, res) => {
     dob,
     googleId,
     authProvider = "local",
+    referralCode: incomingReferralCode,
   } = req.body;
 
   email = email.trim().toLowerCase();
@@ -71,6 +74,8 @@ const handleSignup = asyncHandler(async (req, res) => {
     hashedPassword = await bcrypt.hash(password, 10);
   }
 
+  const generatedCode = await generateReferralCode({ firstName, surname });
+
   const userData = {
     firstName,
     surname,
@@ -80,10 +85,21 @@ const handleSignup = asyncHandler(async (req, res) => {
     authProvider,
     isEmailVerified: true,
     emailVerifiedAt: new Date(),
+    referralCode: generatedCode,
   };
 
   if (googleId) {
     userData.googleId = googleId;
+  }
+
+  // If user provided a referral code, link referrer
+  if (incomingReferralCode && typeof incomingReferralCode === "string") {
+    const cleanCode = incomingReferralCode.trim().toUpperCase();
+    const referrer = await User.findOne({ referralCode: cleanCode }).select("_id").lean();
+    if (referrer) {
+      userData.referredBy = referrer._id;
+      userData.referredAt = new Date();
+    }
   }
 
   const newUser = new User(userData);
@@ -103,6 +119,13 @@ const handleSignup = asyncHandler(async (req, res) => {
         surname: newUser.surname,
         roles: newUser.roles,
         authProvider: newUser.authProvider,
+        profilePicture: newUser.profilePicture,
+        referralCode: newUser.referralCode,
+        isEmailVerified: newUser.isEmailVerified,
+        isPhoneVerified: newUser.isPhoneVerified,
+        isIdentityVerified: newUser.isIdentityVerified,
+        phoneVerifiedAt: newUser.phoneVerifiedAt,
+        emailVerifiedAt: newUser.emailVerifiedAt,
         hasPassword: !!newUser.password,
       },
       accessToken,
@@ -155,6 +178,11 @@ const handleLogin = asyncHandler(async (req, res) => {
         roles: foundUser.roles,
         authProvider: foundUser.authProvider,
         profilePicture: foundUser.profilePicture,
+        isEmailVerified: foundUser.isEmailVerified,
+        isPhoneVerified: foundUser.isPhoneVerified,
+        isIdentityVerified: foundUser.isIdentityVerified,
+        phoneVerifiedAt: foundUser.phoneVerifiedAt,
+        emailVerifiedAt: foundUser.emailVerifiedAt,
         hasPassword: !!foundUser.password,
       },
       accessToken,
@@ -219,6 +247,11 @@ const handleRefreshToken = asyncHandler(async (req, res) => {
             roles: foundUser.roles,
             authProvider: foundUser.authProvider,
             profilePicture: foundUser.profilePicture,
+            isEmailVerified: foundUser.isEmailVerified,
+            isPhoneVerified: foundUser.isPhoneVerified,
+            isIdentityVerified: foundUser.isIdentityVerified,
+            phoneVerifiedAt: foundUser.phoneVerifiedAt,
+            emailVerifiedAt: foundUser.emailVerifiedAt,
             hasPassword: !!foundUser.password,
           },
           accessToken,
@@ -314,6 +347,11 @@ const handleGoogleAuth = asyncHandler(async (req, res) => {
           roles: user.roles,
           authProvider: user.authProvider,
           profilePicture: user.profilePicture,
+          isEmailVerified: user.isEmailVerified,
+          isPhoneVerified: user.isPhoneVerified,
+          isIdentityVerified: user.isIdentityVerified,
+          phoneVerifiedAt: user.phoneVerifiedAt,
+          emailVerifiedAt: user.emailVerifiedAt,
           hasPassword: !!user.password,
         },
         accessToken,

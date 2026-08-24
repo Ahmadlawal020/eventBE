@@ -20,8 +20,8 @@ exports.getOrganiserStaffStats = async (req, res) => {
     ]);
 
     const staffIds = new Set();
-    events.forEach(e => e.staff.forEach(id => staffIds.add(id.toString())));
-    centers.forEach(c => c.staff.forEach(id => staffIds.add(id.toString())));
+    events.forEach(e => (e.staff || []).forEach(id => staffIds.add(id.toString())));
+    centers.forEach(c => (c.staff || []).forEach(id => staffIds.add(id.toString())));
 
     const totalStaffCount = staffIds.size;
 
@@ -114,12 +114,15 @@ exports.getStaffDetailedProfile = async (req, res) => {
       ...centers.map(c => c._id)
     ];
 
-    // Find the accepted staff invitation that has at least one listing managed by the user
+    // Find the accepted staff invitation that has at least one listing managed by the user or organized by this user
     const invitation = await StaffInvitation.findOne({
       staff: staffId,
       status: "ACCEPTED",
-      "listings.listingId": { $in: listingIds }
-    }).select("permissions listings");
+      $or: [
+        { organiser: organiserId },
+        { "listings.listingId": { $in: listingIds } }
+      ]
+    }).select("permissions listings organiser");
 
     if (!invitation) {
       return res.status(403).json({ success: false, message: "Authorization failed: You do not manage this staff member." });
@@ -160,6 +163,13 @@ exports.updateStaffAccess = async (req, res) => {
     const { permissions, listings } = req.body;
     const organiserId = req.user.id;
 
+    if (!Array.isArray(permissions) || !Array.isArray(listings) || listings.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Permissions (array) and listings (non-empty array) are required",
+      });
+    }
+
     // Verify user has authority (owner or co-organiser with MANAGE_STAFF/ALL_ACCESS) for all requested listings
     const CoOrganiserInvitation = require("../../models/user/coOrganiserInvitation.schema");
     
@@ -198,7 +208,10 @@ exports.updateStaffAccess = async (req, res) => {
       { 
         staff: staffId, 
         status: "ACCEPTED",
-        "listings.listingId": listings[0].listingId 
+        $or: [
+          { organiser: organiserId },
+          { "listings.listingId": { $in: listings.map(l => l.listingId) } }
+        ]
       },
       { permissions, listings },
       { new: true }
@@ -206,6 +219,15 @@ exports.updateStaffAccess = async (req, res) => {
 
     if (!invitation) {
       return res.status(404).json({ success: false, message: "Staff relationship not found" });
+    }
+
+    // Ensure staff is added to the listing documents
+    for (const item of listings) {
+      if (item.listingType === "Event") {
+        await Event.findByIdAndUpdate(item.listingId, { $addToSet: { staff: staffId } });
+      } else if (item.listingType === "EventCenter") {
+        await EventCenter.findByIdAndUpdate(item.listingId, { $addToSet: { staff: staffId } });
+      }
     }
 
     // Log the permission change

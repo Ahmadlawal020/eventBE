@@ -130,7 +130,7 @@ exports.getCoOrganiserDetailedProfile = async (req, res) => {
       host: organiserId,
       coOrganiser: coOrganiserId,
       status: "ACCEPTED"
-    }).populate("listings.listingId", "title venueName images type");
+    }).populate("listings.listingId", "title name venueName images bannerImage type");
 
     res.json({
       success: true,
