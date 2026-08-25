@@ -15,13 +15,23 @@ beforeAll(async () => {
   if (testUri.includes("/Eventtt")) {
     testUri = testUri.replace("/Eventtt", "/Eventtt_test_automated");
   }
-  await mongoose.connect(testUri, {});
-});
+  await mongoose.connect(testUri, {
+    serverSelectionTimeoutMS: 60000,
+    connectTimeoutMS: 60000,
+    socketTimeoutMS: 60000,
+  });
+}, 90000);
 
 afterEach(async () => {
   if (mongoose.connection.readyState === 1) {
-    const collections = Object.values(mongoose.connection.collections);
-    await Promise.all(collections.map((c) => c.deleteMany({})));
+    try {
+      const collections = Object.values(mongoose.connection.collections);
+      for (const collection of collections) {
+        await collection.deleteMany({});
+      }
+    } catch (e) {
+      console.warn("[TEST CLEANUP WARN]", e.message);
+    }
   }
 });
 

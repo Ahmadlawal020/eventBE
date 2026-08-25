@@ -18,7 +18,9 @@ const checkStaffScannerPermission = async (staffId, listingId, listingType) => {
     return { hasPermission: false, message: "You are not assigned to this listing." };
   }
 
-  const hasScanPermission = staffInvite.permissions.includes("SCAN_TICKET");
+  const hasScanPermission =
+    staffInvite.permissions.includes("SCAN_TICKET") ||
+    staffInvite.permissions.includes("ALL_ACCESS");
   if (!hasScanPermission) {
     return { hasPermission: false, message: "You do not have permission to scan tickets for this listing." };
   }
@@ -274,6 +276,7 @@ const validateTicketStaff = async (req, res) => {
         {
           ticketNumber: lookupTicketNumber,
           eventCenter: listingId,
+          status: { $in: ["ACTIVE", "CONFIRMED"] },
           "checkIn.isCheckedIn": { $ne: true },
         },
         {

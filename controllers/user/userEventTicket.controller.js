@@ -31,7 +31,7 @@ async function authorizeScanAccess(userId, eventId) {
     organiser: event.createdBy,
     status: "ACCEPTED",
     "listings.listingId": event._id,
-    permissions: "SCAN_TICKET",
+    permissions: { $in: ["SCAN_TICKET", "ALL_ACCESS"] },
   }).lean();
   if (staffInvite) return { authorized: true };
 

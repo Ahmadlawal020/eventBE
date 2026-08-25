@@ -39,7 +39,7 @@ async function authorizeScanAccess(userId, eventCenterId) {
     organiser: eventCenter.createdBy,
     status: "ACCEPTED",
     "listings.listingId": eventCenter._id,
-    permissions: "SCAN_TICKET",
+    permissions: { $in: ["SCAN_TICKET", "ALL_ACCESS"] },
   }).lean();
   if (staffInvite) return { authorized: true };
 
@@ -994,9 +994,9 @@ const acceptBooking = async (req, res) => {
         const datesToMark = (updated.selectedDates || []).map(
           (d) => new Date(d.date).toISOString().split("T")[0]
         );
-        const currentStrings = (eventCenter.availability.unavailableDates || []).map(
-          (d) => new Date(d.date).toISOString().split("T")[0]
-        );
+        const currentStrings = (eventCenter.availability.unavailableDates || [])
+          .filter((d) => String(d.bookingId) !== String(updated._id))
+          .map((d) => new Date(d.date).toISOString().split("T")[0]);
         const conflictingDates = datesToMark.filter((d) => currentStrings.includes(d));
 
         if (conflictingDates.length > 0) {
@@ -1010,16 +1010,22 @@ const acceptBooking = async (req, res) => {
           });
         }
 
-        datesToMark.forEach((dateStr) => {
-          eventCenter.availability.unavailableDates.push({
-            date: new Date(dateStr),
-            type: "BOOKED",
-            bookingId: String(updated._id),
-            clientName: updated.guestDetails?.fullName || "",
-            clientPhone: updated.guestDetails?.phoneNumber || "",
-            clientEmail: updated.guestDetails?.email || "",
+        const existingBookingDateStrings = (eventCenter.availability.unavailableDates || [])
+          .filter((d) => String(d.bookingId) === String(updated._id))
+          .map((d) => new Date(d.date).toISOString().split("T")[0]);
+
+        datesToMark
+          .filter((dateStr) => !existingBookingDateStrings.includes(dateStr))
+          .forEach((dateStr) => {
+            eventCenter.availability.unavailableDates.push({
+              date: new Date(dateStr),
+              type: "BOOKED",
+              bookingId: String(updated._id),
+              clientName: updated.guestDetails?.fullName || "",
+              clientPhone: updated.guestDetails?.phoneNumber || "",
+              clientEmail: updated.guestDetails?.email || "",
+            });
           });
-        });
       } else if (updated.bookingUnit === "hour") {
         const existingSlots = eventCenter.availability.unavailableSlots || [];
         const conflictingSlots = (updated.selectedDates || []).filter((slot) =>
