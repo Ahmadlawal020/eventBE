@@ -4,12 +4,7 @@ const jwt = require("jsonwebtoken");
 const { OAuth2Client } = require("google-auth-library");
 const asyncHandler = require("express-async-handler");
 
-// Initialize OAuth2Client with proper credentials
-const client = new OAuth2Client(
-  process.env.GOOGLE_CLIENT_ID,
-  process.env.GOOGLE_CLIENT_SECRET,
-  process.env.GOOGLE_REDIRECT_URI
-);
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 const generateTokens = (user) => {
   const { _id: id, email, roles } = user;
@@ -55,11 +50,33 @@ const handleSignup = asyncHandler(async (req, res) => {
     password,
     dob,
     googleId,
+    googleSignupToken,
     authProvider = "local",
     referralCode: incomingReferralCode,
   } = req.body;
 
   email = email.trim().toLowerCase();
+
+  // A client must not be able to create a Google account by merely supplying a
+  // Google subject ID. The short-lived token is issued only after Google ID
+  // token verification in handleGoogleAuth.
+  if (authProvider === "google") {
+    try {
+      const verifiedGoogleSignup = jwt.verify(
+        googleSignupToken,
+        process.env.ACCESS_TOKEN_SECRET
+      );
+      if (
+        verifiedGoogleSignup.type !== "google_signup" ||
+        verifiedGoogleSignup.email !== email ||
+        verifiedGoogleSignup.googleId !== googleId
+      ) {
+        return res.status(401).json({ success: false, message: "Invalid Google signup session" });
+      }
+    } catch {
+      return res.status(401).json({ success: false, message: "Google signup session expired. Please sign in again." });
+    }
+  }
 
   const existingUser = await User.findOne({ email }).exec();
   if (existingUser) {
@@ -263,11 +280,11 @@ const handleRefreshToken = asyncHandler(async (req, res) => {
 });
 
 const handleGoogleAuth = asyncHandler(async (req, res) => {
-  const { code, codeVerifier } = req.body;
+  const { idToken, code, codeVerifier, redirectUri } = req.body;
   // Input validation handled by middleware
 
   // Validate environment variables
-  if (!process.env.GOOGLE_CLIENT_ID || !process.env.GOOGLE_CLIENT_SECRET) {
+  if (!process.env.GOOGLE_CLIENT_ID) {
     console.error("Missing Google OAuth environment variables");
     return res.status(500).json({
       success: false,
@@ -275,27 +292,33 @@ const handleGoogleAuth = asyncHandler(async (req, res) => {
     });
   }
 
-  console.log("Exchanging authorization code for tokens with PKCE...");
+  let tokenToVerify = idToken;
 
-  // Exchange authorization code for tokens WITH code verifier
-  const { tokens } = await client.getToken({
-    code,
-    codeVerifier, // This is crucial for PKCE
-    client_id: process.env.GOOGLE_CLIENT_ID,
-    client_secret: process.env.GOOGLE_CLIENT_SECRET,
-    redirect_uri: process.env.GOOGLE_REDIRECT_URI,
-  });
+  // Web retains the browser PKCE flow. Native applications submit the ID token
+  // returned by the Google SDK, so no client secret is exposed or required there.
+  if (!tokenToVerify) {
+    if (!process.env.GOOGLE_CLIENT_SECRET) {
+      return res.status(500).json({ success: false, message: "Server configuration error" });
+    }
 
-  if (!tokens.id_token) {
-    return res.status(400).json({
-      success: false,
-      message: "No ID token received from Google",
+    const targetRedirectUri = redirectUri || process.env.GOOGLE_REDIRECT_URI;
+    const { tokens } = await client.getToken({
+      code,
+      codeVerifier,
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+      redirect_uri: targetRedirectUri,
     });
+    tokenToVerify = tokens.id_token;
+  }
+
+  if (!tokenToVerify) {
+    return res.status(400).json({ success: false, message: "No ID token received from Google" });
   }
 
   // Verify the ID token
   const ticket = await client.verifyIdToken({
-    idToken: tokens.id_token,
+    idToken: tokenToVerify,
     audience: process.env.GOOGLE_CLIENT_ID,
   });
 
@@ -373,7 +396,12 @@ const handleGoogleAuth = asyncHandler(async (req, res) => {
           surname: surname || "",
           profilePicture: picture,
           googleId: googleId,
-          authProvider: 'google'
+          authProvider: 'google',
+          signupToken: jwt.sign(
+            { type: "google_signup", email, googleId },
+            process.env.ACCESS_TOKEN_SECRET,
+            { expiresIn: "10m" }
+          ),
         },
       },
     });

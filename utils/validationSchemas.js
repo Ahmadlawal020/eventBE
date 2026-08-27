@@ -7,7 +7,10 @@ const signupSchema = Joi.object({
   password: Joi.string().min(6).when('authProvider', { is: 'local', then: Joi.required(), otherwise: Joi.optional() }),
   dob: Joi.date().required(),
   authProvider: Joi.string().valid('local', 'google').default('local'),
-  googleId: Joi.string().allow(null, '')
+  googleId: Joi.string().allow(null, ''),
+  googleSignupToken: Joi.string().when('authProvider', {
+    is: 'google', then: Joi.required(), otherwise: Joi.forbidden(),
+  }),
 });
 
 const loginSchema = Joi.object({
@@ -24,9 +27,11 @@ const refreshTokenSchema = Joi.object({
 });
 
 const googleAuthSchema = Joi.object({
-  code: Joi.string().required(),
-  codeVerifier: Joi.string().required()
-});
+  idToken: Joi.string(),
+  code: Joi.string(),
+  codeVerifier: Joi.string(),
+  redirectUri: Joi.string().optional().allow(null, ""),
+}).xor('idToken', 'code').with('code', 'codeVerifier');
 
 const otpRequestSchema = Joi.object({
   identifier: Joi.string().required(),
