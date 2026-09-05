@@ -1,9 +1,9 @@
 const { CronJob } = require("cron");
-const EventCenterBooking = require("../models/user/eventCenterBooking.schema");
-const EventCenter = require("../models/user/eventCenter.schema");
+const EventCenterBooking = require("../models/client/eventCenterBooking.schema");
+const EventCenter = require("../models/client/eventCenter.schema");
 const { dispatchNotification, NOTIFICATION_TYPES, emailTemplates } = require("../services/notification");
 const { getPaymentGateway } = require("../services/payment");
-const { logBookingHistory } = require("../controllers/user/bookingHistory.controller");
+const { logBookingHistory } = require("../controllers/client/bookingHistory.controller");
 
 const gateway = getPaymentGateway();
 

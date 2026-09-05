@@ -1,5 +1,5 @@
 const { sendEmail } = require("./email.service");
-const OTP = require("../models/user/otp.schema");
+const OTP = require("../models/client/otp.schema");
 const crypto = require("crypto");
 
 /**

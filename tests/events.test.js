@@ -1,8 +1,8 @@
 const request = require("supertest");
 const app = require("../app");
-const User = require("../models/user/user.schema");
-const Event = require("../models/user/event.schema");
-const EventTicketType = require("../models/user/eventTicketType.schema");
+const User = require("../models/client/user.schema");
+const Event = require("../models/client/event.schema");
+const EventTicketType = require("../models/client/eventTicketType.schema");
 const { generateAuthToken } = require("./setup");
 
 describe("Events & Ticket Types API", () => {

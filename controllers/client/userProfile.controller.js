@@ -1,0 +1,218 @@
+const User = require("../../models/client/user.schema");
+const bcrypt = require("bcrypt");
+const asyncHandler = require("express-async-handler");
+const cloudinary = require("../../utils/cloudinary");
+
+// @desc    Look up a user by email (lightweight — name + email + picture only)
+// @route   GET /api/user-info/lookup?email=...
+// @access  Private
+const lookupUserByEmail = asyncHandler(async (req, res) => {
+  const { email } = req.query;
+
+  if (!email || typeof email !== "string" || !email.trim()) {
+    return res.status(400).json({ success: false, message: "Email query param is required." });
+  }
+
+  const user = await User.findOne({ email: email.toLowerCase().trim() })
+    .select("firstName surname email profilePicture")
+    .lean();
+
+  if (!user) {
+    return res.status(404).json({ success: false, message: "No user found with that email." });
+  }
+
+  res.status(200).json({
+    success: true,
+    data: {
+      id: user._id,
+      firstName: user.firstName,
+      surname: user.surname,
+      fullName: `${user.firstName || ""} ${user.surname || ""}`.trim(),
+      email: user.email,
+      profilePicture: user.profilePicture,
+    },
+  });
+});
+
+// @desc    Get user by ID
+// @route   GET /api/user-info/:id
+// @access  Private
+const getUserById = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  // Ownership check: users can only view their own profile
+  if (req.user.id !== id) {
+    return res.status(403).json({ message: "Not authorized to view this profile." });
+  }
+
+  const user = await User.findById(id).lean();
+
+  if (!user) {
+    return res.status(404).json({ message: "User not found." });
+  }
+
+  // Remove sensitive fields
+  user.id = user._id;
+  user.hasPassword = !!user.password;
+  delete user.password;
+  delete user.refreshToken;
+
+  res.json(user);
+});
+
+// @desc    Update user profile
+// @route   PATCH /api/user-info/:id
+// @access  Private (owner only)
+const updateUser = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  // Ownership check
+  if (req.user.id !== id) {
+    return res.status(403).json({ message: "Not authorized to update this profile." });
+  }
+
+  // Whitelist ONLY safe fields — roles (restricted to toggling 'organiser'), isActive, isIdentityVerified,
+  // isPhoneVerified, phoneVerifiedAt are admin-only and NOT accepted here
+  const {
+    firstName,
+    surname,
+    preferredFirstName,
+    phoneNumber,
+    email,
+    dob,
+    password,
+    residentialAddress,
+    emergencyContact,
+    preferredLanguage,
+    profilePicture,
+    roles,
+  } = req.body;
+
+  const user = await User.findById(id).exec();
+  if (!user) return res.status(404).json({ message: "User not found." });
+
+  // Prevent duplicate emails
+  if (email && email !== user.email) {
+    const duplicate = await User.findOne({ email }).lean().exec();
+    if (duplicate) {
+      return res.status(409).json({ message: "Email already in use." });
+    }
+    user.email = email;
+  }
+
+  user.firstName = firstName ?? user.firstName;
+  user.surname = surname ?? user.surname;
+  user.preferredFirstName = preferredFirstName ?? user.preferredFirstName;
+  user.phoneNumber = phoneNumber ?? user.phoneNumber;
+  user.dob = dob ?? user.dob;
+
+  // Handle Profile Picture update and Cloudinary cleanup
+  if (profilePicture && typeof profilePicture === 'object') {
+    if (user.profilePicture?.publicId) {
+      try {
+        await cloudinary.uploader.destroy(user.profilePicture.publicId);
+      } catch (err) {
+        console.error("[CLOUDINARY DELETE ERROR]", err);
+      }
+    }
+    user.profilePicture = {
+      url: profilePicture.url || null,
+      publicId: profilePicture.publicId || null
+    };
+  }
+
+  // Robustly update nested objects
+  if (residentialAddress) {
+    user.residentialAddress = { ...user.residentialAddress.toObject(), ...residentialAddress };
+  }
+  if (emergencyContact) {
+    user.emergencyContact = { ...user.emergencyContact.toObject(), ...emergencyContact };
+  }
+
+  user.preferredLanguage = preferredLanguage ?? user.preferredLanguage;
+
+  // Safe update for roles: users can toggle "organiser" themselves but cannot assign "admin" or "staff"
+  if (roles && Array.isArray(roles)) {
+    const allowedRoles = ["user", "organiser"];
+    const verifiedRoles = roles.filter(role => allowedRoles.includes(role));
+    const existingRestrictedRoles = user.roles.filter(role => !allowedRoles.includes(role));
+    user.roles = [...new Set([...existingRestrictedRoles, ...verifiedRoles])];
+  }
+
+  if (password) {
+    user.password = await bcrypt.hash(password, 10);
+  }
+
+  const updatedUser = await user.save();
+
+  // Sync event centers status if verification status changed
+  const { syncUserEventCenters } = require("./eventCenter.controller");
+  const { syncUserEvents } = require("./event.controller");
+  await syncUserEventCenters(updatedUser._id);
+  await syncUserEvents(updatedUser._id);
+
+  res.json({
+    message: `User ${updatedUser.firstName} ${updatedUser.surname} updated successfully.`,
+    user: {
+      id: updatedUser._id,
+      email: updatedUser.email,
+      firstName: updatedUser.firstName,
+      surname: updatedUser.surname,
+      preferredFirstName: updatedUser.preferredFirstName,
+      phoneNumber: updatedUser.phoneNumber,
+      roles: updatedUser.roles,
+      dob: updatedUser.dob,
+      profilePicture: updatedUser.profilePicture,
+      residentialAddress: updatedUser.residentialAddress,
+      emergencyContact: updatedUser.emergencyContact,
+      preferredLanguage: updatedUser.preferredLanguage,
+      isActive: updatedUser.isActive,
+      isIdentityVerified: updatedUser.isIdentityVerified,
+      isEmailVerified: updatedUser.isEmailVerified,
+      emailVerifiedAt: updatedUser.emailVerifiedAt,
+      isPhoneVerified: updatedUser.isPhoneVerified,
+      phoneVerifiedAt: updatedUser.phoneVerifiedAt,
+      hasPassword: !!updatedUser.password,
+    },
+  });
+});
+
+// @desc    Delete user account and all personal data
+// @route   DELETE /api/user-info/:id
+// @access  Private (owner only)
+const deleteUserAccount = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  if (req.user.id !== id) {
+    return res.status(403).json({ message: "Not authorized to delete this account." });
+  }
+
+  const user = await User.findById(id).exec();
+  if (!user) {
+    return res.status(404).json({ message: "User not found." });
+  }
+
+  // Cleanup Cloudinary profile picture
+  if (user.profilePicture?.publicId) {
+    try {
+      await cloudinary.uploader.destroy(user.profilePicture.publicId);
+    } catch (err) {
+      console.error("[CLOUDINARY DELETE ERROR]", err);
+    }
+  }
+
+  // Delete the user record
+  await User.findByIdAndDelete(id);
+
+  res.status(200).json({
+    success: true,
+    message: "Your account and associated personal data have been permanently deleted.",
+  });
+});
+
+module.exports = {
+  lookupUserByEmail,
+  getUserById,
+  updateUser,
+  deleteUserAccount,
+};

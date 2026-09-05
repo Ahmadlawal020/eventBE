@@ -1,14 +1,14 @@
 const request = require("supertest");
 const crypto = require("crypto");
 const app = require("../app");
-const User = require("../models/user/user.schema");
-const Event = require("../models/user/event.schema");
-const EventTicketType = require("../models/user/eventTicketType.schema");
-const EventBooking = require("../models/user/eventBooking.schema");
-const UserEventTicket = require("../models/user/userEventTicket.schema");
-const EventCenter = require("../models/user/eventCenter.schema");
-const EventCenterBooking = require("../models/user/eventCenterBooking.schema");
-const StaffInvitation = require("../models/user/staffInvitation.schema");
+const User = require("../models/client/user.schema");
+const Event = require("../models/client/event.schema");
+const EventTicketType = require("../models/client/eventTicketType.schema");
+const EventBooking = require("../models/client/eventBooking.schema");
+const UserEventTicket = require("../models/client/userEventTicket.schema");
+const EventCenter = require("../models/client/eventCenter.schema");
+const EventCenterBooking = require("../models/client/eventCenterBooking.schema");
+const StaffInvitation = require("../models/client/staffInvitation.schema");
 const { generateAuthToken } = require("./setup");
 const { verifyQRPayload } = require("../utils/qr");
 

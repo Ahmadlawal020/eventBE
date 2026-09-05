@@ -1,9 +1,9 @@
 const { CronJob } = require("cron");
-const Ticket = require("../models/user/eventTicketType.schema");
-const Event = require("../models/user/event.schema");
-const UserEventTicket = require("../models/user/userEventTicket.schema");
-const EventCenterBooking = require("../models/user/eventCenterBooking.schema");
-const Notification = require("../models/user/notification.schema");
+const Ticket = require("../models/client/eventTicketType.schema");
+const Event = require("../models/client/event.schema");
+const UserEventTicket = require("../models/client/userEventTicket.schema");
+const EventCenterBooking = require("../models/client/eventCenterBooking.schema");
+const Notification = require("../models/client/notification.schema");
 const { dispatchNotification, dispatchBulkNotifications, NOTIFICATION_TYPES } = require("../services/notification");
 
 let isRunning = false;

@@ -1,12 +1,12 @@
 const request = require("supertest");
 const bcrypt = require("bcrypt");
 const app = require("../app");
-const User = require("../models/user/user.schema");
-const Event = require("../models/user/event.schema");
-const EventCenter = require("../models/user/eventCenter.schema");
-const StaffInvitation = require("../models/user/staffInvitation.schema");
-const CoOrganiserInvitation = require("../models/user/coOrganiserInvitation.schema");
-const StaffActivity = require("../models/user/staffActivity.schema");
+const User = require("../models/client/user.schema");
+const Event = require("../models/client/event.schema");
+const EventCenter = require("../models/client/eventCenter.schema");
+const StaffInvitation = require("../models/client/staffInvitation.schema");
+const CoOrganiserInvitation = require("../models/client/coOrganiserInvitation.schema");
+const StaffActivity = require("../models/client/staffActivity.schema");
 const { generateAuthToken } = require("./setup");
 
 // Mock dispatchNotification to avoid outbound email/push network requests during tests

@@ -1,11 +1,11 @@
 const request = require("supertest");
 const mongoose = require("mongoose");
 const app = require("../app");
-const User = require("../models/user/user.schema");
-const Event = require("../models/user/event.schema");
-const Conversation = require("../models/user/conversation.schema");
-const Message = require("../models/user/message.schema");
-const Notification = require("../models/user/notification.schema");
+const User = require("../models/client/user.schema");
+const Event = require("../models/client/event.schema");
+const Conversation = require("../models/client/conversation.schema");
+const Message = require("../models/client/message.schema");
+const Notification = require("../models/client/notification.schema");
 const { generateAuthToken } = require("./setup");
 
 describe("Messaging & Real-time Communications API (/api/messages & /api/notifications)", () => {

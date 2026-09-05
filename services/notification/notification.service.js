@@ -1,5 +1,5 @@
-const Notification = require("../../models/user/notification.schema");
-const User = require("../../models/user/user.schema");
+const Notification = require("../../models/client/notification.schema");
+const User = require("../../models/client/user.schema");
 const { sendPushNotifications } = require("./push.service");
 const { sendEmail } = require("../email.service");
 const emailTemplates = require("./emailTemplates");

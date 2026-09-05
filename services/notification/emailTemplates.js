@@ -36,7 +36,7 @@ const baseEmailLayout = (title, contentHtml) => `
       padding: 32px 32px 24px 32px;
       text-align: center;
       border-bottom: 1px solid #2D2D35;
-      background: linear-gradient(180deg, #23232A 0%, #1A1A1E 100%);
+      background-color: #23232A;
     }
     .logo {
       font-size: 24px;

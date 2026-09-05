@@ -1,0 +1,474 @@
+const User = require("../../models/client/user.schema");
+const CoOrganiserInvitation = require("../../models/client/coOrganiserInvitation.schema");
+const { dispatchNotification, NOTIFICATION_TYPES, emailTemplates } = require("../../services/notification");
+const Notification = require("../../models/client/notification.schema");
+
+/**
+ * Check if a user exists by email
+ */
+const checkUserByEmail = async (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) {
+      return res.status(400).json({ success: false, message: "Email is required" });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase() }).select("firstName surname email profilePicture");
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    res.json({
+      success: true,
+      message: "User found",
+      data: user,
+    });
+  } catch (error) {
+    console.error("[CHECK USER BY EMAIL] ERROR:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+/**
+ * Invite a Co-Organiser
+ */
+const inviteCoOrganiser = async (req, res) => {
+  try {
+    const { coOrganiserEmail, listings, permissions } = req.body;
+    const hostId = req.user.id;
+
+    if (!coOrganiserEmail || !listings || !permissions) {
+      return res.status(400).json({
+        success: false,
+        message: "Co-organiser email, listings, and permissions are required",
+      });
+    }
+
+    // 1. Prevent host from inviting themselves
+    const hostUser = await User.findById(hostId).select("firstName surname email").lean();
+    if (hostUser && hostUser.email && hostUser.email.toLowerCase() === coOrganiserEmail.toLowerCase()) {
+      return res.status(400).json({
+        success: false,
+        message: "You cannot invite yourself as a co-organiser",
+      });
+    }
+
+    // 2. Prevent duplicate active pending invitations for the same co-organiser
+    const existingInvitation = await CoOrganiserInvitation.findOne({
+      host: hostId,
+      coOrganiserEmail: coOrganiserEmail.toLowerCase(),
+      status: "PENDING",
+    });
+
+    if (existingInvitation) {
+      return res.status(400).json({
+        success: false,
+        message: "An active pending invitation already exists for this co-organiser email.",
+      });
+    }
+
+    // Check if co-organiser exists in the system
+    const coOrganiser = await User.findOne({ email: coOrganiserEmail.toLowerCase() });
+
+    // 3. Securely validate listing ownership & prevent inviting existing active co-organisers
+    const Event = require("../../models/client/event.schema");
+    const EventCenter = require("../../models/client/eventCenter.schema");
+
+    for (const item of listings) {
+      let listing;
+      if (item.listingType === "Event") {
+        listing = await Event.findOne({ _id: item.listingId, createdBy: hostId });
+      } else if (item.listingType === "EventCenter") {
+        listing = await EventCenter.findOne({ _id: item.listingId, createdBy: hostId });
+      }
+      if (!listing) {
+        return res.status(403).json({
+          success: false,
+          message: `Authorization failed: You do not own listing ${item.listingId}`,
+        });
+      }
+
+      if (coOrganiser && listing.coOrganisers && listing.coOrganisers.some(id => id.toString() === coOrganiser._id.toString())) {
+        return res.status(400).json({
+          success: false,
+          message: `User is already an active co-organiser for listing ${listing.title || listing.name || item.listingId}.`,
+        });
+      }
+    }
+
+    // Create the invitation
+    const invitation = await CoOrganiserInvitation.create({
+      host: hostId,
+      coOrganiserEmail: coOrganiserEmail.toLowerCase(),
+      coOrganiser: coOrganiser ? coOrganiser._id : null,
+      listings,
+      permissions,
+      status: "PENDING",
+    });
+
+    if (coOrganiser) {
+      const hostName = `${hostUser?.firstName || ""} ${hostUser?.surname || ""}`.trim() || "A host";
+
+      await dispatchNotification({
+        recipient: coOrganiser._id,
+        sender: hostId,
+        type: NOTIFICATION_TYPES.CO_ORGANISER_INVITATION,
+        title: "New Co-organiser Invitation 🤝",
+        message: `${hostName} invited you to be a co-organiser for one or more listings. Tap to review.`,
+        referenceId: invitation._id,
+        referenceType: "CoOrganiserInvitation",
+        data: {
+          screen: "CoOrganiserInvite",
+          invitationId: String(invitation._id),
+        },
+        email: {
+          subject: `Co-organiser Invitation from ${hostName} - Munasaba`,
+          html: emailTemplates.invitationTemplate({
+            recipientName: coOrganiser.firstName,
+            senderName: hostName,
+            roleName: "Co-Organiser",
+            listingNames: `${listings.length} listing(s)`,
+          }),
+        },
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      message: "Co-organiser invitation sent successfully",
+      data: invitation,
+    });
+  } catch (error) {
+    console.error("[INVITE CO-ORGANISER] ERROR:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+/**
+ * Get Co-Organiser Invitations (for the Host)
+ */
+const getMyCoOrganiserInvitations = async (req, res) => {
+  try {
+    const hostId = req.user.id;
+    const invitations = await CoOrganiserInvitation.find({ host: hostId })
+      .populate("coOrganiser", "firstName surname email profilePicture")
+      .sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      data: invitations,
+    });
+  } catch (error) {
+    console.error("[GET MY CO-ORGANISER INVITATIONS] ERROR:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+/**
+ * Get a specific Co-Organiser Invitation
+ */
+const getInvitationById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const invitation = await CoOrganiserInvitation.findById(id)
+      .populate("host", "firstName surname profilePicture")
+      .populate("listings.listingId", "title name venueName images bannerImage type");
+
+    if (!invitation) {
+      return res.status(404).json({ success: false, message: "Invitation not found" });
+    }
+
+    res.json({
+      success: true,
+      data: invitation,
+    });
+  } catch (error) {
+    console.error("[GET INVITATION] ERROR:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+/**
+ * Accept or Decline Invitation
+ */
+const respondToInvitation = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { action } = req.body; // "ACCEPTED" or "DECLINED"
+    const userId = req.user.id;
+
+    if (!["ACCEPTED", "DECLINED"].includes(action)) {
+      return res.status(400).json({ success: false, message: "Invalid action" });
+    }
+
+    const invitation = await CoOrganiserInvitation.findOneAndUpdate(
+      { _id: id, coOrganiser: userId, status: "PENDING" },
+      { status: action },
+      { new: true }
+    );
+
+    if (!invitation) {
+      return res.status(404).json({ success: false, message: "Invitation not found or already processed" });
+    }
+
+    // If accepted, add co-organiser to the actual listings
+    if (action === "ACCEPTED") {
+      const Event = require("../../models/client/event.schema");
+      const EventCenter = require("../../models/client/eventCenter.schema");
+
+      for (const item of invitation.listings) {
+        if (item.listingType === "Event") {
+          await Event.findByIdAndUpdate(item.listingId, {
+            $addToSet: { coOrganisers: userId },
+          });
+        } else if (item.listingType === "EventCenter") {
+          await EventCenter.findByIdAndUpdate(item.listingId, {
+            $addToSet: { coOrganisers: userId },
+          });
+        }
+      }
+    }
+
+    // Notify the host about the response
+    try {
+      const respondingUser = await User.findById(userId).select("firstName surname").lean();
+      const responderName = `${respondingUser?.firstName || ""} ${respondingUser?.surname || ""}`.trim() || "Invitee";
+
+      await dispatchNotification({
+        recipient: invitation.host,
+        sender: userId,
+        type: action === "ACCEPTED" ? NOTIFICATION_TYPES.CO_ORGANISER_ACCEPTED : NOTIFICATION_TYPES.CO_ORGANISER_DECLINED,
+        title: action === "ACCEPTED" ? "Co-Organiser Accepted ✅" : "Co-Organiser Declined ❌",
+        message: `${responderName} has ${action.toLowerCase()} your co-organiser invitation.`,
+        referenceId: invitation._id,
+        referenceType: "CoOrganiserInvitation",
+        data: {
+          screen: "CoOrganiserList",
+          invitationId: String(invitation._id),
+        },
+      });
+    } catch (notifErr) {
+      console.error("[CO-ORGANISER NOTIFICATION ERROR]", notifErr);
+    }
+
+    res.json({
+      success: true,
+      message: `Invitation ${action.toLowerCase()}`,
+      data: invitation,
+    });
+  } catch (error) {
+    console.error("[RESPOND INVITATION] ERROR:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+/**
+ * Remove a Co-Organiser from a listing
+ */
+const removeCoOrganiser = async (req, res) => {
+  try {
+    const { listingId, listingType, coOrganiserId } = req.body;
+    const hostId = req.user.id;
+
+    if (!listingId || !listingType || !coOrganiserId) {
+      return res.status(400).json({ success: false, message: "Missing required fields" });
+    }
+
+    const Event = require("../../models/client/event.schema");
+    const EventCenter = require("../../models/client/eventCenter.schema");
+
+    let listing;
+    if (listingType === "Event") {
+      listing = await Event.findById(listingId);
+    } else {
+      listing = await EventCenter.findById(listingId);
+    }
+
+    if (!listing) {
+      return res.status(404).json({ success: false, message: "Listing not found" });
+    }
+
+    // Authorize: Either the user is the original owner (createdBy === hostId)
+    // OR the user is the co-organiser removing themselves (coOrganiserId === hostId)
+    const isOwner = listing.createdBy && listing.createdBy.toString() === hostId.toString();
+    const isRemovingSelf = coOrganiserId && coOrganiserId.toString() === hostId.toString();
+
+    if (!isOwner && !isRemovingSelf) {
+      return res.status(403).json({ success: false, message: "Not authorized to manage this listing" });
+    }
+
+    // If a co-organiser is removing themselves, require password verification
+    if (isRemovingSelf) {
+      const User = require("../../models/client/user.schema");
+      const user = await User.findById(hostId).select("password authProvider");
+      if (!user) {
+        return res.status(404).json({ success: false, message: "User not found" });
+      }
+
+      const isGoogleOnly = user.authProvider === "google" && !user.password;
+
+      if (!isGoogleOnly) {
+        const { password } = req.body;
+        if (!password) {
+          return res.status(400).json({ success: false, message: "Password is required to leave the listing" });
+        }
+
+        if (user.password) {
+          const bcrypt = require("bcrypt");
+          const isMatch = await bcrypt.compare(password, user.password);
+          if (!isMatch) {
+            return res.status(401).json({ success: false, message: "Incorrect password" });
+          }
+        }
+      }
+    }
+
+    // Remove from listing
+    if (listingType === "Event") {
+      await Event.findByIdAndUpdate(listingId, { $pull: { coOrganisers: coOrganiserId } });
+    } else {
+      await EventCenter.findByIdAndUpdate(listingId, { $pull: { coOrganisers: coOrganiserId } });
+    }
+
+    // Update invitation status: remove listing from invitation, set to DECLINED only if no listings left
+    const invitation = await CoOrganiserInvitation.findOne({
+      coOrganiser: coOrganiserId,
+      "listings.listingId": listingId,
+      status: "ACCEPTED"
+    });
+
+    if (invitation) {
+      if (invitation.listings.length > 1) {
+        invitation.listings = invitation.listings.filter(
+          item => item.listingId.toString() !== listingId.toString()
+        );
+        await invitation.save();
+      } else {
+        invitation.status = "DECLINED";
+        await invitation.save();
+      }
+    }
+
+    res.json({
+      success: true,
+      message: isRemovingSelf ? "You have successfully left the listing" : "Co-organiser removed successfully",
+    });
+  } catch (error) {
+    console.error("[REMOVE CO-ORGANISER] ERROR:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+/**
+ * Update Co-Organiser Permissions
+ */
+const updateCoOrganiserPermissions = async (req, res) => {
+  try {
+    const { listingId, coOrganiserId, permissions } = req.body;
+    const hostId = req.user.id;
+
+    if (!listingId || !coOrganiserId || !permissions) {
+      return res.status(400).json({ success: false, message: "Missing required fields" });
+    }
+
+    // Find the active invitation for this co-organiser and listing
+    const invitation = await CoOrganiserInvitation.findOneAndUpdate(
+      { 
+        host: hostId, 
+        coOrganiser: coOrganiserId, 
+        "listings.listingId": listingId,
+        status: "ACCEPTED" 
+      },
+      { permissions },
+      { new: true }
+    );
+
+    if (!invitation) {
+      return res.status(404).json({ success: false, message: "Active invitation not found" });
+    }
+
+    res.json({
+      success: true,
+      message: "Permissions updated successfully",
+      data: invitation,
+    });
+  } catch (error) {
+    console.error("[UPDATE PERMISSIONS] ERROR:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+/**
+ * Cancel a pending invitation (by the Host)
+ */
+const cancelInvitation = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const hostId = req.user.id;
+
+    const invitation = await CoOrganiserInvitation.findOneAndDelete({
+      _id: id,
+      host: hostId,
+      status: "PENDING"
+    });
+
+    if (!invitation) {
+      return res.status(404).json({ success: false, message: "Pending invitation not found" });
+    }
+
+    // Proactively clean up notification reference
+    await Notification.deleteMany({ referenceId: id });
+
+    res.json({
+      success: true,
+      message: "Invitation cancelled successfully"
+    });
+  } catch (error) {
+    console.error("[CANCEL INVITATION] ERROR:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+/**
+ * Get Received Co-Organiser Invitations (for the Co-Organiser)
+ */
+const getReceivedInvitations = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const user = await User.findById(userId).select("email");
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    // Proactively bind invitations that were sent to this user's email before they registered
+    await CoOrganiserInvitation.updateMany(
+      { coOrganiserEmail: user.email.toLowerCase(), coOrganiser: null },
+      { $set: { coOrganiser: userId } }
+    );
+
+    const invitations = await CoOrganiserInvitation.find({ coOrganiser: userId })
+      .populate("host", "firstName surname email profilePicture")
+      .populate("listings.listingId", "title name venueName images bannerImage type")
+      .sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      data: invitations,
+    });
+  } catch (error) {
+    console.error("[GET RECEIVED INVITATIONS] ERROR:", error);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+};
+
+module.exports = {
+  checkUserByEmail,
+  inviteCoOrganiser,
+  getMyCoOrganiserInvitations,
+  getInvitationById,
+  respondToInvitation,
+  removeCoOrganiser,
+  updateCoOrganiserPermissions,
+  getReceivedInvitations,
+  cancelInvitation,
+};

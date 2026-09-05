@@ -1,5 +1,6 @@
 const { CronJob } = require("cron");
-const Event = require("../models/user/event.schema");
+const Event = require("../models/client/event.schema");
+const { getEventSettings } = require("../services/eventSettings.service");
 
 /**
  * Mark past events as COMPLETED
@@ -9,16 +10,23 @@ const Event = require("../models/user/event.schema");
  */
 const markCompletedEvents = async () => {
   try {
+    const settings = await getEventSettings();
+    if (!settings.lifecycle.autoCompletePastEvents) return;
+    const completionCutoff = new Date(
+      Date.now() - settings.lifecycle.completionGraceHours * 3600000,
+    );
     const result = await Event.updateMany(
       {
         status: { $in: ["LISTED", "ACTION_REQUIRED", "UNLISTED"] },
-        "schedule.to": { $lt: new Date() },
+        "schedule.to": { $lt: completionCutoff },
       },
-      { $set: { status: "COMPLETED" } }
+      { $set: { status: "COMPLETED" } },
     );
 
     if (result.modifiedCount > 0) {
-      console.log(`[Event Completion] Marked ${result.modifiedCount} event(s) as COMPLETED`);
+      console.log(
+        `[Event Completion] Marked ${result.modifiedCount} event(s) as COMPLETED`,
+      );
     }
   } catch (err) {
     console.error("[Event Completion] Error:", err);

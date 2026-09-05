@@ -1,6 +1,6 @@
 const request = require("supertest");
 const app = require("../app");
-const User = require("../models/user/user.schema");
+const User = require("../models/client/user.schema");
 const { generateAuthToken } = require("./setup");
 
 describe("Authentication API (/api/auth)", () => {

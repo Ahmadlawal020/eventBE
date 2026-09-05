@@ -1,10 +1,10 @@
 const crypto = require("crypto");
 const mongoose = require("mongoose");
-const User = require("../models/user/user.schema");
-const ReferralEarning = require("../models/user/referralEarning.schema");
-const Event = require("../models/user/event.schema");
-const EventCenter = require("../models/user/eventCenter.schema");
-const PlatformFees = require("../models/admin/platformFees.schema");
+const User = require("../models/client/user.schema");
+const ReferralEarning = require("../models/client/referralEarning.schema");
+const Event = require("../models/client/event.schema");
+const EventCenter = require("../models/client/eventCenter.schema");
+const PlatformFees = require("../models/management/platformFees.schema");
 const { dispatchNotification } = require("./notification");
 const { NOTIFICATION_TYPES } = require("../constants/notificationTypes");
 

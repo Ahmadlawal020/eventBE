@@ -1,10 +1,10 @@
 const request = require("supertest");
 const app = require("../app");
-const User = require("../models/user/user.schema");
-const Event = require("../models/user/event.schema");
-const EventBooking = require("../models/user/eventBooking.schema");
-const EventCenter = require("../models/user/eventCenter.schema");
-const EventCenterBooking = require("../models/user/eventCenterBooking.schema");
+const User = require("../models/client/user.schema");
+const Event = require("../models/client/event.schema");
+const EventBooking = require("../models/client/eventBooking.schema");
+const EventCenter = require("../models/client/eventCenter.schema");
+const EventCenterBooking = require("../models/client/eventCenterBooking.schema");
 const { generateAuthToken } = require("./setup");
 
 describe("Finance Dashboard & Revenue API (/api/finance-dashboard)", () => {
