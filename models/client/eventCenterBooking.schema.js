@@ -45,6 +45,8 @@ const eventCenterTicketSchema = new mongoose.Schema(
       amount: { type: Number, required: true },
       currency: { type: String, default: "NGN" },
     },
+    referralQualifiedAt: { type: Date, default: null },
+    referralPaymentAt: { type: Date, default: null },
     paymentStatus: {
       type: String,
       enum: ["PENDING", "COMPLETED", "FAILED", "REFUNDED", "FAILED_REFUND"],
@@ -128,4 +130,9 @@ eventCenterTicketSchema.index({ eventCenter: 1, status: 1 });
 eventCenterTicketSchema.index({ status: 1, reviewDeadline: 1 });
 
 
+eventCenterTicketSchema.pre("save", function () {
+  const accepted = this.bookingMode !== "REVIEW" || ["CONFIRMED", "COMPLETED"].includes(this.status);
+  if (!this.referralQualifiedAt && this.paymentStatus === "COMPLETED" && accepted &&
+      (this.isNew || this.isModified("paymentStatus") || this.isModified("status"))) this.referralQualifiedAt = this.bookingMode === "REVIEW" ? new Date(Math.max(new Date(this.referralPaymentAt || Date.now()), new Date(this.reviewedAt || Date.now()))) : this.referralPaymentAt || new Date();
+});
 module.exports = mongoose.model("EventCenterBooking", eventCenterTicketSchema, "eventcentertickets");

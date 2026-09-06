@@ -30,6 +30,8 @@ const eventBookingSchema = new Schema(
     ],
     totalAmount: { type: Number, required: true }, // in cents
     currency: { type: String, default: "NGN" },
+    referralQualifiedAt: { type: Date, default: null },
+    referralPaymentAt: { type: Date, default: null },
     paymentStatus: {
       type: String,
       enum: ["PENDING", "COMPLETED", "FAILED", "REFUNDED"],
@@ -59,4 +61,8 @@ const eventBookingSchema = new Schema(
   { timestamps: true }
 );
 
+eventBookingSchema.pre("save", function () {
+  if (!this.referralQualifiedAt && this.paymentStatus === "COMPLETED" &&
+      (this.isNew || this.isModified("paymentStatus"))) this.referralQualifiedAt = this.referralPaymentAt || new Date();
+});
 module.exports = model("EventBooking", eventBookingSchema);

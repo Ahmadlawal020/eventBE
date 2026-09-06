@@ -8,6 +8,9 @@
     "dev": "nodemon server",
     "create-admin": "node scripts/createAdmin.js",
     "test": "cross-env NODE_ENV=test jest --runInBand --detectOpenHandles --forceExit",
+    "test:referral:dev": "node scripts/testReferrals.js",
+    "test:referral:unit": "node --test tests/referralPolicy.unit.spec.js",
+    "test:referral": "jest --config jest.referral.config.js --runInBand",
     "test:watch": "cross-env NODE_ENV=test jest --watch",
     "test:coverage": "cross-env NODE_ENV=test jest --coverage --runInBand --forceExit"
   },

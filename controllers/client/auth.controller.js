@@ -39,7 +39,7 @@ const handleCheckUser = asyncHandler(async (req, res) => {
   });
 });
 
-const { generateReferralCode } = require("../../services/referral.service");
+
 
 // authController.js - Update handleSignup
 const handleSignup = asyncHandler(async (req, res) => {
@@ -91,8 +91,6 @@ const handleSignup = asyncHandler(async (req, res) => {
     hashedPassword = await bcrypt.hash(password, 10);
   }
 
-  const generatedCode = await generateReferralCode({ firstName, surname });
-
   const userData = {
     firstName,
     surname,
@@ -102,7 +100,6 @@ const handleSignup = asyncHandler(async (req, res) => {
     authProvider,
     isEmailVerified: true,
     emailVerifiedAt: new Date(),
-    referralCode: generatedCode,
   };
 
   if (googleId) {
@@ -110,9 +107,15 @@ const handleSignup = asyncHandler(async (req, res) => {
   }
 
   // If user provided a referral code, link referrer
-  if (incomingReferralCode && typeof incomingReferralCode === "string") {
+  if (incomingReferralCode !== undefined && incomingReferralCode !== "") {
+    if (typeof incomingReferralCode !== "string" || !incomingReferralCode.trim()) {
+      return res.status(400).json({ success: false, message: "Referral code is invalid" });
+    }
     const cleanCode = incomingReferralCode.trim().toUpperCase();
-    const referrer = await User.findOne({ referralCode: cleanCode }).select("_id").lean();
+    const referrer = await User.findOne({ referralCode: cleanCode, isActive: { $ne: false } }).select("_id").lean();
+    if (!referrer) {
+      return res.status(400).json({ success: false, message: "Invalid referral code. Please check it and try again." });
+    }
     if (referrer) {
       userData.referredBy = referrer._id;
       userData.referredAt = new Date();

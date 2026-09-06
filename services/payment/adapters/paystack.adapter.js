@@ -192,6 +192,7 @@ class PaystackAdapter extends PaymentGateway {
         name: customer?.first_name ? `${customer.first_name} ${customer.last_name || ""}`.trim() : "",
       },
       metadata: metadata || {},
+      paidAt: data?.paid_at || data?.paidAt || null,
       gateway: "paystack",
       rawEvent: body,
     };

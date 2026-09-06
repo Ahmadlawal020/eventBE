@@ -1,3 +1,4 @@
+const { recordBookingReferral } = require("../../services/referral.service");
 const EventCenterBooking = require("../../models/client/eventCenterBooking.schema");
 const EventBooking = require("../../models/client/eventBooking.schema");
 const EventCenter = require("../../models/client/eventCenter.schema");
@@ -20,12 +21,13 @@ const gateway = getPaymentGateway();
 // EVENT TICKET BOOKING WEBHOOK HANDLER
 // ============================================================================
 
-const handleEventTicketWebhook = async (reference, metadata, customer) => {
+const handleEventTicketWebhook = async (reference, metadata, customer, paidAt) => {
   const { eventId, buyerId, items, totalAmount, fullName, phoneNumber } = metadata;
 
   // 1. Idempotency: check if booking already exists and is completed
   const existingBooking = await EventBooking.findOne({ paymentReference: reference });
   if (existingBooking && existingBooking.paymentStatus === "COMPLETED") {
+    await recordBookingReferral(existingBooking._id, "EVENT_TICKET");
     console.log(`[WEBHOOK] Event ticket booking already completed for ref ${reference}`);
     return;
   }
@@ -33,6 +35,7 @@ const handleEventTicketWebhook = async (reference, metadata, customer) => {
   // 2. Create or update booking
   let booking;
   if (existingBooking) {
+    existingBooking.referralPaymentAt = paidAt || new Date();
     existingBooking.paymentStatus = "COMPLETED";
     booking = await existingBooking.save();
   } else {
@@ -58,12 +61,14 @@ const handleEventTicketWebhook = async (reference, metadata, customer) => {
         paymentMethod: "CARD",
         paymentReference: reference,
         paymentStatus: "COMPLETED",
+        referralPaymentAt: paidAt || new Date(),
       });
     } catch (err) {
       if (err.code === 11000) {
         // Duplicate key race condition — fetch existing
         booking = await EventBooking.findOne({ paymentReference: reference });
         if (booking && booking.paymentStatus !== "COMPLETED") {
+          booking.referralPaymentAt = paidAt || new Date();
           booking.paymentStatus = "COMPLETED";
           booking = await booking.save();
         }
@@ -72,6 +77,8 @@ const handleEventTicketWebhook = async (reference, metadata, customer) => {
       }
     }
   }
+
+  if (booking) await recordBookingReferral(booking._id, "EVENT_TICKET");
 
   // 3. Generate individual tickets (idempotent — skip if tickets already exist)
   if (booking) {
@@ -92,19 +99,6 @@ const handleEventTicketWebhook = async (reference, metadata, customer) => {
         reference,
       });
 
-      // 5. Process Referral Commission for Organiser Referrer
-      if (eventDoc?.createdBy) {
-        const { processReferralCommission } = require("../../services/referral.service");
-        const amountInNaira = Number(totalAmount || booking.totalAmount || 0) / 100;
-        await processReferralCommission({
-          organiserId: eventDoc.createdBy,
-          sourceType: "EVENT_TICKET",
-          bookingId: booking._id,
-          bookingReference: reference,
-          totalAmount: amountInNaira,
-          eventId: eventDoc._id,
-        });
-      }
     } catch (notifErr) {
       console.error("[WEBHOOK] Error dispatching event ticket notifications / referral commission:", notifErr);
     }
@@ -133,12 +127,12 @@ const handlePaymentWebhook = async (req, res) => {
     return res.status(200).send("Transaction not successful");
   }
 
-  const { reference, metadata, customer } = normalizedEvent;
+  const { reference, metadata, customer, paidAt } = normalizedEvent;
 
   // 3. Route to the correct handler based on booking type
   if (metadata?.type === "EVENT_TICKET") {
     try {
-      await handleEventTicketWebhook(reference, metadata, customer);
+      await handleEventTicketWebhook(reference, metadata, customer, paidAt);
       return res.status(200).send("OK");
     } catch (err) {
       console.error(`[EVENT_TICKET WEBHOOK ERROR]`, err);
@@ -157,6 +151,7 @@ const handlePaymentWebhook = async (req, res) => {
     });
 
     if (existing && existing.paymentStatus === "COMPLETED") {
+      await recordBookingReferral(existing._id, "EVENT_CENTER_BOOKING");
       console.log(`[${gateway.name.toUpperCase()} WEBHOOK] Ticket already exists for ref ${reference}`);
       return res.status(200).send("Already processed");
     }
@@ -186,6 +181,7 @@ const handlePaymentWebhook = async (req, res) => {
     let ticket;
 
     if (existing) {
+      existing.referralPaymentAt = paidAt || new Date();
       existing.paymentStatus = "COMPLETED";
       if (isReviewMode) {
         existing.status = "PENDING_REVIEW";
@@ -215,6 +211,7 @@ const handlePaymentWebhook = async (req, res) => {
           totalPrice,
           paymentReference: reference,
           paymentStatus: "COMPLETED",
+          referralPaymentAt: paidAt || new Date(),
         };
 
         if (isReviewMode) {
@@ -233,6 +230,7 @@ const handlePaymentWebhook = async (req, res) => {
           console.log(`[${gateway.name.toUpperCase()} WEBHOOK] Duplicate key for ref ${reference}, fetching existing`);
           ticket = await EventCenterBooking.findOne({ paymentReference: reference });
           if (ticket && ticket.paymentStatus !== "COMPLETED") {
+            ticket.referralPaymentAt = paidAt || new Date();
             ticket.paymentStatus = "COMPLETED";
             if (isReviewMode) {
               ticket.status = "PENDING_REVIEW";
@@ -251,6 +249,8 @@ const handlePaymentWebhook = async (req, res) => {
         }
       }
     }
+
+    if (ticket) await recordBookingReferral(ticket._id, "EVENT_CENTER_BOOKING");
 
     // 7. Mark dates/slots unavailable on EventCenter (both INSTANT and REVIEW modes)
     if (ticket) {
@@ -343,24 +343,6 @@ const handlePaymentWebhook = async (req, res) => {
       guestName: fullName || ticket.guestDetails?.fullName || "",
       totalPrice: ticket.totalPrice,
     });
-
-    // Process Referral Commission for Organiser Referrer (for INSTANT bookings where payment completes immediately)
-    if (!isReviewMode && ticket) {
-      try {
-        const { processReferralCommission } = require("../../services/referral.service");
-        const amountInNaira = Number(totalPrice?.amount || ticket.totalPrice?.amount || 0);
-        await processReferralCommission({
-          organiserId,
-          sourceType: "EVENT_CENTER_BOOKING",
-          bookingId: ticket._id,
-          bookingReference: reference,
-          totalAmount: amountInNaira,
-          eventCenterId,
-        });
-      } catch (refErr) {
-        console.error("[WEBHOOK] Error processing referral commission for venue booking:", refErr);
-      }
-    }
 
     console.log(`[${gateway.name.toUpperCase()} WEBHOOK] Successfully processed ref ${reference} (mode: ${isReviewMode ? "REVIEW" : "INSTANT"})`);
     return res.status(200).send("OK");

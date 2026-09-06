@@ -60,6 +60,15 @@ const referralEarningSchema = new mongoose.Schema(
       type: String,
       default: "NGN",
     },
+    qualifiedAt: { type: Date, default: null, index: true },
+    policyVersions: [{ key: String, version: Number, _id: false }],
+    adjustments: [{
+      requestId: { type: mongoose.Schema.Types.ObjectId, ref: "ReferralAdjustment" },
+      previousRate: Number, previousAmount: Number,
+      newRate: Number, newAmount: Number,
+      changedAt: Date, changedBy: { type: mongoose.Schema.Types.ObjectId, ref: "Staff" },
+      _id: false,
+    }],
     notes: {
       type: String,
       default: "",

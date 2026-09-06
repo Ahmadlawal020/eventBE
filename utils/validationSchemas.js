@@ -8,6 +8,7 @@ const signupSchema = Joi.object({
   dob: Joi.date().required(),
   authProvider: Joi.string().valid('local', 'google').default('local'),
   googleId: Joi.string().allow(null, ''),
+  referralCode: Joi.string().trim().max(64).allow('').optional(),
   googleSignupToken: Joi.string().when('authProvider', {
     is: 'google', then: Joi.required(), otherwise: Joi.forbidden(),
   }),

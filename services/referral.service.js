@@ -1,229 +1,116 @@
-const crypto = require("crypto");
 const mongoose = require("mongoose");
 const User = require("../models/client/user.schema");
 const ReferralEarning = require("../models/client/referralEarning.schema");
 const Event = require("../models/client/event.schema");
 const EventCenter = require("../models/client/eventCenter.schema");
-const PlatformFees = require("../models/management/platformFees.schema");
+const EventBooking = require("../models/client/eventBooking.schema");
+const EventCenterBooking = require("../models/client/eventCenterBooking.schema");
+const { codeForUser } = require("../utils/referralCode");
+const { getEffectivePolicy, getEntryEligibility } = require("./referralPolicy.service");
+const { addPeriod } = require("../utils/referralPolicy");
 const { dispatchNotification } = require("./notification");
 const { NOTIFICATION_TYPES } = require("../constants/notificationTypes");
 
-/**
- * Generate a unique, short, human-friendly uppercase referral code (e.g. MN4X9K)
- */
-const generateReferralCode = async (user) => {
-  let isUnique = false;
-  let code = "";
-  let attempts = 0;
-
-  while (!isUnique && attempts < 10) {
-    attempts++;
-    const randomSuffix = crypto.randomBytes(3).toString("hex").toUpperCase();
-    code = `MN${randomSuffix}`;
-
-    const existing = await User.findOne({ referralCode: code }).select("_id").lean();
-    if (!existing) {
-      isUnique = true;
-    }
-  }
-
-  // Fallback if collision
-  if (!isUnique) {
-    code = `MN${Date.now().toString(36).toUpperCase().slice(-6)}`;
-  }
-
-  return code;
-};
-
-/**
- * Ensure user has a referral code assigned. Generates and saves if missing.
- */
 const ensureUserReferralCode = async (userDocOrId) => {
-  let user = typeof userDocOrId === "object" ? userDocOrId : await User.findById(userDocOrId);
-  if (!user) return null;
-
-  if (!user.referralCode) {
-    user.referralCode = await generateReferralCode(user);
-    await user.save();
-  }
-
-  return user.referralCode;
+  const id = userDocOrId?._id || userDocOrId;
+  const assigned = await User.findOneAndUpdate(
+    { _id: id, $or: [{ referralCode: { $exists: false } }, { referralCode: null }, { referralCode: "" }] },
+    { $set: { referralCode: codeForUser(id) } }, { new: true }
+  ).select("referralCode").lean();
+  const user = assigned || await User.findById(id).select("referralCode").lean();
+  return user?.referralCode || null;
 };
 
-/**
- * Process referral commission when a referred organiser sells a ticket or gets a venue booking.
- * Idempotent: safe to be called multiple times for the same booking.
- * 
- * @param {Object} params
- * @param {string|ObjectId} params.organiserId - The organiser who made the sale
- * @param {string} params.sourceType - "EVENT_TICKET" | "EVENT_CENTER_BOOKING"
- * @param {string|ObjectId} params.bookingId - EventBooking or EventCenterBooking ID
- * @param {string} params.bookingReference - Payment or booking reference
- * @param {number} params.totalAmount - Total price of ticket or booking in Naira (NGN)
- * @param {string|ObjectId} [params.eventId] - Event ID if applicable
- * @param {string|ObjectId} [params.eventCenterId] - EventCenter ID if applicable
- */
-const processReferralCommission = async ({
-  organiserId,
-  sourceType,
-  bookingId,
-  bookingReference,
-  totalAmount,
-  eventId = null,
-  eventCenterId = null,
-}) => {
+// Only persisted bookings determine ownership, payment, currency and sale value.
+// The earnings ledger is the source of balances; a separate counter could drift.
+const processReferralCommission = async ({ sourceType, bookingId, notify = true }) => {
+  const isTicket = sourceType === "EVENT_TICKET";
+  if (!isTicket && sourceType !== "EVENT_CENTER_BOOKING") throw new Error("Invalid referral source");
+  const Booking = isTicket ? EventBooking : EventCenterBooking;
+  const booking = await Booking.findById(bookingId).lean();
+  if (!booking) return null;
+  const existing = await ReferralEarning.findOne({ bookingId, sourceType });
+  if (booking.paymentStatus === "REFUNDED" || booking.paymentStatus === "FAILED_REFUND" || booking.status === "CANCELLED") {
+    if (existing && existing.status !== "REFUNDED") {
+      await ReferralEarning.updateOne({ _id: existing._id }, { $set: { status: "REFUNDED", notes: "Source booking cancelled or refunded" } });
+      existing.status = "REFUNDED";
+    }
+    return existing;
+  }
+  const isPending = booking.paymentStatus !== "COMPLETED" || (!isTicket &&
+    (booking.status === "PENDING_REVIEW" ||
+      (booking.bookingMode === "REVIEW" && !["CONFIRMED", "COMPLETED"].includes(booking.status))));
+  if (isPending) {
+    if (existing?.status === "COMPLETED") {
+      await ReferralEarning.updateOne({ _id: existing._id, status: "COMPLETED" }, { $set: { status: "PENDING" } });
+      existing.status = "PENDING";
+    }
+    return existing || null;
+  }
+  if (existing && existing.status !== "PENDING") return existing;
+  const listing = isTicket
+    ? await Event.findById(booking.eventId).select("createdBy").lean()
+    : await EventCenter.findById(booking.eventCenter).select("createdBy").lean();
+  const organiserId = listing?.createdBy;
+  if (!organiserId) return null;
+  const organiser = await User.findById(organiserId).select("firstName surname referredBy referredAt createdAt").lean();
+  if (!organiser?.referredBy || String(organiser.referredBy) === String(organiserId)) return null;
+  const referrer = await User.findById(organiser.referredBy).select("isActive").lean();
+  if (!referrer || referrer.isActive === false) return null;
+  const totalAmount = isTicket ? Number(booking.totalAmount) / 100 : Number(booking.totalPrice?.amount);
+  const currency = isTicket ? booking.currency : booking.totalPrice?.currency;
+  const bookingReference = booking.paymentReference || booking.paystackReference;
+  if (!bookingReference || (currency && currency !== "NGN") || !Number.isFinite(totalAmount) || totalAmount <= 0) return null;
+  const qualifiedAt = new Date(booking.referralQualifiedAt || booking.reviewedAt || booking.createdAt);
+  const settings = await getEffectivePolicy(referrer._id, qualifiedAt);
+  const percent = settings.commissionPercentage;
+  if (settings.status !== "ACTIVE" || !Number.isFinite(percent) || percent <= 0) return null;
+  const referredAt = new Date(organiser.referredAt || organiser.createdAt);
+  // Linking a code cannot claim a sale that was already created before attribution.
+  if (new Date(booking.createdAt) < referredAt) return null;
+  const start = settings.startedAt && new Date(settings.startedAt) > referredAt ? new Date(settings.startedAt) : referredAt;
+  const expiresAt = addPeriod(start, settings.duration);
+  if (qualifiedAt < start || (expiresAt && qualifiedAt > expiresAt)) return null;
+  const commissionAmount = Math.round(totalAmount * percent) / 100;
+  if (!Number.isFinite(commissionAmount) || commissionAmount <= 0) return null;
+  let earning;
   try {
-    if (!organiserId || !bookingReference || !totalAmount || totalAmount <= 0) {
-      return null;
-    }
-
-    // 1. Fetch Organiser
-    const organiser = await User.findById(organiserId)
-      .select("firstName surname email referredBy referredAt createdAt roles")
-      .lean();
-
-    if (!organiser || !organiser.referredBy) {
-      // Organiser was not referred by anyone
-      return null;
-    }
-
-    const referrerId = String(organiser.referredBy);
-    if (referrerId === String(organiserId)) {
-      // Prevent self-referral
-      return null;
-    }
-
-    // 2. Fetch Referrer
-    const referrer = await User.findById(referrerId)
-      .select("firstName surname email isActive")
-      .lean();
-
-    if (!referrer || referrer.isActive === false) {
-      return null;
-    }
-
-    // 3. Fetch Platform Fees & Referral Settings
-    const platformFees = await PlatformFees.findOneAndUpdate(
-      { key: "platform_fees" },
-      { $setOnInsert: { key: "platform_fees" } },
-      { upsert: true, new: true }
-    ).lean();
-
-    if (platformFees.referralProgramEnabled === false) {
-      return null;
-    }
-
-    const commissionPercent = Number(platformFees.referralCommission ?? 5);
-    if (commissionPercent <= 0) {
-      return null;
-    }
-
-    // 4. Validate Referral Duration Window
-    const durationDays = Number(platformFees.referralDurationDays ?? 90);
-    if (durationDays > 0) {
-      const referralStart = new Date(organiser.referredAt || organiser.createdAt || Date.now());
-      const now = new Date();
-      const elapsedDays = (now.getTime() - referralStart.getTime()) / (1000 * 60 * 60 * 24);
-
-      if (elapsedDays > durationDays) {
-        console.log(`[REFERRAL] Commission expired for organiser ${organiserId} (referred ${Math.round(elapsedDays)} days ago, window is ${durationDays} days)`);
-        return null;
-      }
-    }
-
-    // 5. Calculate Commission Amount in Naira
-    const commissionAmount = Math.round(((totalAmount * commissionPercent) / 100) * 100) / 100;
-    if (commissionAmount <= 0) {
-      return null;
-    }
-
-    // 6. Check for existing commission record (Idempotency)
-    const existing = await ReferralEarning.findOne({
-      bookingReference,
-      referrer: referrerId,
-      sourceType,
-    });
-
-    if (existing) {
-      console.log(`[REFERRAL] Commission already recorded for booking ${bookingReference}`);
-      return existing;
-    }
-
-    // 7. Create ReferralEarning Record
-    let earning;
-    try {
-      earning = await ReferralEarning.create({
-        referrer: referrerId,
-        referredUser: organiserId,
-        sourceType,
-        eventId: eventId || null,
-        eventCenterId: eventCenterId || null,
-        bookingId,
-        bookingReference,
-        totalAmount,
-        commissionPercentage: commissionPercent,
-        commissionAmount,
-        status: "COMPLETED",
-        currency: "NGN",
-      });
-    } catch (err) {
-      if (err.code === 11000) {
-        // Race condition: already created
-        return await ReferralEarning.findOne({
-          bookingReference,
-          referrer: referrerId,
-          sourceType,
-        });
-      }
-      throw err;
-    }
-
-    // 8. Atomically increment referrer's total referral earnings
-    await User.findByIdAndUpdate(referrerId, {
-      $inc: { referralEarnings: commissionAmount },
-    });
-
-    // 9. Dispatch Real-Time Notification & Email to Referrer
-    try {
-      const organiserName = `${organiser.firstName || ""} ${organiser.surname || ""}`.trim() || "Your referred organiser";
-      const itemDescription = sourceType === "EVENT_TICKET" ? "ticket sale" : "event center booking";
-      const formattedAmount = `₦${commissionAmount.toLocaleString()}`;
-
-      await dispatchNotification({
-        recipient: referrerId,
-        sender: organiserId,
-        type: NOTIFICATION_TYPES.REFERRAL_REWARD,
-        title: "Referral Reward Earned! 💰",
-        message: `You earned ${formattedAmount} (${commissionPercent}%) from ${organiserName}'s ${itemDescription}!`,
-        referenceId: earning._id,
-        referenceType: "ReferralEarning",
-        data: {
-          screen: "Referral",
-          earningId: String(earning._id),
-          amount: String(commissionAmount),
-        },
-        email: {
-          subject: `You earned ${formattedAmount} referral commission! - Munasaba`,
-          html: `
-            <div style="font-family: Arial, sans-serif; padding: 20px; color: #111;">
-              <h2 style="color: #00A699;">Congratulations! 🎉</h2>
-              <p>You earned a referral commission of <strong>${formattedAmount}</strong> (${commissionPercent}%) on Munasaba.</p>
-              <p><strong>Organiser:</strong> ${organiserName}</p>
-              <p><strong>Activity:</strong> ${sourceType === "EVENT_TICKET" ? "Event Ticket Sale" : "Venue Booking"}</p>
-              <p><strong>Total Sale Value:</strong> ₦${totalAmount.toLocaleString()}</p>
-              <p style="margin-top: 24px;">The rewards have been added to your Munasaba balance.</p>
-            </div>
-          `,
-        },
-      });
-    } catch (notifErr) {
-      console.error("[REFERRAL] Error dispatching reward notification:", notifErr);
-    }
-
-    console.log(`[REFERRAL] Successfully credited ${commissionAmount} NGN to referrer ${referrerId} for booking ${bookingReference}`);
-    return earning;
+    const values = {
+      referrer: referrer._id, referredUser: organiserId, sourceType, bookingId,
+      bookingReference, totalAmount, commissionPercentage: percent, commissionAmount,
+      eventId: isTicket ? booking.eventId : null,
+      eventCenterId: isTicket ? null : booking.eventCenter,
+      currency: "NGN", status: "COMPLETED", qualifiedAt, policyVersions: settings.policyVersions,
+    };
+    earning = existing
+      ? await ReferralEarning.findOneAndUpdate({ _id: existing._id, status: "PENDING" }, { $set: values }, { new: true })
+      : await ReferralEarning.create(values);
+    if (!earning) return ReferralEarning.findById(existing._id);
   } catch (error) {
-    console.error("[REFERRAL COMMISSION ERROR]", error);
+    if (error.code !== 11000) throw error;
+    return ReferralEarning.findOne({ bookingReference, referrer: referrer._id, sourceType });
+  }
+  if (!notify) return earning;
+  try {
+    await dispatchNotification({
+      recipient: referrer._id, sender: organiserId, type: NOTIFICATION_TYPES.REFERRAL_REWARD,
+      title: "Referral reward earned",
+      message: "You earned NGN " + commissionAmount.toLocaleString() + " from a referred host's " + (isTicket ? "ticket sale." : "venue booking."),
+      referenceId: earning._id, referenceType: "ReferralEarning",
+      data: { screen: "Referral", earningId: String(earning._id), amount: String(commissionAmount) },
+    });
+  } catch (error) {
+    console.error("[REFERRAL] Reward saved; notification failed:", error.message);
+  }
+  return earning;
+};
+
+// Fulfillment can succeed during a ledger outage. The recovery job retries missed records.
+const recordBookingReferral = async (bookingId, sourceType) => {
+  try {
+    return await processReferralCommission({ bookingId, sourceType });
+  } catch (error) {
+    console.error("[REFERRAL] Recording failed; reconciliation will retry:", String(bookingId), error.message);
     return null;
   }
 };
@@ -253,20 +140,15 @@ const getReferralStats = async (userId) => {
     }
   }
 
-  // Fetch platform settings for commission and duration
-  const platformFees = await PlatformFees.findOneAndUpdate(
-    { key: "platform_fees" },
-    { $setOnInsert: { key: "platform_fees" } },
-    { upsert: true, new: true }
-  ).lean();
-
-  const commissionPercent = Number(platformFees.referralCommission ?? 5);
-  const durationDays = Number(platformFees.referralDurationDays ?? 90);
-  const programEnabled = platformFees.referralProgramEnabled !== false;
+  const policy = await getEffectivePolicy(userId);
+  const entryEligibility = await getEntryEligibility(user);
+  const commissionPercent = policy.commissionPercentage;
+  const durationDays = policy.duration.unit === "DAYS" ? policy.duration.value : policy.duration.unit === "WEEKS" ? policy.duration.value * 7 : null;
+  const programEnabled = policy.status === "ACTIVE";
 
   // 1. Total referred users & organisers
   const referredUsers = await User.find({ referredBy: userId })
-    .select("firstName surname email profilePicture roles createdAt")
+    .select("firstName surname email profilePicture roles createdAt referredAt")
     .sort({ createdAt: -1 })
     .lean();
 
@@ -316,7 +198,7 @@ const getReferralStats = async (userId) => {
     },
   ]);
 
-  const totalEarned = earningsAgg[0]?.totalEarned ?? user.referralEarnings ?? 0;
+  const totalEarned = earningsAgg[0]?.totalEarned ?? 0;
   const ticketEarnings = earningsAgg[0]?.ticketEarnings ?? 0;
   const venueEarnings = earningsAgg[0]?.venueEarnings ?? 0;
   const pendingEarnings = earningsAgg[0]?.pendingEarnings ?? 0;
@@ -353,7 +235,7 @@ const getReferralStats = async (userId) => {
       name: `${u.firstName} ${u.surname}`.trim(),
       email: u.email,
       avatar: u.profilePicture?.url || null,
-      date: u.createdAt,
+      date: u.referredAt || u.createdAt,
       isOrganiser,
       status: isOrganiser ? "Active Organiser" : "Registered",
       totalEarned: userStats.earned,
@@ -399,8 +281,9 @@ const getReferralStats = async (userId) => {
 
   return {
     referralCode,
-    referralLink: `https://munasabahub.com/refer/${referralCode}`,
+    referralLink: `munasaba:///refer?code=${encodeURIComponent(referralCode)}`,
     referredBy: referredByInfo,
+    entryEligibility,
     stats: {
       totalEarned,
       formattedTotalEarned: `₦${totalEarned.toLocaleString()}`,
@@ -423,7 +306,9 @@ const getReferralStats = async (userId) => {
       commissionPercentage: commissionPercent,
       durationDays,
       isEnabled: programEnabled,
-      durationLabel: durationDays === 0 ? "Lifetime Rewards" : `${durationDays} Days Commission Window`,
+      durationLabel: policy.duration.value === 0 ? "Lifetime Rewards" : `${policy.duration.value} ${policy.duration.unit.toLowerCase()} Commission Window`,
+      duration: policy.duration,
+      status: policy.status,
     },
     referrals: referralsList,
     recentTransactions,
@@ -439,18 +324,21 @@ const applyReferralCode = async (userId, rawCode) => {
   }
 
   const code = rawCode.trim().toUpperCase();
+  if (!code) throw new Error("Referral code is required");
   const user = await User.findById(userId);
   if (!user) throw new Error("User not found");
 
   if (user.referredBy) {
     throw new Error("You have already linked a referral code to your account");
   }
+  const eligibility = await getEntryEligibility(user);
+  if (!eligibility.canApply) throw new Error("The referral-code entry window has expired");
 
   if (user.referralCode && user.referralCode.toUpperCase() === code) {
     throw new Error("You cannot use your own referral code");
   }
 
-  const referrer = await User.findOne({ referralCode: code });
+  const referrer = await User.findOne({ referralCode: code, isActive: { $ne: false } });
   if (!referrer) {
     throw new Error("Invalid referral code. Please verify the code and try again.");
   }
@@ -459,9 +347,12 @@ const applyReferralCode = async (userId, rawCode) => {
     throw new Error("You cannot use your own referral code");
   }
 
-  user.referredBy = referrer._id;
-  user.referredAt = new Date();
-  await user.save();
+  const linked = await User.findOneAndUpdate(
+    { _id: userId, referredBy: null, $expr: { $lte: ["$NOW", eligibility.deadline] } },
+    { $set: { referredBy: referrer._id, referredAt: new Date() } },
+    { new: true }
+  );
+  if (!linked) throw new Error("You have already linked a referral code to your account");
 
   // Dispatch real-time notification to the referrer
   try {
@@ -501,9 +392,9 @@ const applyReferralCode = async (userId, rawCode) => {
 };
 
 module.exports = {
-  generateReferralCode,
   ensureUserReferralCode,
   processReferralCommission,
+  recordBookingReferral,
   getReferralStats,
   applyReferralCode,
 };

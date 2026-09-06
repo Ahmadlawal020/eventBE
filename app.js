@@ -22,7 +22,11 @@ if (process.env.NODE_ENV !== "test") {
 // Middleware
 app.use(helmet());
 app.use(logger);
-app.use(cors(corsOptions));
+// The server also hosts its admin page; same-origin requests need no CORS headers.
+app.use((req, res, next) => {
+  if (req.headers.origin === req.protocol + "://" + req.get("host")) return next();
+  return cors(corsOptions)(req, res, next);
+});
 app.use(
   express.json({
     verify: (req, _res, buf) => {

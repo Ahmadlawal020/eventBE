@@ -1,3 +1,4 @@
+const { recordBookingReferral } = require("../../services/referral.service");
 const EventBooking = require("../../models/client/eventBooking.schema");
 const UserEventTicket = require("../../models/client/userEventTicket.schema");
 const Ticket = require("../../models/client/eventTicketType.schema");
@@ -320,6 +321,7 @@ const verifyBooking = async (req, res) => {
 
     // Idempotent: already completed
     if (booking && booking.paymentStatus === "COMPLETED") {
+      await recordBookingReferral(booking._id, "EVENT_TICKET");
       return res.json({
         success: true,
         message: "Payment already verified and tickets generated.",
@@ -375,6 +377,7 @@ const verifyBooking = async (req, res) => {
           paymentMethod: "CARD",
           paymentReference: reference,
           paymentStatus: "COMPLETED",
+          referralPaymentAt: transaction.paid_at || transaction.paidAt || new Date(),
         });
         await booking.save();
       } catch (saveError) {
@@ -385,6 +388,7 @@ const verifyBooking = async (req, res) => {
           );
           booking = await EventBooking.findOne({ paymentReference: reference });
           if (booking && booking.paymentStatus !== "COMPLETED") {
+            booking.referralPaymentAt = transaction.paid_at || transaction.paidAt || new Date();
             booking.paymentStatus = "COMPLETED";
             await booking.save();
           }
@@ -401,9 +405,12 @@ const verifyBooking = async (req, res) => {
       }
     } else {
       // Existing pending booking — mark as completed
+      booking.referralPaymentAt = transaction.paid_at || transaction.paidAt || new Date();
       booking.paymentStatus = "COMPLETED";
       await booking.save();
     }
+
+    await recordBookingReferral(booking._id, "EVENT_TICKET");
 
     // 3. Generate Individual Tickets (idempotent — skip if tickets already exist)
     let tickets;
@@ -431,21 +438,6 @@ const verifyBooking = async (req, res) => {
             reference: booking.paymentReference,
           });
 
-          // Process referral commission for event owner's referrer
-          if (eventDoc?.createdBy) {
-            const {
-              processReferralCommission,
-            } = require("../../services/referral.service");
-            const amountInNaira = Number(booking.totalAmount) / 100;
-            await processReferralCommission({
-              organiserId: eventDoc.createdBy,
-              sourceType: "EVENT_TICKET",
-              bookingId: booking._id,
-              bookingReference: booking.paymentReference,
-              totalAmount: amountInNaira,
-              eventId: eventDoc._id,
-            });
-          }
         } catch (notifErr) {
           console.error(
             "[VERIFY BOOKING] Notification / referral dispatch error:",

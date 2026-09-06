@@ -1,3 +1,4 @@
+const { recordBookingReferral } = require("../../services/referral.service");
 const EventCenterBooking = require("../../models/client/eventCenterBooking.schema");
 const EventCenter = require("../../models/client/eventCenter.schema");
 const User = require("../../models/client/user.schema");
@@ -382,6 +383,7 @@ const verifyPayment = async (req, res) => {
     });
 
     if (ticket && ticket.paymentStatus === "COMPLETED") {
+      await recordBookingReferral(ticket._id, "EVENT_CENTER_BOOKING");
       return res.json({
         success: true,
         message: "Payment already verified.",
@@ -455,6 +457,7 @@ const verifyPayment = async (req, res) => {
         totalPrice,
         paymentReference: reference,
         paymentStatus: "COMPLETED",
+        referralPaymentAt: paymentData.paid_at || paymentData.paidAt || new Date(),
       };
 
       if (isReviewMode) {
@@ -469,6 +472,7 @@ const verifyPayment = async (req, res) => {
       ticket = new EventCenterBooking(ticketData);
     } else {
       // Existing ticket being completed
+      ticket.referralPaymentAt = paymentData.paid_at || paymentData.paidAt || new Date();
       ticket.paymentStatus = "COMPLETED";
       if (isReviewMode) {
         ticket.status = "PENDING_REVIEW";
@@ -572,6 +576,8 @@ const verifyPayment = async (req, res) => {
       }
 
     // 6. Send notifications
+    await recordBookingReferral(ticket._id, "EVENT_CENTER_BOOKING");
+
     const guestName = fullName || ticket.guestDetails?.fullName || "A guest";
     const venueName = eventCenter?.venueName || "your venue";
 
@@ -645,24 +651,6 @@ const verifyPayment = async (req, res) => {
       guestName: fullName || ticket.guestDetails?.fullName || "",
       totalPrice: ticket.totalPrice,
     });
-
-    // Process referral commission for instant bookings
-    if (!isReviewMode && ticket.organiser) {
-      try {
-        const { processReferralCommission } = require("../../services/referral.service");
-        const amountInNaira = Number(ticket.totalPrice?.amount || 0);
-        await processReferralCommission({
-          organiserId: ticket.organiser,
-          sourceType: "EVENT_CENTER_BOOKING",
-          bookingId: ticket._id,
-          bookingReference: ticket.paymentReference,
-          totalAmount: amountInNaira,
-          eventCenterId: ticket.eventCenter,
-        });
-      } catch (refErr) {
-        console.error("[EVENT CENTER PAYMENT] Error processing referral commission:", refErr);
-      }
-    }
 
     const successMessage = isReviewMode
       ? "Payment verified. Booking is pending organizer review."
@@ -970,6 +958,7 @@ const acceptBooking = async (req, res) => {
       {
         $set: {
           status: "CONFIRMED",
+          referralQualifiedAt: ticket.paymentStatus === "COMPLETED" ? new Date() : undefined,
           ticketNumber,
           qrPayload,
           reviewedAt: new Date(),
@@ -979,6 +968,7 @@ const acceptBooking = async (req, res) => {
     );
 
     if (!updated) {
+      await recordBookingReferral(id, "EVENT_CENTER_BOOKING");
       const current = await EventCenterBooking.findById(id).select("status").lean();
       return res.status(400).json({ success: false, message: `Booking is already ${current?.status || "unknown"}.` });
     }
@@ -1062,6 +1052,8 @@ const acceptBooking = async (req, res) => {
       await eventCenter.save();
     }
 
+    await recordBookingReferral(updated._id, "EVENT_CENTER_BOOKING");
+
     // Send notification to buyer
     const venueName = eventCenter?.venueName || "your venue";
     const bookingDatesStr = Array.isArray(updated.selectedDates)
@@ -1107,24 +1099,6 @@ const acceptBooking = async (req, res) => {
       guestName: updated.guestDetails?.fullName || "",
       totalPrice: updated.totalPrice,
     });
-
-    // Process referral commission for accepted review bookings
-    if (updated.organiser) {
-      try {
-        const { processReferralCommission } = require("../../services/referral.service");
-        const amountInNaira = Number(updated.totalPrice?.amount || 0);
-        await processReferralCommission({
-          organiserId: updated.organiser,
-          sourceType: "EVENT_CENTER_BOOKING",
-          bookingId: updated._id,
-          bookingReference: updated.paymentReference,
-          totalAmount: amountInNaira,
-          eventCenterId: updated.eventCenter,
-        });
-      } catch (refErr) {
-        console.error("[ACCEPT BOOKING] Error processing referral commission:", refErr);
-      }
-    }
 
     return res.status(200).json({
       success: true,

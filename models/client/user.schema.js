@@ -214,6 +214,11 @@ const userSchema = new mongoose.Schema(
   },
 );
 
+// Assign codes across every account creation path.
+userSchema.pre("validate", function () {
+  if (!this.referralCode) this.referralCode = require("../../utils/referralCode").codeForUser(this._id);
+});
+
 // Indexes for better query performance
 userSchema.index({ authProvider: 1 });
 

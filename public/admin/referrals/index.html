@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Referral management ? Munasaba</title><link rel="stylesheet" href="/admin/referrals/style.css">
+<script src="/admin/referrals/app.js" defer></script></head>
+<body><header><a href="/admin/referrals/">Munasaba <span>Referral management</span></a><button id="logout" hidden>Sign out</button></header>
+<main>
+<div id="message" role="status" aria-live="polite"></div>
+<section id="login-panel" class="card narrow"><h1>Manage referral rewards</h1><p>Sign in with your administrator account.</p>
+<form id="login"><label>Email<input id="email" type="email" autocomplete="username" required></label>
+<label>Password<input id="password" type="password" autocomplete="current-password" required></label><button class="primary">Sign in</button></form></section>
+<div id="dashboard" hidden>
+<div class="intro"><h1>Referral program</h1><p>Set rewards for all users, groups, or individual referrers. Ordinary changes affect future qualifying transactions.</p></div>
+<div class="layout"><aside class="card"><h2>Who earns?</h2><label>Manage policy<select id="policy-select"></select></label>
+<div class="buttons"><button id="new-group">New group</button><button id="new-user">Individual user</button></div>
+<p class="hint">Individual settings override group settings. Higher-priority groups override lower ones. A global pause or end stops everyone.</p>
+<div id="picker" hidden><label>Find users<input id="user-search" placeholder="Search name, email, or referral code"></label><button id="search-users">Search</button><div id="user-results"></div><h3>Selected users</h3><div id="selected-users"></div></div></aside>
+<div>
+<section class="card"><div class="heading"><h2 id="policy-title">All users</h2><span id="policy-status" class="badge"></span></div>
+<p id="scope-description"></p>
+<div class="buttons" id="actions"><button data-action="START">Start new period</button><button data-action="PAUSE">Pause</button><button data-action="RESUME">Resume</button><button data-action="END" class="danger">End</button><button data-action="INHERIT" id="inherit">Use inherited status</button></div>
+<p class="hint">Start begins a new earning period from today. Resume preserves the existing period; time continues while paused.</p>
+<form id="settings"><div id="group-fields"><label>Name<input id="policy-name" maxlength="100"></label><label>Group priority<input id="priority" type="number" min="0" max="10000"></label></div>
+<div class="fields"><label>Commission (%)<input id="rate" type="number" min="0" max="100" step="0.01" placeholder="Inherit"></label>
+<label>Earning duration<input id="duration" type="number" min="1" max="3650" placeholder="Inherit"></label>
+<label>Duration unit<select id="duration-unit"><option value="DAYS">Days</option><option value="WEEKS">Weeks</option><option value="MONTHS">Calendar months</option></select></label></div>
+<p class="hint">Earnings run from referral attribution, or the latest explicit Start, until this period expires. Blank overrides inherit from the next applicable policy.</p>
+<div id="entry-fields" class="fields"><label>Code-entry window<input id="entry-value" type="number" min="0" max="3650"></label><label>Entry-window unit<select id="entry-unit"><option value="DAYS">Days</option><option value="WEEKS">Weeks</option></select></label></div>
+<p id="entry-help" class="hint">Measured from account creation. Zero permits code entry only during registration.</p>
+<label>Reason for change<input id="reason" maxlength="500" placeholder="Optional note for policy history"></label>
+<button class="primary">Save for future transactions</button></form></section>
+<section class="card"><h2>Policy history</h2><div class="table-wrap"><table><thead><tr><th>Effective from</th><th>Rate</th><th>Duration</th><th>Status</th><th>Reason</th></tr></thead><tbody id="history"></tbody></table></div></section>
+<section class="card"><h2>Adjust past earnings</h2><p>This separate action changes existing completed or pending earnings for the selected scope. Group adjustments use the group's current members. Refunds are excluded.</p>
+<form id="preview-form"><div class="fields"><label>From<input id="past-from" type="datetime-local" required></label><label>To<input id="past-to" type="datetime-local" required></label><label>Replacement rate (%)<input id="past-rate" type="number" min="0" max="100" step="0.01" required></label></div>
+<label>Reason<input id="past-reason" maxlength="500" required></label><button>Preview adjustment</button></form>
+<div id="preview" hidden><p id="preview-summary"></p><label class="check"><input id="confirm-past" type="checkbox">I choose to change these historical earnings.</label><button id="apply-past" class="danger" disabled>Apply historical adjustment</button></div>
+</section></div></div></div></main></body></html>
