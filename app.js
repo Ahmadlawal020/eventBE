@@ -127,6 +127,7 @@ app.use("/api/referrals", require("./routes/client/referral.route"));
 app.use("/api/admin/auth", require("./routes/management/auth.route"));
 app.use("/api/admin/dashboard", require("./routes/management/dashboard.route"));
 app.use("/api/admin/users", require("./routes/management/users.route"));
+app.use("/api/admin/content-moderation", require("./routes/management/moderation.route"));
 app.use("/api/admin/listings", require("./routes/management/listings.route"));
 app.use("/api/admin/bookings", require("./routes/management/bookings.route"));
 app.use("/api/admin/payments", require("./routes/management/payments.route"));

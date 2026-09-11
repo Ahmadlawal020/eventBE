@@ -35,7 +35,7 @@ router.get("/my-event-centers", verifyJWT, getMyEventCenters);
 router.patch("/:id/images/reorder", verifyJWT, reorderEventCenterImages);
 router.patch("/:id/images/delete", verifyJWT, deleteEventCenterImage);
 
-router.patch("/:id", verifyJWT, updateEventCenter);
+router.patch("/:id", verifyJWT, require("../../middleware/protectModerationFields"), updateEventCenter);
 router.delete("/:id", verifyJWT, deleteEventCenter);
 
 // ====================
@@ -43,6 +43,6 @@ router.delete("/:id", verifyJWT, deleteEventCenter);
 // ====================
 router.get("/settings", getPublicEventCenterSettings);
 router.get("/", getEventCenters);
-router.get("/:id", getEventCenterById); // MUST remain last
+router.get("/:id", require("../../middleware/optionalJWT"), getEventCenterById); // MUST remain last
 
 module.exports = router;

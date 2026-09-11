@@ -298,3 +298,55 @@ test("policy APIs reject ordinary users and invalid admin settings", async () =>
   expect(valid.body.data.revisions.at(-1).duration.unit).toBe("MONTHS");
 });
 
+test("admin referrer cards open into the complete referred-user account view", async () => {
+  await recordTicket(await ticket());
+  const adminToken=jwt.sign({UserInfo:{id:String(referrer._id),roles:["finance_admin"]}},process.env.ACCESS_TOKEN_SECRET);
+  const directory=await request(app).get("/admin/referrals/referrers?q=referrer").auth(adminToken,{type:"bearer"});
+  expect(directory.status).toBe(200);
+  expect(directory.body.data.referrers).toHaveLength(1);
+  expect(directory.body.data.referrers[0]).toMatchObject({
+    _id:String(referrer._id), referralCount:1, completedEarnings:500,
+  });
+  const detail=await request(app).get(`/admin/referrals/referrers/${referrer._id}`).auth(adminToken,{type:"bearer"});
+  expect(detail.status).toBe(200);
+  expect(detail.body.data.referrer.referralCode).toBe(referrer.referralCode);
+  expect(detail.body.data.referrals).toHaveLength(1);
+  expect(detail.body.data.referrals[0]).toMatchObject({
+    _id:String(host._id), earnings:{completedEarnings:500,transactions:1},
+  });
+  const affiliate=await request(app).get(`/admin/referrals/referrers/${host._id}`).auth(adminToken,{type:"bearer"});
+  expect(affiliate.status).toBe(200);
+  expect(affiliate.body.data.affiliation).toMatchObject({
+    referredBy:{_id:String(referrer._id),referralCode:referrer.referralCode},
+    totals:{completedEarnings:500,salesVolume:10000,transactions:1},
+  });
+  expect(affiliate.body.data.affiliation.referredAt).toBeTruthy();
+  expect(affiliate.body.data.affiliation.earnings).toHaveLength(1);
+});
+
+
+test("admin status filters apply before pagination and report matching totals", async () => {
+  const adminToken = jwt.sign({ UserInfo: { id: String(referrer._id), roles: ["finance_admin"] } }, process.env.ACCESS_TOKEN_SECRET);
+  await recordTicket(await ticket());
+  await recordTicket(await ticket());
+  const earning = await Earning.findOne();
+  earning.status = "REFUNDED";
+  await earning.save();
+  const ledger = await request(app).get("/admin/referrals/earnings?status=REFUNDED&limit=1").auth(adminToken, { type: "bearer" });
+  expect(ledger.status).toBe(200);
+  expect(ledger.body.data.pagination).toMatchObject({ total: 1, pages: 1 });
+  expect(ledger.body.data.earnings[0].status).toBe("REFUNDED");
+  await User.updateOne({ _id: buyer._id }, { $set: { referredBy: host._id } });
+  await User.updateOne({ _id: host._id }, { $set: { isActive: false } });
+  const roster = await request(app).get("/admin/referrals/referrers?status=SUSPENDED&limit=1").auth(adminToken, { type: "bearer" });
+  expect(roster.status).toBe(200);
+  expect(roster.body.data.pagination).toMatchObject({ total: 1, pages: 1 });
+  expect(roster.body.data.referrers[0]._id).toBe(String(host._id));
+  for (const endpoint of ["earnings", "referrers"]) {
+    const invalid = await request(app).get(`/admin/referrals/${endpoint}?status=INVALID`).auth(adminToken, { type: "bearer" });
+    expect(invalid.status).toBe(400);
+  }
+  const bounded = await request(app).get("/admin/referrals/earnings?page=-1&limit=-2").auth(adminToken, { type: "bearer" });
+  expect(bounded.status).toBe(200);
+  expect(bounded.body.data.pagination).toMatchObject({ page: 1, limit: 20 });
+});

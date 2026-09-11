@@ -14,8 +14,92 @@ const { getPaymentGateway } = require("../../services/payment");
 const { createTicketsForBooking } = require("./userEventTicket.controller");
 const crypto = require("crypto");
 const { getEventSettings } = require("../../services/eventSettings.service");
+const {
+  calculateTicketPricing,
+  getPlatformFees,
+} = require("../../services/ticketFees.service");
 
 const gateway = getPaymentGateway();
+
+/**
+ * PRICE QUOTE
+ * Read-only and safe for signed-out event browsing. Checkout repeats this
+ * calculation after authenticating and never trusts totals sent by the app.
+ */
+const quoteBooking = async (req, res) => {
+  const { eventId, items } = req.body;
+  try {
+    if (!eventId || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Select at least one ticket to get a price quote.",
+      });
+    }
+    if (!await Event.exists({ _id: eventId, status: "LISTED" })) {
+      return res.status(404).json({ success: false, message: "Event not found" });
+    }
+
+    const pricedInputs = [];
+    for (const item of items) {
+      const quantity = Number(item.quantity);
+      if (!item.product || !Number.isInteger(quantity) || quantity < 1) {
+        return res.status(400).json({
+          success: false,
+          message: "Each ticket must have a valid quantity.",
+        });
+      }
+      const ticket = await Ticket.findById(item.product).lean();
+      if (!ticket || String(ticket.eventId) !== String(eventId)) {
+        return res.status(400).json({
+          success: false,
+          message: "One of the selected tickets is not available for this event.",
+        });
+      }
+      if (quantity > Math.max(0, ticket.totalQuantity - ticket.soldQuantity)) {
+        return res.status(400).json({
+          success: false,
+          message: `Only ${Math.max(0, ticket.totalQuantity - ticket.soldQuantity)} ${ticket.name} tickets remain.`,
+        });
+      }
+      let pricePerUnit = ticket.ticketType === "PAID"
+        ? Number(ticket.price?.amountCents || 0)
+        : ticket.ticketType === "DONATION"
+          ? Number(item.pricePerUnit || 0)
+          : 0;
+      if (
+        ticket.ticketType === "DONATION" &&
+        (pricePerUnit < Number(ticket.donationRange?.minCents || 0) ||
+          pricePerUnit > Number(ticket.donationRange?.maxCents || 0))
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: `Donation for ${ticket.name} is outside the allowed range.`,
+        });
+      }
+      pricedInputs.push({
+        ticketId: ticket._id,
+        name: ticket.name,
+        quantity,
+        pricePerUnit,
+        subtotalAmount: pricePerUnit * quantity,
+        commissionType: ticket.commission?.type,
+      });
+    }
+
+    const pricing = calculateTicketPricing({
+      items: pricedInputs,
+      fees: await getPlatformFees(),
+      currency: { code: "NGN", symbol: "₦" },
+    });
+    return res.json({ success: true, data: { pricing } });
+  } catch (error) {
+    console.error("[TICKET QUOTE ERROR]", error);
+    return res.status(500).json({
+      success: false,
+      message: "Could not calculate this ticket order.",
+    });
+  }
+};
 
 /**
  * CREATE BOOKING
@@ -46,6 +130,8 @@ const createBooking = async (req, res) => {
         .json({ success: false, message: "Event not found" });
     }
 
+    if (event.status !== "LISTED") return res.status(409).json({ success: false, message: "This event is not accepting new bookings." });
+
     // 2. Validate Tickets and Inventory
     if (!items || !Array.isArray(items) || items.length === 0) {
       return res.status(400).json({
@@ -67,8 +153,6 @@ const createBooking = async (req, res) => {
     }
 
     const processedItems = [];
-    let calculatedTotal = 0;
-
     for (const item of items) {
       if (!item.product || !item.quantity || item.quantity < 1) {
         return res.status(400).json({
@@ -161,7 +245,6 @@ const createBooking = async (req, res) => {
       }
 
       const itemTotal = pricePerUnit * item.quantity;
-      calculatedTotal += itemTotal;
 
       processedItems.push({
         ticketId: ticketType._id,
@@ -169,8 +252,37 @@ const createBooking = async (req, res) => {
         quantity: item.quantity,
         pricePerUnit: pricePerUnit,
         totalPrice: itemTotal,
+        subtotalAmount: itemTotal,
+        commissionType: ticketType.commission?.type,
       });
     }
+
+    const pricing = calculateTicketPricing({
+      items: processedItems,
+      fees: await getPlatformFees(),
+      currency: {
+        code: "NGN",
+        symbol: processedItems.length ? "â‚¦" : "â‚¦",
+      },
+    });
+    const pricedItems = pricing.items.map((pricedItem, index) => ({
+      ...processedItems[index],
+      subtotalAmount: pricedItem.subtotalAmount,
+      feeMode: pricedItem.feeMode,
+      feeAmount: pricedItem.feeAmount,
+      buyerFeeAmount: pricedItem.buyerFeeAmount,
+      organiserFeeAmount: pricedItem.organiserFeeAmount,
+    }));
+    const bookingPricing = {
+      subtotalAmount: pricing.subtotalAmount,
+      platformFeeAmount: pricing.platformFeeAmount,
+      buyerFeeAmount: pricing.buyerFeeAmount,
+      organiserFeeAmount: pricing.organiserFeeAmount,
+      organiserPayoutAmount: pricing.organiserPayoutAmount,
+      feePercentage: pricing.percentage,
+      feeMode: pricing.mode,
+      fixedFeeAmount: pricing.fixedFeeAmount,
+    };
 
     // 3. Prepare Reference
     const reference = `MNB_ORD_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
@@ -178,7 +290,7 @@ const createBooking = async (req, res) => {
     let savedBooking = null;
 
     // Only save immediately if NOT card payment or if it's FREE
-    if (paymentMethod !== "CARD" || calculatedTotal === 0) {
+    if (paymentMethod !== "CARD" || pricing.totalAmount === 0) {
       const newBooking = new EventBooking({
         eventId,
         buyer: buyerId,
@@ -187,17 +299,18 @@ const createBooking = async (req, res) => {
           phoneNumber,
           email,
         },
-        items: processedItems,
-        totalAmount: calculatedTotal,
+        items: pricedItems,
+        ...bookingPricing,
+        totalAmount: pricing.totalAmount,
         paymentMethod,
         paymentReference: reference,
-        paymentStatus: calculatedTotal === 0 ? "COMPLETED" : "PENDING",
+        paymentStatus: pricing.totalAmount === 0 ? "COMPLETED" : "PENDING",
       });
       savedBooking = await newBooking.save();
     }
 
     // 4. Handle Payment Flow
-    if (paymentMethod === "CARD" && calculatedTotal > 0) {
+    if (paymentMethod === "CARD" && pricing.totalAmount > 0) {
       // Get the event owner's subaccount details
       const organiser = await User.findById(event.createdBy).select(
         "vendorAccountCode",
@@ -206,20 +319,27 @@ const createBooking = async (req, res) => {
       // Initialize payment with full booking details in metadata
       const paymentData = await gateway.initializePayment({
         email: email,
-        amount: calculatedTotal / 100, // Service expects main currency unit
+        amount: pricing.totalAmount / 100, // Service expects main currency unit
         reference: reference,
         subaccount: organiser?.vendorAccountCode || undefined,
+        transactionCharge: pricing.platformFeeAmount,
         metadata: {
           eventId,
           buyerId,
-          items: processedItems.map((item) => ({
+          items: pricedItems.map((item) => ({
             ticketId: item.ticketId.toString(),
             name: item.name,
             quantity: item.quantity,
             pricePerUnit: item.pricePerUnit,
             totalPrice: item.totalPrice,
+            subtotalAmount: item.subtotalAmount,
+            feeMode: item.feeMode,
+            feeAmount: item.feeAmount,
+            buyerFeeAmount: item.buyerFeeAmount,
+            organiserFeeAmount: item.organiserFeeAmount,
           })),
-          totalAmount: calculatedTotal,
+          ...bookingPricing,
+          totalAmount: pricing.totalAmount,
           fullName,
           phoneNumber,
           type: "EVENT_TICKET",
@@ -231,6 +351,7 @@ const createBooking = async (req, res) => {
         data: {
           booking: savedBooking, // will be null for card payment
           payment: paymentData,
+          pricing,
         },
       });
     }
@@ -260,7 +381,7 @@ const createBooking = async (req, res) => {
       return res.json({
         success: true,
         message: "Booking successful and tickets generated",
-        data: { booking: savedBooking, tickets },
+        data: { booking: savedBooking, tickets, pricing },
       });
     }
 
@@ -268,7 +389,7 @@ const createBooking = async (req, res) => {
     res.json({
       success: true,
       message: "Order initiated successfully. Awaiting payment confirmation.",
-      data: { booking: savedBooking },
+      data: { booking: savedBooking, pricing },
     });
   } catch (error) {
     // Rollback any atomic reservations on unexpected error
@@ -348,8 +469,22 @@ const verifyBooking = async (req, res) => {
         }
       }
 
-      const { eventId, buyerId, items, totalAmount, fullName, phoneNumber } =
-        metadata || {};
+      const {
+        eventId,
+        buyerId,
+        items,
+        totalAmount,
+        subtotalAmount,
+        platformFeeAmount,
+        buyerFeeAmount,
+        organiserFeeAmount,
+        organiserPayoutAmount,
+        feePercentage,
+        feeMode,
+        fixedFeeAmount,
+        fullName,
+        phoneNumber,
+      } = metadata || {};
 
       if (!eventId || !buyerId || !items) {
         console.error(
@@ -360,6 +495,19 @@ const verifyBooking = async (req, res) => {
           success: false,
           message:
             "Booking details missing in payment metadata. Please contact support.",
+        });
+      }
+
+      if (
+        Number.isFinite(Number(transaction.amount)) &&
+        Math.round(Number(transaction.amount)) !== Math.round(Number(totalAmount))
+      ) {
+        console.error(
+          `[VERIFY BOOKING] Amount mismatch for ref ${reference}: charged ${transaction.amount}, expected ${totalAmount}`,
+        );
+        return res.status(400).json({
+          success: false,
+          message: "Payment amount does not match this booking.",
         });
       }
 
@@ -374,6 +522,14 @@ const verifyBooking = async (req, res) => {
           },
           items,
           totalAmount,
+          subtotalAmount,
+          platformFeeAmount,
+          buyerFeeAmount,
+          organiserFeeAmount,
+          organiserPayoutAmount,
+          feePercentage,
+          feeMode,
+          fixedFeeAmount,
           paymentMethod: "CARD",
           paymentReference: reference,
           paymentStatus: "COMPLETED",
@@ -508,6 +664,7 @@ const getMyBookings = async (req, res) => {
 };
 
 module.exports = {
+  quoteBooking,
   createBooking,
   verifyBooking,
   getMyBookings,

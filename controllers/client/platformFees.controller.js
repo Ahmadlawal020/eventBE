@@ -1,4 +1,5 @@
 const PlatformFees = require("../../models/management/platformFees.schema");
+const { normaliseTicketFeeSettings } = require("../../services/ticketFees.service");
 
 // GET /api/platform-fees
 const getPlatformFees = async (req, res) => {
@@ -12,11 +13,8 @@ const getPlatformFees = async (req, res) => {
     return res.json({
       success: true,
       data: {
-        eventCommission: fees.eventCommission,
+        ...normaliseTicketFeeSettings(fees),
         eventCenterCommission: fees.eventCenterCommission,
-        referralCommission: fees.referralCommission ?? 5,
-        referralDurationDays: fees.referralDurationDays ?? 90,
-        referralProgramEnabled: fees.referralProgramEnabled !== false,
       },
     });
   } catch (error) {

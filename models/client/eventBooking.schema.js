@@ -26,9 +26,33 @@ const eventBookingSchema = new Schema(
         quantity: { type: Number, required: true },
         pricePerUnit: { type: Number, required: true }, // in cents
         totalPrice: { type: Number, required: true }, // in cents
+        subtotalAmount: { type: Number, min: 0 },
+        feeMode: {
+          type: String,
+          enum: ["PASS_TO_BUYER", "ABSORB_BY_ORGANISER"],
+        },
+        feeAmount: { type: Number, min: 0 },
+        buyerFeeAmount: { type: Number, min: 0 },
+        organiserFeeAmount: { type: Number, min: 0 },
       },
     ],
-    totalAmount: { type: Number, required: true }, // in cents
+    // Immutable checkout totals in the currency's smallest unit.
+    subtotalAmount: { type: Number, min: 0 },
+    platformFeeAmount: { type: Number, min: 0 },
+    buyerFeeAmount: { type: Number, min: 0 },
+    organiserFeeAmount: { type: Number, min: 0 },
+    organiserPayoutAmount: { type: Number, min: 0 },
+    feePercentage: { type: Number, min: 0, max: 100 },
+    feeMode: {
+      type: String,
+      enum: [
+        "ORGANISER_CHOICE",
+        "PASS_TO_BUYER",
+        "ABSORB_BY_ORGANISER",
+      ],
+    },
+    fixedFeeAmount: { type: Number, min: 0 },
+    totalAmount: { type: Number, required: true }, // amount charged, in cents
     currency: { type: String, default: "NGN" },
     referralQualifiedAt: { type: Date, default: null },
     referralPaymentAt: { type: Date, default: null },

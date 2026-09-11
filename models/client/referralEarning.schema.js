@@ -41,7 +41,12 @@ const referralEarningSchema = new mongoose.Schema(
     },
     totalAmount: {
       type: Number,
-      required: true, // in Naira
+      required: true, // gross source amount, in Naira
+    },
+    platformFeeAmount: {
+      type: Number,
+      required: true,
+      min: 0, // affiliate reward base, in Naira
     },
     commissionPercentage: {
       type: Number,

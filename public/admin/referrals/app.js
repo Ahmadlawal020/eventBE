@@ -114,7 +114,7 @@ $("search-users").onclick = guarded(async () => {
   $("user-results").replaceChildren();
   for (const user of users) {
     const name = user.firstName + " " + user.surname;
-    const button = document.createElement("button"); button.textContent = name + " ? " + user.email;
+    const button = document.createElement("button"); button.textContent = name + " - " + user.email;
     button.onclick = () => {
       if (choosingUser) {
         selected = "USER:" + user._id; choosingUser = false;

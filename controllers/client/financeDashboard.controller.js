@@ -51,7 +51,7 @@ const getFinanceStats = async (req, res) => {
             $sum: {
               $cond: [
                 { $eq: ["$paymentStatus", "COMPLETED"] },
-                { $ifNull: ["$totalPrice.amount", 0] },
+                { $ifNull: ["$organiserPayoutAmount", { $ifNull: ["$subtotalPrice.amount", "$totalPrice.amount"] }] },
                 0,
               ],
             },
@@ -60,7 +60,7 @@ const getFinanceStats = async (req, res) => {
             $sum: {
               $cond: [
                 { $eq: ["$paymentStatus", "PENDING"] },
-                { $ifNull: ["$totalPrice.amount", 0] },
+                { $ifNull: ["$organiserPayoutAmount", { $ifNull: ["$subtotalPrice.amount", "$totalPrice.amount"] }] },
                 0,
               ],
             },
@@ -79,7 +79,7 @@ const getFinanceStats = async (req, res) => {
                     { $gte: ["$createdAt", startOfMonth] },
                   ],
                 },
-                { $ifNull: ["$totalPrice.amount", 0] },
+                { $ifNull: ["$organiserPayoutAmount", { $ifNull: ["$subtotalPrice.amount", "$totalPrice.amount"] }] },
                 0,
               ],
             },
@@ -93,7 +93,7 @@ const getFinanceStats = async (req, res) => {
                     { $gte: ["$createdAt", startOfWeek] },
                   ],
                 },
-                { $ifNull: ["$totalPrice.amount", 0] },
+                { $ifNull: ["$organiserPayoutAmount", { $ifNull: ["$subtotalPrice.amount", "$totalPrice.amount"] }] },
                 0,
               ],
             },
@@ -107,7 +107,7 @@ const getFinanceStats = async (req, res) => {
                     { $gte: ["$createdAt", startOfToday] },
                   ],
                 },
-                { $ifNull: ["$totalPrice.amount", 0] },
+                { $ifNull: ["$organiserPayoutAmount", { $ifNull: ["$subtotalPrice.amount", "$totalPrice.amount"] }] },
                 0,
               ],
             },
@@ -136,7 +136,7 @@ const getFinanceStats = async (req, res) => {
               $sum: {
                 $cond: [
                   { $eq: ["$paymentStatus", "COMPLETED"] },
-                  { $divide: [{ $ifNull: ["$totalAmount", 0] }, 100] },
+                  { $divide: [{ $ifNull: ["$organiserPayoutAmount", { $ifNull: ["$subtotalAmount", "$totalAmount"] }] }, 100] },
                   0,
                 ],
               },
@@ -145,7 +145,7 @@ const getFinanceStats = async (req, res) => {
               $sum: {
                 $cond: [
                   { $eq: ["$paymentStatus", "PENDING"] },
-                  { $divide: [{ $ifNull: ["$totalAmount", 0] }, 100] },
+                  { $divide: [{ $ifNull: ["$organiserPayoutAmount", { $ifNull: ["$subtotalAmount", "$totalAmount"] }] }, 100] },
                   0,
                 ],
               },
@@ -164,7 +164,7 @@ const getFinanceStats = async (req, res) => {
                       { $gte: ["$createdAt", startOfMonth] },
                     ],
                   },
-                  { $divide: [{ $ifNull: ["$totalAmount", 0] }, 100] },
+                  { $divide: [{ $ifNull: ["$organiserPayoutAmount", { $ifNull: ["$subtotalAmount", "$totalAmount"] }] }, 100] },
                   0,
                 ],
               },
@@ -178,7 +178,7 @@ const getFinanceStats = async (req, res) => {
                       { $gte: ["$createdAt", startOfWeek] },
                     ],
                   },
-                  { $divide: [{ $ifNull: ["$totalAmount", 0] }, 100] },
+                  { $divide: [{ $ifNull: ["$organiserPayoutAmount", { $ifNull: ["$subtotalAmount", "$totalAmount"] }] }, 100] },
                   0,
                 ],
               },
@@ -192,7 +192,7 @@ const getFinanceStats = async (req, res) => {
                       { $gte: ["$createdAt", startOfToday] },
                     ],
                   },
-                  { $divide: [{ $ifNull: ["$totalAmount", 0] }, 100] },
+                  { $divide: [{ $ifNull: ["$organiserPayoutAmount", { $ifNull: ["$subtotalAmount", "$totalAmount"] }] }, 100] },
                   0,
                 ],
               },
@@ -235,7 +235,7 @@ const getFinanceStats = async (req, res) => {
       organiser: userObjectId,
       paymentStatus: "COMPLETED",
       createdAt: { $gte: startOfWeek },
-    }).select("totalPrice createdAt").lean();
+    }).select("totalPrice subtotalPrice organiserPayoutAmount createdAt").lean();
 
     // Query this week's ticket bookings
     const thisWeekTicketBookings = eventIds.length > 0
@@ -243,7 +243,7 @@ const getFinanceStats = async (req, res) => {
           eventId: { $in: eventIds },
           paymentStatus: "COMPLETED",
           createdAt: { $gte: startOfWeek },
-        }).select("totalAmount createdAt").lean()
+        }).select("totalAmount subtotalAmount organiserPayoutAmount createdAt").lean()
       : [];
 
     for (let i = 0; i < 7; i++) {
@@ -254,11 +254,11 @@ const getFinanceStats = async (req, res) => {
 
       const dayVenueSum = thisWeekVenueBookings
         .filter((b) => b.createdAt >= dayDate && b.createdAt < nextDayDate)
-        .reduce((acc, b) => acc + (b.totalPrice?.amount || 0), 0);
+        .reduce((acc, b) => acc + (b.organiserPayoutAmount ?? b.subtotalPrice?.amount ?? b.totalPrice?.amount ?? 0), 0);
 
       const dayTicketSum = thisWeekTicketBookings
         .filter((b) => b.createdAt >= dayDate && b.createdAt < nextDayDate)
-        .reduce((acc, b) => acc + (b.totalAmount ? b.totalAmount / 100 : 0), 0);
+        .reduce((acc, b) => acc + ((b.organiserPayoutAmount ?? b.subtotalAmount ?? b.totalAmount ?? 0) / 100), 0);
 
       const dayTotal = dayVenueSum + dayTicketSum;
 
@@ -302,7 +302,7 @@ const getFinanceStats = async (req, res) => {
       title: `Venue Hire - ${b.eventCenter?.venueName || "Event Venue"}`,
       category: "VENUE_BOOKING",
       date: b.createdAt,
-      amount: b.totalPrice?.amount || 0,
+      amount: b.organiserPayoutAmount ?? b.subtotalPrice?.amount ?? b.totalPrice?.amount ?? 0,
       type: "in",
       status: b.paymentStatus || "COMPLETED",
       reference: b.paymentReference || b.paystackReference || `VEN_${b._id.toString().slice(-6)}`,
@@ -320,7 +320,7 @@ const getFinanceStats = async (req, res) => {
         title: `Ticket - ${eventTitle}`,
         category: "TICKET_SALE",
         date: t.createdAt,
-        amount: (t.totalAmount || 0) / 100,
+        amount: (t.organiserPayoutAmount ?? t.subtotalAmount ?? t.totalAmount ?? 0) / 100,
         type: "in",
         status: t.paymentStatus || "COMPLETED",
         reference: t.paymentReference || t.paystackReference || `TCK_${t._id.toString().slice(-6)}`,

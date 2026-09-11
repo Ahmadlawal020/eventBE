@@ -22,7 +22,7 @@ class PaymentGateway {
    * @param {string} [params.callbackUrl] - URL to redirect after payment
    * @returns {Promise<{authorization_url: string, access_code?: string, reference: string}>}
    */
-  async initializePayment({ email, amount, reference, metadata, subaccount, callbackUrl }) {
+  async initializePayment({ email, amount, reference, metadata, subaccount, callbackUrl, transactionCharge, bearer }) {
     throw new Error("initializePayment() not implemented");
   }
 

@@ -1,6 +1,7 @@
 const Adjustment = require("../models/management/referralAdjustment.schema");
 const Earning = require("../models/client/referralEarning.schema");
 const Policy = require("../models/management/referralPolicy.schema");
+const PlatformFees = require("../models/management/platformFees.schema");
 const fail = (message, status = 400) => { const e = new Error(message); e.status = status; throw e; };
 const summarize = (doc) => ({
   id: doc._id, scopeKey: doc.scopeKey, from: doc.from, to: doc.to, rate: doc.rate,
@@ -26,8 +27,15 @@ const previewAdjustment = async (input, adminId) => {
   if (policy.scope === "GROUP") filter.referrer = { $in: policy.revisions.at(-1).userIds };
   const records = await Earning.find(filter).limit(1001).lean();
   if (records.length > 1000) fail("Select a smaller date range (maximum 1000 earnings per adjustment)");
+  const fees = await PlatformFees.findOne({ key: "platform_fees" }).lean();
   const entries = records.map(e => ({ earningId: e._id, oldRate: e.commissionPercentage,
-    oldAmount: e.commissionAmount, newAmount: Math.round(e.totalAmount * rate) / 100, status: e.status }));
+    oldAmount: e.commissionAmount,
+    newAmount: Math.round((Number.isFinite(Number(e.platformFeeAmount))
+      ? Number(e.platformFeeAmount)
+      : Number(e.totalAmount) * Number(e.sourceType === "EVENT_TICKET"
+        ? fees?.eventCommission ?? 15
+        : fees?.eventCenterCommission ?? 15) / 100) * rate) / 100,
+    status: e.status }));
   return summarize(await Adjustment.create({ scopeKey, createdBy: adminId, from: start, to: end,
     rate, reason: reason.trim(), expiresAt: new Date(Date.now() + 30 * 60000), entries }));
 };

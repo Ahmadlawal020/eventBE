@@ -146,6 +146,8 @@ const getEventCenterById = async (req, res) => {
         .status(404)
         .json({ success: false, message: "Event Center not found" });
 
+    if (!require("../../services/listingVisibility").canViewListing(center, req.user)) return res.status(404).json({ success: false, message: "Listing is not available." });
+
     res.json({
       success: true,
       message: "Event Center fetched successfully",
@@ -522,6 +524,7 @@ const updateEventCenter = async (req, res) => {
       },
     );
 
+    if (!updatedCenter) return res.status(409).json({ success: false, message: "A moderator must restore this listing before its status can change." });
     res.json({
       success: true,
       message: "Event Center updated successfully",

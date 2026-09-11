@@ -45,6 +45,19 @@ const eventCenterTicketSchema = new mongoose.Schema(
       amount: { type: Number, required: true },
       currency: { type: String, default: "NGN" },
     },
+    subtotalPrice: {
+      amount: { type: Number, min: 0 },
+      currency: { type: String, default: "NGN" },
+    },
+    platformFeeAmount: { type: Number, min: 0 },
+    buyerFeeAmount: { type: Number, min: 0 },
+    organiserFeeAmount: { type: Number, min: 0 },
+    organiserPayoutAmount: { type: Number, min: 0 },
+    feePercentage: { type: Number, min: 0, max: 100 },
+    feeMode: {
+      type: String,
+      enum: ["PASS_TO_BUYER", "ABSORB_BY_ORGANISER"],
+    },
     referralQualifiedAt: { type: Date, default: null },
     referralPaymentAt: { type: Date, default: null },
     paymentStatus: {

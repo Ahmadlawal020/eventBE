@@ -21,8 +21,30 @@ const gateway = getPaymentGateway();
 // EVENT TICKET BOOKING WEBHOOK HANDLER
 // ============================================================================
 
-const handleEventTicketWebhook = async (reference, metadata, customer, paidAt) => {
-  const { eventId, buyerId, items, totalAmount, fullName, phoneNumber } = metadata;
+const handleEventTicketWebhook = async (reference, metadata, customer, paidAt, paidAmount) => {
+  const {
+    eventId,
+    buyerId,
+    items,
+    totalAmount,
+    subtotalAmount,
+    platformFeeAmount,
+    buyerFeeAmount,
+    organiserFeeAmount,
+    organiserPayoutAmount,
+    feePercentage,
+    feeMode,
+    fixedFeeAmount,
+    fullName,
+    phoneNumber,
+  } = metadata;
+
+  if (
+    Number.isFinite(Number(paidAmount)) &&
+    Math.round(Number(paidAmount) * 100) !== Math.round(Number(totalAmount))
+  ) {
+    throw new Error(`Paid amount does not match event ticket booking ${reference}`);
+  }
 
   // 1. Idempotency: check if booking already exists and is completed
   const existingBooking = await EventBooking.findOne({ paymentReference: reference });
@@ -46,6 +68,11 @@ const handleEventTicketWebhook = async (reference, metadata, customer, paidAt) =
         quantity: Number(item.quantity || 1),
         pricePerUnit: Number(item.pricePerUnit !== undefined ? item.pricePerUnit : (item.price || 0)),
         totalPrice: Number(item.totalPrice !== undefined ? item.totalPrice : (item.price || 0) * (item.quantity || 1)),
+        subtotalAmount: Number(item.subtotalAmount ?? item.totalPrice ?? 0),
+        feeMode: item.feeMode,
+        feeAmount: Number(item.feeAmount || 0),
+        buyerFeeAmount: Number(item.buyerFeeAmount || 0),
+        organiserFeeAmount: Number(item.organiserFeeAmount || 0),
       }));
 
       booking = await EventBooking.create({
@@ -58,6 +85,14 @@ const handleEventTicketWebhook = async (reference, metadata, customer, paidAt) =
         },
         items: formattedItems,
         totalAmount: totalAmount || 0,
+        subtotalAmount,
+        platformFeeAmount,
+        buyerFeeAmount,
+        organiserFeeAmount,
+        organiserPayoutAmount,
+        feePercentage,
+        feeMode,
+        fixedFeeAmount,
         paymentMethod: "CARD",
         paymentReference: reference,
         paymentStatus: "COMPLETED",
@@ -127,12 +162,12 @@ const handlePaymentWebhook = async (req, res) => {
     return res.status(200).send("Transaction not successful");
   }
 
-  const { reference, metadata, customer, paidAt } = normalizedEvent;
+  const { reference, metadata, customer, paidAt, amount } = normalizedEvent;
 
   // 3. Route to the correct handler based on booking type
   if (metadata?.type === "EVENT_TICKET") {
     try {
-      await handleEventTicketWebhook(reference, metadata, customer, paidAt);
+      await handleEventTicketWebhook(reference, metadata, customer, paidAt, amount);
       return res.status(200).send("OK");
     } catch (err) {
       console.error(`[EVENT_TICKET WEBHOOK ERROR]`, err);
@@ -169,9 +204,24 @@ const handlePaymentWebhook = async (req, res) => {
       bookingUnit,
       duration,
       totalPrice,
+      subtotalPrice,
+      platformFeeAmount,
+      buyerFeeAmount,
+      organiserFeeAmount,
+      organiserPayoutAmount,
+      feePercentage,
+      feeMode,
       fullName,
       phoneNumber,
     } = metadata;
+
+    if (
+      Number.isFinite(Number(amount)) &&
+      Math.round(Number(amount) * 100) !==
+        Math.round(Number(totalPrice?.amount || 0) * 100)
+    ) {
+      return res.status(400).send("Payment amount mismatch");
+    }
 
     // 5. Determine booking mode from event center settings
     const eventCenter = await EventCenter.findById(eventCenterId).select("bookingSettings venueName").lean();
@@ -209,6 +259,13 @@ const handlePaymentWebhook = async (req, res) => {
           bookingUnit,
           duration,
           totalPrice,
+          subtotalPrice,
+          platformFeeAmount,
+          buyerFeeAmount,
+          organiserFeeAmount,
+          organiserPayoutAmount,
+          feePercentage,
+          feeMode,
           paymentReference: reference,
           paymentStatus: "COMPLETED",
           referralPaymentAt: paidAt || new Date(),

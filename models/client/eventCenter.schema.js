@@ -510,4 +510,6 @@ const eventCenterSchema = new mongoose.Schema(
 
 /* ===================== EXPORT ===================== */
 
+eventCenterSchema.plugin(require("./listingModeration"));
+
 module.exports = mongoose.model("EventCenter", eventCenterSchema);

@@ -5,11 +5,15 @@ const Event = require("../models/client/event.schema");
 const EventCenter = require("../models/client/eventCenter.schema");
 const EventBooking = require("../models/client/eventBooking.schema");
 const EventCenterBooking = require("../models/client/eventCenterBooking.schema");
+const PlatformFees = require("../models/management/platformFees.schema");
 const { codeForUser } = require("../utils/referralCode");
 const { getEffectivePolicy, getEntryEligibility } = require("./referralPolicy.service");
 const { addPeriod } = require("../utils/referralPolicy");
 const { dispatchNotification } = require("./notification");
 const { NOTIFICATION_TYPES } = require("../constants/notificationTypes");
+
+const calculateAffiliateReward = (platformFeeAmount, percentage) =>
+  Math.round(Number(platformFeeAmount || 0) * Number(percentage || 0)) / 100;
 
 const ensureUserReferralCode = async (userDocOrId) => {
   const id = userDocOrId?._id || userDocOrId;
@@ -57,10 +61,22 @@ const processReferralCommission = async ({ sourceType, bookingId, notify = true 
   if (!organiser?.referredBy || String(organiser.referredBy) === String(organiserId)) return null;
   const referrer = await User.findById(organiser.referredBy).select("isActive").lean();
   if (!referrer || referrer.isActive === false) return null;
-  const totalAmount = isTicket ? Number(booking.totalAmount) / 100 : Number(booking.totalPrice?.amount);
+  const totalAmount = isTicket
+    ? Number(booking.subtotalAmount ?? booking.totalAmount) / 100
+    : Number(booking.subtotalPrice?.amount ?? booking.totalPrice?.amount);
+  let platformFeeAmount = isTicket
+    ? Number(booking.platformFeeAmount) / 100
+    : Number(booking.platformFeeAmount);
+  if (!Number.isFinite(platformFeeAmount)) {
+    const fees = await PlatformFees.findOne({ key: "platform_fees" }).lean();
+    const rate = Number(
+      isTicket ? fees?.eventCommission ?? 15 : fees?.eventCenterCommission ?? 15,
+    );
+    platformFeeAmount = Math.round(totalAmount * rate) / 100;
+  }
   const currency = isTicket ? booking.currency : booking.totalPrice?.currency;
   const bookingReference = booking.paymentReference || booking.paystackReference;
-  if (!bookingReference || (currency && currency !== "NGN") || !Number.isFinite(totalAmount) || totalAmount <= 0) return null;
+  if (!bookingReference || (currency && currency !== "NGN") || !Number.isFinite(totalAmount) || totalAmount <= 0 || !Number.isFinite(platformFeeAmount) || platformFeeAmount <= 0) return null;
   const qualifiedAt = new Date(booking.referralQualifiedAt || booking.reviewedAt || booking.createdAt);
   const settings = await getEffectivePolicy(referrer._id, qualifiedAt);
   const percent = settings.commissionPercentage;
@@ -71,13 +87,14 @@ const processReferralCommission = async ({ sourceType, bookingId, notify = true 
   const start = settings.startedAt && new Date(settings.startedAt) > referredAt ? new Date(settings.startedAt) : referredAt;
   const expiresAt = addPeriod(start, settings.duration);
   if (qualifiedAt < start || (expiresAt && qualifiedAt > expiresAt)) return null;
-  const commissionAmount = Math.round(totalAmount * percent) / 100;
+  const commissionAmount = calculateAffiliateReward(platformFeeAmount, percent);
   if (!Number.isFinite(commissionAmount) || commissionAmount <= 0) return null;
   let earning;
   try {
     const values = {
       referrer: referrer._id, referredUser: organiserId, sourceType, bookingId,
-      bookingReference, totalAmount, commissionPercentage: percent, commissionAmount,
+      bookingReference, totalAmount, platformFeeAmount,
+      commissionPercentage: percent, commissionAmount,
       eventId: isTicket ? booking.eventId : null,
       eventCenterId: isTicket ? null : booking.eventCenter,
       currency: "NGN", status: "COMPLETED", qualifiedAt, policyVersions: settings.policyVersions,
@@ -95,7 +112,7 @@ const processReferralCommission = async ({ sourceType, bookingId, notify = true 
     await dispatchNotification({
       recipient: referrer._id, sender: organiserId, type: NOTIFICATION_TYPES.REFERRAL_REWARD,
       title: "Referral reward earned",
-      message: "You earned NGN " + commissionAmount.toLocaleString() + " from a referred host's " + (isTicket ? "ticket sale." : "venue booking."),
+      message: "You earned NGN " + commissionAmount.toLocaleString() + " from Munasaba's fee on a referred host's " + (isTicket ? "ticket sale." : "venue booking."),
       referenceId: earning._id, referenceType: "ReferralEarning",
       data: { screen: "Referral", earningId: String(earning._id), amount: String(commissionAmount) },
     });
@@ -271,6 +288,7 @@ const getReferralStats = async (userId) => {
       amount: item.commissionAmount,
       formattedAmount: `₦${item.commissionAmount.toLocaleString()}`,
       saleAmount: item.totalAmount,
+      platformFeeAmount: item.platformFeeAmount,
       commissionPercentage: item.commissionPercentage,
       status: item.status,
       bookingReference: item.bookingReference || `REF-${String(item._id).slice(-6).toUpperCase()}`,
@@ -393,6 +411,7 @@ const applyReferralCode = async (userId, rawCode) => {
 
 module.exports = {
   ensureUserReferralCode,
+  calculateAffiliateReward,
   processReferralCommission,
   recordBookingReferral,
   getReferralStats,

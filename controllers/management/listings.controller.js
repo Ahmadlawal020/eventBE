@@ -411,7 +411,7 @@ const getListingDetails = async (req, res) => {
   }
 };
 
-const updateListingStatus = async (req, res) => {
+const updateListingStatus = async (req, res, next) => {
   try {
     const { type, id } = req.params;
     const { status, reason } = req.body;
@@ -438,9 +438,23 @@ const updateListingStatus = async (req, res) => {
         .json({ success: false, message: "Listing not found" });
     }
 
+    if (status === "LISTED" || status === "UNLISTED") {
+      req.body = {
+        decision: status === "LISTED" ? "APPROVED" : "UNLISTED",
+        reason: reason || "",
+        updatedAt: req.body.updatedAt || listing.updatedAt.toISOString(),
+      };
+      return require("./moderation.controller").decide(req, res, next);
+    }
+
     const previousValue = { status: listing.status };
-    listing.status = status;
-    await listing.save();
+    const updated = await config.model.findOneAndUpdate(
+      { _id: listing._id, updatedAt: listing.updatedAt },
+      { $set: { status } },
+      { new: true, runValidators: true },
+    );
+    if (!updated) return res.status(409).json({ success: false, message: "Listing changed or was removed by a moderator. Reload and use content moderation to restore it." });
+    listing.status = updated.status;
 
     await recordAdminAction({
       req,

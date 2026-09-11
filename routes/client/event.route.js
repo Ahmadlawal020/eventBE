@@ -119,7 +119,7 @@ router.patch(
 router.patch("/:id/performers/:performerId", verifyJWT, updateEventPerformer);
 router.delete("/:id/performers/:performerId", verifyJWT, deleteEventPerformer);
 
-router.patch("/:id", verifyJWT, updateEvent);
+router.patch("/:id", verifyJWT, require("../../middleware/protectModerationFields"), updateEvent);
 router.delete("/:id", verifyJWT, deleteEvent);
 
 // ====================
@@ -127,6 +127,6 @@ router.delete("/:id", verifyJWT, deleteEvent);
 // ====================
 router.get("/config", getPublicEventSettings);
 router.get("/", getEvents);
-router.get("/:id", getEventById); // MUST remain last
+router.get("/:id", require("../../middleware/optionalJWT"), getEventById); // MUST remain last
 
 module.exports = router;

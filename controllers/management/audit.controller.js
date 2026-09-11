@@ -2,11 +2,19 @@ const AdminAuditLog = require("../../models/management/adminAuditLog.schema");
 
 const getAuditLogs = async (req, res) => {
   try {
-    const { action, targetType, page = 1, limit = 30 } = req.query;
+    const { action, targetType, search, page = 1, limit = 30 } = req.query;
     const query = {};
 
     if (action) query.action = action;
     if (targetType) query.targetType = targetType;
+    if (search && search.trim()) {
+      const s = search.trim();
+      query.$or = [
+        { action: { $regex: s, $options: "i" } },
+        { targetType: { $regex: s, $options: "i" } },
+        { ipAddress: { $regex: s, $options: "i" } },
+      ];
+    }
 
     const skip = (Number(page) - 1) * Number(limit);
 

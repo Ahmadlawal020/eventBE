@@ -11,6 +11,10 @@ const { getPaymentGateway } = require("../../services/payment");
 const { generateTicketNumber, generateQRPayload, verifyQRPayload } = require("../../utils/qr");
 const { hasSlotConflict } = require("../../utils/slotConflict");
 const { logBookingHistory } = require("./bookingHistory.controller");
+const {
+  calculateEventCenterPricing,
+  getPlatformFees,
+} = require("../../services/ticketFees.service");
 
 const gateway = getPaymentGateway();
 
@@ -74,6 +78,8 @@ const createTicket = async (req, res) => {
         .json({ success: false, message: "Event Center not found." });
     }
 
+    if (eventCenter.status !== "LISTED") return res.status(409).json({ success: false, message: "This event center is not accepting new bookings." });
+
     // 2b. Validate selected dates are still available
     if (bookingUnit === "day" && selectedDates && selectedDates.length > 0) {
       const requestedDates = selectedDates.map(d =>
@@ -107,12 +113,14 @@ const createTicket = async (req, res) => {
     }
 
     // 2d. Server-side price validation
-    const basePrice = eventCenter.pricing?.basePrice || eventCenter.basePrice || 0;
-    const weekendPrice = eventCenter.pricing?.weekendPrice || eventCenter.weekendPrice || basePrice;
-    const customPrices = eventCenter.pricing?.customPrices || eventCenter.customPrices || [];
+    const basePriceSource = eventCenter.pricing?.basePrice || eventCenter.basePrice;
+    const weekendPriceSource = eventCenter.pricing?.weekendPrice || eventCenter.weekendPrice;
+    const basePrice = Number(basePriceSource?.amount ?? basePriceSource ?? 0);
+    const weekendPrice = Number(weekendPriceSource?.amount ?? weekendPriceSource ?? basePrice);
+    const customPrices = eventCenter.pricing?.customPrices || eventCenter.availability?.customPrices || eventCenter.customPrices || [];
+    let expectedTotal = 0;
 
     if (basePrice > 0 && totalPrice?.amount > 0) {
-      let expectedTotal = 0;
       for (const sd of selectedDates || []) {
         const dateObj = new Date(sd.date);
         const dateStr = dateObj.toISOString().split("T")[0];
@@ -123,7 +131,7 @@ const createTicket = async (req, res) => {
         );
 
         if (customPrice) {
-          expectedTotal += customPrice.price;
+          expectedTotal += Number(customPrice.amount ?? customPrice.price ?? 0);
         } else {
           const dayOfWeek = dateObj.getDay();
           const isWeekend = dayOfWeek === 0 || dayOfWeek === 5 || dayOfWeek === 6;
@@ -140,6 +148,28 @@ const createTicket = async (req, res) => {
       }
     }
 
+    const pricing = calculateEventCenterPricing({
+      subtotalAmount: expectedTotal || Number(totalPrice?.amount || 0),
+      fees: await getPlatformFees(),
+      feeMode: eventCenter.basePrice?.feeMode,
+    });
+    const bookingPricing = {
+      totalPrice: {
+        amount: pricing.totalAmount,
+        currency: totalPrice?.currency || eventCenter.basePrice?.currency || "NGN",
+      },
+      subtotalPrice: {
+        amount: pricing.subtotalAmount,
+        currency: totalPrice?.currency || eventCenter.basePrice?.currency || "NGN",
+      },
+      platformFeeAmount: pricing.platformFeeAmount,
+      buyerFeeAmount: pricing.buyerFeeAmount,
+      organiserFeeAmount: pricing.organiserFeeAmount,
+      organiserPayoutAmount: pricing.organiserPayoutAmount,
+      feePercentage: pricing.percentage,
+      feeMode: pricing.mode,
+    };
+
     // 2c. Prevent duplicate pending bookings from rapid double-taps
     const existingPending = await EventCenterBooking.findOne({
       buyer: buyerId,
@@ -154,7 +184,19 @@ const createTicket = async (req, res) => {
         return res.status(201).json({
           success: true,
           message: "You already have a pending booking for this venue.",
-          data: { reference: existingPending.paymentReference },
+          data: {
+            reference: existingPending.paymentReference,
+            pricing: {
+              subtotalAmount: existingPending.subtotalPrice?.amount,
+              platformFeeAmount: existingPending.platformFeeAmount,
+              buyerFeeAmount: existingPending.buyerFeeAmount,
+              organiserFeeAmount: existingPending.organiserFeeAmount,
+              totalAmount: existingPending.totalPrice?.amount,
+              organiserPayoutAmount: existingPending.organiserPayoutAmount,
+              percentage: existingPending.feePercentage,
+              mode: existingPending.feeMode,
+            },
+          },
         });
       }
     }
@@ -176,9 +218,12 @@ const createTicket = async (req, res) => {
       // For INSTANT mode: use subaccount for split payment to organizer
       const paymentData = await gateway.initializePayment({
         email,
-        amount: totalPrice.amount,
+        amount: pricing.totalAmount,
         reference,
         subaccount: isReviewMode ? undefined : (owner?.vendorAccountCode || undefined),
+        transactionCharge: isReviewMode
+          ? undefined
+          : Math.round(pricing.platformFeeAmount * 100),
         metadata: {
           eventCenterId,
           organiserId: eventCenter.createdBy.toString(), // Securely bind the database owner ID
@@ -186,7 +231,8 @@ const createTicket = async (req, res) => {
           selectedDates,
           bookingUnit,
           duration,
-          totalPrice,
+          ...bookingPricing,
+          pricing,
           fullName,
           phoneNumber,
           type: "EVENT_CENTER",
@@ -203,6 +249,7 @@ const createTicket = async (req, res) => {
           authorization_url,
           access_code,
           reference,
+          pricing,
         },
       });
     } else if (paymentMethod === "transfer") {
@@ -222,7 +269,7 @@ const createTicket = async (req, res) => {
         selectedDates,
         bookingUnit,
         duration,
-        totalPrice,
+        ...bookingPricing,
         paymentReference: reference,
         paymentStatus: "PENDING",
       };
@@ -409,9 +456,27 @@ const verifyPayment = async (req, res) => {
       bookingUnit,
       duration,
       totalPrice,
+      subtotalPrice,
+      platformFeeAmount,
+      buyerFeeAmount,
+      organiserFeeAmount,
+      organiserPayoutAmount,
+      feePercentage,
+      feeMode,
       fullName,
       phoneNumber,
     } = meta;
+
+    if (
+      Number.isFinite(Number(paymentData.amount)) &&
+      Math.round(Number(paymentData.amount)) !==
+        Math.round(Number(totalPrice?.amount || 0) * 100)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment amount does not match this venue booking.",
+      });
+    }
 
     // 4. Determine booking mode
     const eventCenter = await EventCenter.findById(eventCenterId).select("bookingSettings venueName availability").lean();
@@ -455,6 +520,13 @@ const verifyPayment = async (req, res) => {
         bookingUnit,
         duration,
         totalPrice,
+        subtotalPrice,
+        platformFeeAmount,
+        buyerFeeAmount,
+        organiserFeeAmount,
+        organiserPayoutAmount,
+        feePercentage,
+        feeMode,
         paymentReference: reference,
         paymentStatus: "COMPLETED",
         referralPaymentAt: paymentData.paid_at || paymentData.paidAt || new Date(),

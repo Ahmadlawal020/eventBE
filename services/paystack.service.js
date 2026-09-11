@@ -16,6 +16,8 @@ const initializeTransaction = (data) => {
     callbackUrl: data.callback_url,
     metadata: data.metadata,
     subaccount: data.subaccount,
+    transactionCharge: data.transaction_charge,
+    bearer: data.bearer,
   });
 };
 

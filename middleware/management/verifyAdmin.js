@@ -1,6 +1,15 @@
 const verifyJWT = require("../verifyJWT");
 
-const ADMIN_ROLES = ["admin", "super_admin", "support_admin", "finance_admin", "moderator"];
+const ADMIN_ROLES = [
+  "admin",
+  "super_admin",
+  "superadmin",
+  "support_admin",
+  "finance_admin",
+  "finance",
+  "moderator",
+  "modarator",
+];
 
 const verifyAdmin = [
   verifyJWT,

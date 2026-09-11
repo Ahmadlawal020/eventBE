@@ -30,7 +30,7 @@ class PaystackAdapter extends PaymentGateway {
   // CORE PAYMENT
   // ────────────────────────────────────────────────────────────────
 
-  async initializePayment({ email, amount, reference, metadata, subaccount, callbackUrl }) {
+  async initializePayment({ email, amount, reference, metadata, subaccount, callbackUrl, transactionCharge, bearer }) {
     this._ensureKey();
 
     const response = await axios.post(
@@ -42,6 +42,11 @@ class PaystackAdapter extends PaymentGateway {
         callback_url: callbackUrl,
         metadata,
         subaccount: subaccount || undefined,
+        transaction_charge:
+          subaccount && Number.isInteger(transactionCharge)
+            ? transactionCharge
+            : undefined,
+        bearer: subaccount && bearer ? bearer : undefined,
       },
       { headers: this._headers() }
     );

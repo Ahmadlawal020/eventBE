@@ -2,6 +2,29 @@ const Ticket = require("../../models/client/eventTicketType.schema");
 const Event = require("../../models/client/event.schema");
 const CoOrganiserInvitation = require("../../models/client/coOrganiserInvitation.schema");
 const { getEventSettings } = require("../../services/eventSettings.service");
+const {
+  getPlatformFees,
+  normaliseTicketFeeSettings,
+} = require("../../services/ticketFees.service");
+
+const resolveTicketCommission = (requested, ticketType, platformFees) => {
+  const settings = normaliseTicketFeeSettings(platformFees);
+  if (ticketType === "FREE") {
+    return { percentage: 0, type: "DEDUCT_FROM_PRICE" };
+  }
+
+  let type = requested?.type;
+  if (settings.ticketFeeMode === "PASS_TO_BUYER") type = "ADD_ON";
+  if (settings.ticketFeeMode === "ABSORB_BY_ORGANISER") {
+    type = "DEDUCT_FROM_PRICE";
+  }
+  if (!["ADD_ON", "DEDUCT_FROM_PRICE"].includes(type)) type = "ADD_ON";
+
+  return {
+    percentage: settings.ticketFeesEnabled ? settings.eventCommission : 0,
+    type,
+  };
+};
 
 const canManageEventTickets = async (event, userId) => {
   if (event.createdBy?.toString() === userId.toString()) {
@@ -116,6 +139,7 @@ const createTicket = async (req, res) => {
       }
     }
 
+    const platformFees = await getPlatformFees();
     const newTicket = new Ticket({
       eventId,
       name,
@@ -128,7 +152,11 @@ const createTicket = async (req, res) => {
       salesStartAt,
       salesEndAt,
       currency,
-      commission,
+      commission: resolveTicketCommission(
+        commission,
+        ticketType,
+        platformFees,
+      ),
       price,
       donationRange,
       groupName,
@@ -245,6 +273,15 @@ const updateTicket = async (req, res) => {
     const updatePayload = { ...req.body };
     const settings = await getEventSettings();
     const nextTicketType = updatePayload.ticketType || prevTicket.ticketType;
+
+    if (updatePayload.commission !== undefined || updatePayload.ticketType !== undefined) {
+      const platformFees = await getPlatformFees();
+      updatePayload.commission = resolveTicketCommission(
+        updatePayload.commission || prevTicket.commission,
+        nextTicketType,
+        platformFees,
+      );
+    }
 
     if (updatePayload.ticketType !== undefined) {
       const isFree = nextTicketType === "FREE";

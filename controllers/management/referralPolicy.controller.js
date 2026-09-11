@@ -16,7 +16,7 @@ const searchUsers = endpoint(async req => {
     return User.find({ _id: { $in: ids } }).select("firstName surname email referralCode").lean();
   }
   const q = String(req.query.q || "").trim().slice(0,100);
-  const escaped = q.replace(/[.*+?^$()|[\]\\{}]/g, "\\PAYLOAD");
+  const escaped = q.replace(/[.*+?^$()|[\]\\{}]/g, match => "\\" + match);
   const filter = q ? { $or: ["firstName","surname","email","referralCode"].map(field => ({ [field]: { $regex: escaped, $options: "i" } })) } : {};
   return User.find(filter).select("firstName surname email referralCode").limit(50).lean();
 });

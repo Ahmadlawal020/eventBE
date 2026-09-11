@@ -130,13 +130,13 @@ const getEvents = async (req, res) => {
     const skip = (page - 1) * limit;
 
     const [events, total] = await Promise.all([
-      Event.find()
+      Event.find({ status: "LISTED" })
         .populate("createdBy", "firstName surname email")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
-      Event.countDocuments(),
+      Event.countDocuments({ status: "LISTED" }),
     ]);
 
     res.json({
@@ -167,6 +167,8 @@ const getEventById = async (req, res) => {
       return res
         .status(404)
         .json({ success: false, message: "Event not found" });
+
+    if (!require("../../services/listingVisibility").canViewListing(event, req.user)) return res.status(404).json({ success: false, message: "Listing is not available." });
 
     res.json({
       success: true,
@@ -381,6 +383,7 @@ const updateEvent = async (req, res) => {
       runValidators: true,
     });
 
+    if (!updatedEvent) return res.status(409).json({ success: false, message: "A moderator must restore this listing before its status can change." });
     res.json({
       success: true,
       message: "Event updated successfully",

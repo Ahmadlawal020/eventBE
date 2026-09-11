@@ -390,5 +390,7 @@ eventSchema.methods.toJSON = function () {
 
 /* ===================== EXPORT ===================== */
 
+eventSchema.plugin(require("./listingModeration"));
+
 module.exports = mongoose.model("Event", eventSchema);
 module.exports.eventLabels = eventLabels;
