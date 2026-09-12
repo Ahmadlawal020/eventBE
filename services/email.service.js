@@ -25,6 +25,10 @@ const FROM_EMAIL = process.env.EMAIL_FROM || "Munasaba <onboarding@resend.dev>";
  * @returns {Promise<Object>} Resend API response or null
  */
 async function sendEmail({ to, subject, html }) {
+  if (process.env.NODE_ENV === "test") {
+    return { id: "test-email-id", to, subject };
+  }
+
   const client = getResendClient();
   if (!client) {
     console.warn(`[EMAIL SERVICE] Skipping email to ${to}: Resend client not initialized.`);

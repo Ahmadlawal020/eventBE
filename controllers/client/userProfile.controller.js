@@ -1,7 +1,9 @@
 const User = require("../../models/client/user.schema");
 const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
 const asyncHandler = require("express-async-handler");
 const cloudinary = require("../../utils/cloudinary");
+const otpService = require("../../services/otp.service");
 
 // @desc    Look up a user by email (lightweight — name + email + picture only)
 // @route   GET /api/user-info/lookup?email=...
@@ -92,12 +94,15 @@ const updateUser = asyncHandler(async (req, res) => {
   if (!user) return res.status(404).json({ message: "User not found." });
 
   // Prevent duplicate emails
-  if (email && email !== user.email) {
-    const duplicate = await User.findOne({ email }).lean().exec();
+  if (email && email.toLowerCase().trim() !== user.email.toLowerCase().trim()) {
+    const trimmedEmail = email.toLowerCase().trim();
+    const duplicate = await User.findOne({ email: trimmedEmail, _id: { $ne: user._id } }).lean().exec();
     if (duplicate) {
-      return res.status(409).json({ message: "Email already in use." });
+      return res.status(409).json({ message: "The address has been taken" });
     }
-    user.email = email;
+    user.email = trimmedEmail;
+    user.authProvider = "local";
+    user.googleId = undefined;
   }
 
   user.firstName = firstName ?? user.firstName;
@@ -123,10 +128,10 @@ const updateUser = asyncHandler(async (req, res) => {
 
   // Robustly update nested objects
   if (residentialAddress) {
-    user.residentialAddress = { ...user.residentialAddress.toObject(), ...residentialAddress };
+    user.residentialAddress = { ...(user.residentialAddress?.toObject?.() || user.residentialAddress || {}), ...residentialAddress };
   }
   if (emergencyContact) {
-    user.emergencyContact = { ...user.emergencyContact.toObject(), ...emergencyContact };
+    user.emergencyContact = { ...(user.emergencyContact?.toObject?.() || user.emergencyContact || {}), ...emergencyContact };
   }
 
   user.preferredLanguage = preferredLanguage ?? user.preferredLanguage;
@@ -145,11 +150,7 @@ const updateUser = asyncHandler(async (req, res) => {
 
   const updatedUser = await user.save();
 
-  // Sync event centers status if verification status changed
-  const { syncUserEventCenters } = require("./eventCenter.controller");
-  const { syncUserEvents } = require("./event.controller");
-  await syncUserEventCenters(updatedUser._id);
-  await syncUserEvents(updatedUser._id);
+  // Profile fields do not change the verification flags used for publishing.
 
   res.json({
     message: `User ${updatedUser.firstName} ${updatedUser.surname} updated successfully.`,
@@ -210,9 +211,145 @@ const deleteUserAccount = asyncHandler(async (req, res) => {
   });
 });
 
+// 📧 Request OTP to change email
+const requestChangeEmailOTP = asyncHandler(async (req, res) => {
+  let { newEmail } = req.body;
+  if (!newEmail || typeof newEmail !== "string" || !newEmail.trim()) {
+    return res.status(400).json({ success: false, message: "New email is required." });
+  }
+
+  newEmail = newEmail.trim().toLowerCase();
+
+  const user = await User.findById(req.user.id).exec();
+  if (!user) {
+    return res.status(404).json({ success: false, message: "User not found." });
+  }
+
+  if (user.email.toLowerCase() === newEmail) {
+    return res.status(400).json({ success: false, message: "New email cannot be the same as your current email." });
+  }
+
+  // Check if email is already taken by another person
+  const existingUser = await User.findOne({ email: newEmail, _id: { $ne: user._id } }).lean().exec();
+  if (existingUser) {
+    return res.status(409).json({
+      success: false,
+      message: "The address has been taken",
+    });
+  }
+
+  // Generate and send OTP
+  await otpService.requestOTP(newEmail, "email_change");
+
+  res.json({
+    success: true,
+    message: `Verification code sent to ${newEmail}`,
+  });
+});
+
+// ✅ Verify OTP and update email (resets auth forms to local)
+const verifyChangeEmailOTP = asyncHandler(async (req, res) => {
+  let { newEmail, code } = req.body;
+  if (!newEmail || !code) {
+    return res.status(400).json({ success: false, message: "Email and verification code are required." });
+  }
+
+  newEmail = newEmail.trim().toLowerCase();
+
+  const user = await User.findById(req.user.id).exec();
+  if (!user) {
+    return res.status(404).json({ success: false, message: "User not found." });
+  }
+
+  // Ensure not taken concurrently
+  const existingUser = await User.findOne({ email: newEmail, _id: { $ne: user._id } }).lean().exec();
+  if (existingUser) {
+    return res.status(409).json({
+      success: false,
+      message: "The address has been taken",
+    });
+  }
+
+  // Verify OTP
+  const result = await otpService.verifyOTP(newEmail, code.trim(), "email_change");
+  if (!result.success) {
+    return res.status(400).json({
+      success: false,
+      message: result.message || "Invalid verification code",
+    });
+  }
+
+  // Update user email and mark as verified
+  user.email = newEmail;
+  user.isEmailVerified = true;
+  user.emailVerifiedAt = new Date();
+
+  // Reset all other auth forms to local
+  user.authProvider = "local";
+  user.googleId = undefined;
+
+  // Generate new tokens for the updated email
+  const accessToken = jwt.sign(
+    { UserInfo: { id: user._id, email: user.email, roles: user.roles } },
+    process.env.ACCESS_TOKEN_SECRET,
+    { expiresIn: "15m" }
+  );
+
+  const refreshToken = jwt.sign(
+    { id: user._id, email: user.email },
+    process.env.REFRESH_TOKEN_SECRET,
+    { expiresIn: "7d" }
+  );
+
+  user.refreshToken = refreshToken;
+  const updatedUser = await user.save();
+
+  // Auto-sync event centers and events
+  try {
+    const { syncUserEventCenters } = require("./eventCenter.controller");
+    const { syncUserEvents } = require("./event.controller");
+    await syncUserEventCenters(updatedUser._id);
+    await syncUserEvents(updatedUser._id);
+  } catch (syncErr) {
+    console.warn("[SYNC ERROR]", syncErr);
+  }
+
+  res.json({
+    success: true,
+    message: "Email address changed and verified successfully.",
+    data: {
+      user: {
+        id: updatedUser._id,
+        firstName: updatedUser.firstName,
+        surname: updatedUser.surname,
+        preferredFirstName: updatedUser.preferredFirstName,
+        phoneNumber: updatedUser.phoneNumber,
+        email: updatedUser.email,
+        dob: updatedUser.dob,
+        roles: updatedUser.roles,
+        isEmailVerified: updatedUser.isEmailVerified,
+        emailVerifiedAt: updatedUser.emailVerifiedAt,
+        isPhoneVerified: updatedUser.isPhoneVerified,
+        phoneVerifiedAt: updatedUser.phoneVerifiedAt,
+        isIdentityVerified: updatedUser.isIdentityVerified,
+        residentialAddress: updatedUser.residentialAddress,
+        emergencyContact: updatedUser.emergencyContact,
+        profilePicture: updatedUser.profilePicture,
+        authProvider: updatedUser.authProvider,
+        googleId: updatedUser.googleId,
+        hasPassword: !!updatedUser.password,
+      },
+      accessToken,
+      refreshToken,
+    },
+  });
+});
+
 module.exports = {
   lookupUserByEmail,
   getUserById,
   updateUser,
   deleteUserAccount,
+  requestChangeEmailOTP,
+  verifyChangeEmailOTP,
 };

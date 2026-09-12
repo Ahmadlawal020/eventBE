@@ -127,6 +127,7 @@ const getKycDetails = asyncHandler(async (req, res) => {
       idFrontImage: verification.idFrontImage,
       idBackImage: verification.idBackImage,
       selfieImage: verification.selfieImage,
+      selfieChallenge: verification.selfieChallenge ?? null,
       status:
         verification.status === "approved"
           ? "VERIFIED"

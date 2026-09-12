@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 
 const addressSchema = new mongoose.Schema({
-  country: { type: String, default: "Nigeria" },
+  country: { type: String, trim: true },
   street: { type: String, trim: true },
   unit: { type: String, trim: true },
   city: { type: String, trim: true },
@@ -70,16 +70,16 @@ const userSchema = new mongoose.Schema(
     },
     password: {
       type: String,
-      // Make password optional for Google OAuth users
+      // Make password optional for Google OAuth users or users transitioning to local
       required: function () {
-        return this.authProvider === "local";
+        return this.isNew && this.authProvider === "local";
       },
     },
     dob: {
       type: Date,
-      // Make dob optional for Google OAuth users
+      // Make dob optional for Google OAuth users or users transitioning to local
       required: function () {
-        return this.authProvider === "local";
+        return this.isNew && this.authProvider === "local";
       },
     },
     googleId: {

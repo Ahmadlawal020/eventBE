@@ -101,4 +101,139 @@ describe("Authentication API (/api/auth)", () => {
     expect(res.status).toBe(200);
     expect(res.body.email).toBe("validauth@example.com");
   });
+
+  it("should not set Nigeria as default residential address country for new users", async () => {
+    const newUser = await User.create({
+      firstName: "Address",
+      surname: "Tester",
+      email: "addresstester@example.com",
+      password: "Password123!",
+      dob: new Date("1995-01-01"),
+    });
+
+    expect(newUser.residentialAddress?.country).toBeUndefined();
+  });
+
+  describe("Email Change Flow (/api/user-info/change-email)", () => {
+    it("should reject email change if the address has been taken by another user", async () => {
+      const user1 = await User.create({
+        firstName: "User",
+        surname: "One",
+        email: "userone@example.com",
+        password: "Password123!",
+        dob: new Date("1990-01-01"),
+      });
+
+      await User.create({
+        firstName: "User",
+        surname: "Two",
+        email: "existingtaken@example.com",
+        password: "Password123!",
+        dob: new Date("1990-01-01"),
+      });
+
+      const token1 = generateAuthToken(user1);
+
+      const res = await request(app)
+        .post("/api/user-info/change-email/request")
+        .set("Authorization", `Bearer ${token1}`)
+        .send({ newEmail: "existingtaken@example.com" });
+
+      expect(res.status).toBe(409);
+      expect(res.body.success).toBe(false);
+      expect(res.body.message).toBe("The address has been taken");
+    });
+
+    it("should send verification OTP when changing to an available email", async () => {
+      const user = await User.create({
+        firstName: "User",
+        surname: "Three",
+        email: "userthree@example.com",
+        password: "Password123!",
+        authProvider: "google",
+        googleId: "google-12345",
+        dob: new Date("1990-01-01"),
+      });
+
+      const token = generateAuthToken(user);
+
+      const res = await request(app)
+        .post("/api/user-info/change-email/request")
+        .set("Authorization", `Bearer ${token}`)
+        .send({ newEmail: "brandnewemail@example.com" });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+    });
+
+    it("should reject verification with incorrect code", async () => {
+      const user = await User.create({
+        firstName: "User",
+        surname: "Four",
+        email: "userfour@example.com",
+        password: "Password123!",
+        dob: new Date("1990-01-01"),
+      });
+
+      const token = generateAuthToken(user);
+
+      const res = await request(app)
+        .post("/api/user-info/change-email/verify")
+        .set("Authorization", `Bearer ${token}`)
+        .send({ newEmail: "userfournew@example.com", code: "000000" });
+
+      expect(res.status).toBe(400);
+      expect(res.body.success).toBe(false);
+    });
+
+    it("should verify OTP, update email, and reset authProvider to local while clearing googleId", async () => {
+      const OTP = require("../models/client/otp.schema");
+      const user = await User.create({
+        firstName: "Google",
+        surname: "User",
+        email: "googleuser@example.com",
+        authProvider: "google",
+        googleId: "google-auth-id-999",
+        dob: new Date("1990-01-01"),
+      });
+
+      const token = generateAuthToken(user);
+      const newEmail = "googleuser.new@example.com";
+
+      // Request OTP
+      await request(app)
+        .post("/api/user-info/change-email/request")
+        .set("Authorization", `Bearer ${token}`)
+        .send({ newEmail });
+
+      // Create a known OTP code
+      await OTP.deleteMany({ identifier: newEmail, type: "email_change" });
+      await OTP.create({
+        identifier: newEmail,
+        code: "654321",
+        type: "email_change",
+        expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+      });
+
+      const verifyRes = await request(app)
+        .post("/api/user-info/change-email/verify")
+        .set("Authorization", `Bearer ${token}`)
+        .send({ newEmail, code: "654321" });
+
+      expect(verifyRes.status).toBe(200);
+      expect(verifyRes.body.success).toBe(true);
+      expect(verifyRes.body.data.user.email).toBe(newEmail);
+      expect(verifyRes.body.data.user.authProvider).toBe("local");
+      expect(verifyRes.body.data.user.googleId).toBeUndefined();
+      expect(verifyRes.body.data).toHaveProperty("accessToken");
+      expect(verifyRes.body.data).toHaveProperty("refreshToken");
+
+      // Verify in DB
+      const updatedInDb = await User.findById(user._id);
+      expect(updatedInDb.email).toBe(newEmail);
+      expect(updatedInDb.authProvider).toBe("local");
+      expect(updatedInDb.googleId).toBeUndefined();
+      expect(updatedInDb.isEmailVerified).toBe(true);
+    });
+  });
 });

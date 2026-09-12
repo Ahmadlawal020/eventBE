@@ -5,8 +5,20 @@ const {
   getUserById,
   updateUser,
   deleteUserAccount,
+  requestChangeEmailOTP,
+  verifyChangeEmailOTP,
 } = require("../../controllers/client/userProfile.controller");
 const verifyJWT = require("../../middleware/verifyJWT");
+
+// @route   POST /api/user-info/change-email/request
+// @desc    Request OTP to change email address
+// @access  Private
+router.post("/change-email/request", verifyJWT, requestChangeEmailOTP);
+
+// @route   POST /api/user-info/change-email/verify
+// @desc    Verify OTP and change email address
+// @access  Private
+router.post("/change-email/verify", verifyJWT, verifyChangeEmailOTP);
 
 // @route   GET /api/user-info/lookup?email=...
 // @desc    Look up a user by email (name + email + picture)

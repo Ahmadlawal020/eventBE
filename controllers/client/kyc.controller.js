@@ -1,5 +1,6 @@
 const asyncHandler = require("express-async-handler");
 const IdentityVerification = require("../../models/client/identityVerification.schema");
+const SelfieChallenge = require("../../models/client/selfieChallenge.schema");
 const User = require("../../models/client/user.schema");
 const cloudinary = require("../../utils/cloudinary");
 
@@ -20,7 +21,7 @@ const destroyCloudinaryImage = async (publicId) => {
 // @access  Private
 const submitKyc = asyncHandler(async (req, res) => {
   const userId = req.user.id;
-  const { idType, idFrontImage, idBackImage, selfieImage } = req.body;
+  const { idType, idFrontImage, idBackImage, selfieImage, selfieChallengeSessionId } = req.body;
 
   // ── Validation ──
   if (!idType || !idFrontImage?.url || !selfieImage?.url) {
@@ -46,6 +47,19 @@ const submitKyc = asyncHandler(async (req, res) => {
     return res.status(400).json({
       message: "You already have an active identity verification request.",
     });
+  }
+
+  if (!["DL", "PP", "ID"].includes(idType) ||
+      typeof selfieChallengeSessionId !== "string" || selfieChallengeSessionId.length !== 36) {
+    return res.status(400).json({ message: "Complete a new guided selfie challenge before submitting." });
+  }
+  // Atomic single-use claim. This authenticates the session, NOT the footage.
+  const challenge = await SelfieChallenge.findOneAndUpdate({
+    userId, sessionId: selfieChallengeSessionId, usedAt: null,
+    expiresAt: { $gt: new Date() },
+  }, { $set: { usedAt: new Date() } }, { new: true });
+  if (!challenge) {
+    return res.status(409).json({ message: "Your selfie session expired or was already used. Please repeat the challenge." });
   }
 
   // If there's an existing rejected one, clean up the files first
@@ -77,6 +91,10 @@ const submitKyc = asyncHandler(async (req, res) => {
     selfieImage: {
       url: selfieImage.url,
       publicId: selfieImage.publicId,
+    },
+    selfieChallenge: {
+      sessionId: challenge.sessionId, steps: challenge.steps,
+      reportedAt: challenge.usedAt, assessment: "app_reported_unverified",
     },
     status: "pending",
   });

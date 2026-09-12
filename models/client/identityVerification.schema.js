@@ -38,6 +38,13 @@ const identityVerificationSchema = new mongoose.Schema(
       enum: ["pending", "approved", "rejected"],
       default: "pending",
     },
+    selfieChallenge: {
+      type: new mongoose.Schema({
+        sessionId: String, steps: [String], reportedAt: Date,
+        assessment: { type: String, enum: ["app_reported_unverified"] },
+      }, { _id: false }),
+      default: null,
+    },
     rejectionReason: {
       type: String,
       default: null,
