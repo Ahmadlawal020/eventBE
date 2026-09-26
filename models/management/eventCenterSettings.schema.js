@@ -99,14 +99,11 @@ const eventCenterSettingsSchema = new Schema(
     key: { type: String, default: "event_center_settings", unique: true },
     general: {
       venueCreationEnabled: { type: Boolean, default: true },
-      draftsEnabled: { type: Boolean, default: true },
-      defaultCurrency: { type: String, default: "NGN", maxlength: 3 },
     },
     publishing: {
       autoPublishVerifiedOwners: { type: Boolean, default: true },
       requireIdentityVerification: { type: Boolean, default: true },
-      requirePhoneVerification: { type: Boolean, default: true },
-      requireSpecificLocation: { type: Boolean, default: false },
+      requirePayoutAccount: { type: Boolean, default: true },
       minimumImages: { type: Number, default: 0, min: 0, max: 30 },
       minimumSafetyItems: { type: Number, default: 0, min: 0, max: 8 },
     },
@@ -116,15 +113,16 @@ const eventCenterSettingsSchema = new Schema(
         type: Number,
         default: 250,
         min: 50,
-        max: 250,
+        max: 300,
       },
       maxDescriptionLength: {
         type: Number,
         default: 1000,
         min: 100,
-        max: 1000,
+        max: 2000,
       },
-      maxImages: { type: Number, default: 20, min: 1, max: 30 },
+      minImages: { type: Number, default: 1, min: 0, max: 30 },
+      maxImages: { type: Number, default: 20, min: 1, max: 50 },
       maxCustomRules: { type: Number, default: 20, min: 0, max: 50 },
     },
     booking: {
@@ -135,39 +133,46 @@ const eventCenterSettingsSchema = new Schema(
         enum: ["INSTANT", "REVIEW"],
         default: "INSTANT",
       },
+      maximumBookingDate: {
+        type: String,
+        default: null,
+        validate: {
+          validator: (value) => {
+            if (value === null || value === undefined) return true;
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+            const date = new Date(`${value}T00:00:00.000Z`);
+            return Number.isFinite(date.getTime()) &&
+              date.toISOString().slice(0, 10) === value;
+          },
+          message: "Select a valid maximum booking date",
+        },
+      },
       maximumBookingWindowMonths: {
         type: Number,
-        enum: [3, 6, 9, 12, 24],
+        enum: [3, 6, 9, 12, 18, 24, 36],
         default: 12,
       },
-      maximumAdvanceNoticeDays: { type: Number, default: 7, min: 0, max: 365 },
-      maximumPreparationDays: { type: Number, default: 3, min: 0, max: 30 },
     },
     pricing: {
-      requireBasePrice: { type: Boolean, default: false },
-      weekendPricingEnabled: { type: Boolean, default: true },
-      customPricingEnabled: { type: Boolean, default: true },
-      discountsEnabled: { type: Boolean, default: true },
+      feeCollectionMode: {
+        type: String,
+        enum: ["ORGANISER_CHOICE", "PASS_TO_BUYER", "ABSORB_BY_ORGANISER"],
+        default: "ORGANISER_CHOICE",
+      },
+
       minimumBasePrice: { type: Number, default: 0, min: 0 },
+      minimumBasePrices: {
+        NGN: { type: Number, default: 0, min: 0 },
+        USD: { type: Number, default: 0, min: 0 },
+        EUR: { type: Number, default: 0, min: 0 },
+        GBP: { type: Number, default: 0, min: 0 },
+        AED: { type: Number, default: 0, min: 0 },
+        SAR: { type: Number, default: 0, min: 0 },
+        GHS: { type: Number, default: 0, min: 0 },
+        KES: { type: Number, default: 0, min: 0 },
+        ZAR: { type: Number, default: 0, min: 0 },
+      },
     },
-    venueTypes: {
-      type: [optionSchema],
-      default: () => makeOptions(VENUE_TYPES),
-    },
-    amenities: { type: [optionSchema], default: () => makeOptions(AMENITIES) },
-    venueRules: {
-      type: [optionSchema],
-      default: () => makeOptions(VENUE_RULES),
-    },
-    safetyOptions: {
-      type: [optionSchema],
-      default: () => makeOptions(SAFETY_OPTIONS),
-    },
-    safetyConsiderations: {
-      type: [optionSchema],
-      default: () => makeOptions(SAFETY_CONSIDERATIONS),
-    },
-    discounts: { type: [optionSchema], default: () => makeOptions(DISCOUNTS) },
   },
   { timestamps: true },
 );

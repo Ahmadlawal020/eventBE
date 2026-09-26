@@ -1,3 +1,4 @@
+const { EVENT_FIELDS, prepareListingPatch } = require("../../utils/listingPatch");
 const Event = require("../../models/client/event.schema");
 const User = require("../../models/client/user.schema");
 const Ticket = require("../../models/client/eventTicketType.schema");
@@ -73,7 +74,7 @@ const createEvent = async (req, res) => {
     let status = "IN_PROGRESS";
     if (isDraft === false) {
       const user = await User.findById(req.user.id).select(
-        "isIdentityVerified isPhoneVerified",
+        "isIdentityVerified isPhoneVerified vendorAccountCode bankDetails",
       );
       const canAutoPublish =
         settings.publishing.autoPublishVerifiedOrganisers &&
@@ -112,10 +113,10 @@ const createEvent = async (req, res) => {
     });
   } catch (err) {
     console.error(err);
-    if (err.name === "ValidationError") {
+    if (err.status === 400 || err.name === "ValidationError" || err.name === "CastError") {
       return res.status(400).json({
         success: false,
-        message: Object.values(err.errors)[0]?.message || "Invalid event",
+        message: Object.values(err.errors || {})[0]?.message || err.message || "Invalid event",
       });
     }
     res.status(500).json({ success: false, message: "Server error" });
@@ -246,7 +247,7 @@ const updateEvent = async (req, res) => {
       }
     }
 
-    const updatePayload = req.body;
+    const updatePayload = prepareListingPatch(req.body, EVENT_FIELDS, prevEvent.toObject());
     const settings = await getEventSettings();
 
     /* ================================
@@ -314,21 +315,7 @@ const updateEvent = async (req, res) => {
     }
 
     const previousObject = prevEvent.toObject();
-    const mergedPayload = {
-      ...previousObject,
-      ...updatePayload,
-      schedule: { ...previousObject.schedule, ...updatePayload.schedule },
-      location: { ...previousObject.location, ...updatePayload.location },
-      entry: { ...previousObject.entry, ...updatePayload.entry },
-      ticketGuide: {
-        ...previousObject.ticketGuide,
-        ...updatePayload.ticketGuide,
-      },
-      arrivalGuide: {
-        ...previousObject.arrivalGuide,
-        ...updatePayload.arrivalGuide,
-      },
-    };
+    const mergedPayload = { ...previousObject, ...updatePayload };
     const resubmittingCompletedEvent =
       prevEvent.status === "COMPLETED" &&
       updatePayload.schedule?.to &&
@@ -336,8 +323,12 @@ const updateEvent = async (req, res) => {
     const validationErrors = validateEventPayload(mergedPayload, settings, {
       publishing:
         updatePayload.isDraft === false ||
-        updatePayload.status === "LISTED" ||
+        ["LISTED", "ACTION_REQUIRED"].includes(updatePayload.status) ||
         resubmittingCompletedEvent,
+      requireComplete: updatePayload.isDraft === false ||
+        ["LISTED", "ACTION_REQUIRED"].includes(updatePayload.status) ||
+        resubmittingCompletedEvent ||
+        (prevEvent.status === "LISTED" && !["IN_PROGRESS", "UNLISTED"].includes(updatePayload.status)),
       existing: true,
       changes: updatePayload,
     });
@@ -378,6 +369,7 @@ const updateEvent = async (req, res) => {
       }
     }
 
+    delete updatePayload.isDraft;
     const updatedEvent = await Event.findByIdAndUpdate(id, updatePayload, {
       new: true,
       runValidators: true,
@@ -391,10 +383,10 @@ const updateEvent = async (req, res) => {
     });
   } catch (err) {
     console.error("[UPDATE EVENT]", err);
-    if (err.name === "ValidationError") {
+    if (err.status === 400 || err.name === "ValidationError" || err.name === "CastError") {
       return res.status(400).json({
         success: false,
-        message: Object.values(err.errors)[0]?.message || "Invalid event",
+        message: Object.values(err.errors || {})[0]?.message || err.message || "Invalid event",
       });
     }
     res.status(500).json({
@@ -837,7 +829,7 @@ const deletePerformerImage = async (req, res) => {
 };
 
 // ===================== SYNC EVENTS ON VERIFICATION =====================
-const syncUserEvents = async (userId) => {
+const syncUserEvents = async (userId, { throwOnError = false } = {}) => {
   try {
     const [user, settings] = await Promise.all([
       User.findById(userId),
@@ -865,6 +857,7 @@ const syncUserEvents = async (userId) => {
     }
   } catch (err) {
     console.error("[SYNC USER EVENTS]", err);
+    if (throwOnError) throw err;
   }
 };
 

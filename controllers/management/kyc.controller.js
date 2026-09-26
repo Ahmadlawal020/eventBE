@@ -190,6 +190,16 @@ const reviewKyc = asyncHandler(async (req, res) => {
     isIdentityVerified: isApproved,
   });
 
+  // Publish outstanding listings as soon as KYC approval meets their requirements.
+  if (isApproved) {
+    const { syncUserEvents } = require("../client/event.controller");
+    const { syncUserEventCenters } = require("../client/eventCenter.controller");
+    await Promise.all([
+      syncUserEvents(verification.userId, { throwOnError: true }),
+      syncUserEventCenters(verification.userId, { throwOnError: true }),
+    ]);
+  }
+
   // Record audit log
   await recordAdminAction({
     req,

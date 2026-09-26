@@ -17,9 +17,7 @@ const SECTION_FIELDS = {
   publishing: [
     "autoPublishVerifiedOrganisers",
     "requireIdentityVerification",
-    "requirePhoneVerification",
     "requireCoverImage",
-    "requireSpecificLocation",
     "minLeadTimeHours",
     "maxDurationDays",
   ],

@@ -485,6 +485,16 @@ const setupSubaccount = async (req, res) => {
       bankCode,
     };
     await user.save();
+    try {
+      const { syncUserEvents } = require("./event.controller");
+      const { syncUserEventCenters } = require("./eventCenter.controller");
+      await Promise.allSettled([
+        syncUserEvents(userId),
+        syncUserEventCenters(userId),
+      ]);
+    } catch (syncErr) {
+      console.error("[SETUP SUBACCOUNT SYNC ERROR]", syncErr);
+    }
 
     res.status(200).json({
       success: true,
@@ -527,6 +537,16 @@ const removeSubaccount = async (req, res) => {
     await User.findByIdAndUpdate(userId, {
       $unset: { vendorAccountCode: 1, bankDetails: 1 }
     });
+    try {
+      const { syncUserEvents } = require("./event.controller");
+      const { syncUserEventCenters } = require("./eventCenter.controller");
+      await Promise.allSettled([
+        syncUserEvents(userId),
+        syncUserEventCenters(userId),
+      ]);
+    } catch (syncErr) {
+      console.error("[REMOVE SUBACCOUNT SYNC ERROR]", syncErr);
+    }
 
     res.status(200).json({
       success: true,

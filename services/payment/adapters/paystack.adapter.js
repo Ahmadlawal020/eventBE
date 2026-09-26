@@ -30,13 +30,14 @@ class PaystackAdapter extends PaymentGateway {
   // CORE PAYMENT
   // ────────────────────────────────────────────────────────────────
 
-  async initializePayment({ email, amount, reference, metadata, subaccount, callbackUrl, transactionCharge, bearer }) {
+  async initializePayment({ email, amount, reference, metadata, subaccount, callbackUrl, transactionCharge, bearer, currency = "NGN" }) {
     this._ensureKey();
 
     const response = await axios.post(
       `${this.baseUrl}/transaction/initialize`,
       {
         email,
+        currency,
         amount: Math.round(amount * 100), // Convert to kobo
         reference,
         callback_url: callbackUrl,
@@ -48,7 +49,7 @@ class PaystackAdapter extends PaymentGateway {
             : undefined,
         bearer: subaccount && bearer ? bearer : undefined,
       },
-      { headers: this._headers() }
+      { headers: this._headers(), timeout: 30000 }
     );
 
     if (!response.data.status) {
@@ -58,12 +59,31 @@ class PaystackAdapter extends PaymentGateway {
     return response.data.data;
   }
 
+  async createTransferRecipient({accountName,accountNumber,bankCode,currency}) {
+    this._ensureKey();
+    const response=await axios.post(`${this.baseUrl}/transferrecipient`,{type:"nuban",name:accountName,account_number:accountNumber,bank_code:bankCode,currency},{headers:this._headers(),timeout:30000});
+    if(!response.data.status)throw new Error(response.data.message || "Recipient creation failed");
+    return response.data.data;
+  }
+  async transferToOrganiser({amount,currency,recipient,reference}) {
+    this._ensureKey();
+    const response=await axios.post(`${this.baseUrl}/transfer`,{source:"balance",amount,currency,recipient,reference,reason:"Approved venue booking"},{headers:this._headers(),timeout:30000});
+    if(!response.data.status)throw new Error(response.data.message || "Payout request failed");
+    return response.data.data;
+  }
+  async verifyTransfer(reference) {
+    this._ensureKey();
+    const response=await axios.get(`${this.baseUrl}/transfer/verify/${encodeURIComponent(reference)}`,{headers:this._headers(),timeout:30000});
+    if(!response.data.status)throw new Error(response.data.message || "Payout verification failed");
+    return response.data.data;
+  }
+
   async verifyPayment(reference) {
     this._ensureKey();
 
     const response = await axios.get(
-      `${this.baseUrl}/transaction/verify/${reference}`,
-      { headers: this._headers() }
+      `${this.baseUrl}/transaction/verify/${encodeURIComponent(reference)}`,
+      { headers: this._headers(), timeout: 30000 }
     );
 
     if (!response.data.status) {

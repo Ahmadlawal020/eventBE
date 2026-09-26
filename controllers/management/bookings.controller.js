@@ -96,6 +96,56 @@ const venueBookingMetrics = async () => {
   };
 };
 
+const eventBookingMetrics = async (query) => {
+  const [metrics] = await EventBooking.aggregate([
+    { $match: query },
+    {
+      $group: {
+        _id: null,
+        totalOrders: { $sum: 1 },
+        totalRevenue: {
+          $sum: {
+            $cond: [
+              { $eq: ["$paymentStatus", "COMPLETED"] },
+              "$totalAmount",
+              0,
+            ],
+          },
+        },
+        paidOrders: {
+          $sum: { $cond: [{ $eq: ["$paymentStatus", "COMPLETED"] }, 1, 0] },
+        },
+        pendingOrders: {
+          $sum: { $cond: [{ $eq: ["$paymentStatus", "PENDING"] }, 1, 0] },
+        },
+        refundedOrders: {
+          $sum: { $cond: [{ $eq: ["$paymentStatus", "REFUNDED"] }, 1, 0] },
+        },
+        ticketsSold: {
+          $sum: {
+            $cond: [
+              { $eq: ["$paymentStatus", "COMPLETED"] },
+              { $sum: "$items.quantity" },
+              0,
+            ],
+          },
+        },
+      },
+    },
+    { $project: { _id: 0 } },
+  ]);
+  return (
+    metrics || {
+      totalOrders: 0,
+      totalRevenue: 0,
+      paidOrders: 0,
+      pendingOrders: 0,
+      refundedOrders: 0,
+      ticketsSold: 0,
+    }
+  );
+};
+
 const getBookings = async (req, res) => {
   try {
     const {
@@ -195,7 +245,26 @@ const getBookings = async (req, res) => {
             query["selectedDates.date"] = { $lt: today };
         }
 
+        if (
+          bookingType === "event" &&
+          ["today", "upcoming", "past"].includes(dateRange)
+        ) {
+          const dates =
+            dateRange === "today"
+              ? { $gte: today, $lt: tomorrow }
+              : dateRange === "upcoming"
+                ? { $gte: today }
+                : { $lt: today };
+          const datedEvents = await Event.find({ "schedule.from": dates })
+            .select("_id")
+            .lean();
+          query.eventId = { $in: datedEvents.map((event) => event._id) };
+        }
         const sortOptions = {
+          amount_low:
+            bookingType === "event-center"
+              ? { "totalPrice.amount": 1 }
+              : { totalAmount: 1 },
           newest: { createdAt: -1 },
           oldest: { createdAt: 1 },
           date_soon:
@@ -244,6 +313,10 @@ const getBookings = async (req, res) => {
         ]);
         return {
           count,
+          eventMetrics:
+            bookingType === "event"
+              ? await eventBookingMetrics(query)
+              : undefined,
           items: items.map((item) => ({ ...item, bookingType })),
         };
       }),
@@ -262,7 +335,11 @@ const getBookings = async (req, res) => {
       success: true,
       data: {
         bookings: bookings.slice(0, limit),
-        metrics: { eventCenters: metrics },
+        metrics: {
+          eventCenters: metrics,
+          events: resultGroups.find((group) => group.eventMetrics)
+            ?.eventMetrics,
+        },
         pagination: {
           total,
           page,
@@ -298,12 +375,12 @@ const updateBookingStatus = async (req, res) => {
         .status(400)
         .json({ success: false, message: "Invalid booking status" });
     }
-    if (paymentStatus && !PAYMENT_STATUSES[type].includes(paymentStatus)) {
+    if (paymentStatus !== undefined) {
       return res
         .status(400)
-        .json({ success: false, message: "Invalid payment status" });
+        .json({ success: false, message: "Payment state is managed by verified payments and refunds; it cannot be edited manually" });
     }
-    if (!status && !paymentStatus) {
+    if (!status) {
       return res
         .status(400)
         .json({ success: false, message: "No status update provided" });
@@ -325,7 +402,7 @@ const updateBookingStatus = async (req, res) => {
     };
 
     if (status) booking.status = status;
-    if (paymentStatus) booking.paymentStatus = paymentStatus;
+
     await booking.save();
 
     await recordAdminAction({
@@ -369,13 +446,16 @@ const getBookingDetail = async (req, res) => {
     const targetType =
       type === "event-center" ? "EventCenterBooking" : "EventBooking";
 
-    const booking = await Model.findById(id)
+    const detailQuery = Model.findById(id)
       .select("-qrPayload")
-      .populate("buyer", "firstName surname email phoneNumber profilePicture")
-      .populate("checkIn.checkedInBy", "firstName surname email")
-      .populate("transferHistory.fromUser", "firstName surname email")
-      .populate("transferHistory.toUser", "firstName surname email")
-      .lean();
+      .populate("buyer", "firstName surname email phoneNumber profilePicture");
+    if (type === "event-center") {
+      detailQuery
+        .populate("checkIn.checkedInBy", "firstName surname email")
+        .populate("transferHistory.fromUser", "firstName surname email")
+        .populate("transferHistory.toUser", "firstName surname email");
+    }
+    const booking = await detailQuery.lean();
 
     if (!booking) {
       return res
@@ -386,7 +466,7 @@ const getBookingDetail = async (req, res) => {
     if (type === "event") {
       await Model.populate(booking, {
         path: "eventId",
-        select: "title status images location createdBy",
+        select: "title status images location schedule createdBy",
         populate: { path: "createdBy", select: "firstName surname email" },
       });
     } else {
@@ -425,8 +505,121 @@ const getBookingDetail = async (req, res) => {
   }
 };
 
+const getVenueCalendar = async (req, res) => {
+  const { venueId, yearMonth } = req.query;
+
+  try {
+    const bookingQuery = {};
+    if (venueId && mongoose.Types.ObjectId.isValid(venueId)) {
+      bookingQuery.eventCenter = venueId;
+    }
+
+    let dateStart;
+    let dateEnd;
+    if (yearMonth && /^\d{4}-\d{2}$/.test(yearMonth)) {
+      const [y, m] = yearMonth.split("-").map(Number);
+      dateStart = new Date(Date.UTC(y, m - 1, 1));
+      dateEnd = new Date(Date.UTC(y, m, 1));
+    }
+
+    if (dateStart && dateEnd) {
+      bookingQuery["selectedDates.date"] = { $gte: dateStart, $lt: dateEnd };
+    }
+
+    const [bookings, venues] = await Promise.all([
+      EventCenterBooking.find(bookingQuery)
+        .populate("eventCenter", "venueName capacity")
+        .lean(),
+      EventCenter.find(
+        venueId && mongoose.Types.ObjectId.isValid(venueId)
+          ? { _id: venueId }
+          : { "availability.unavailableDates.0": { $exists: true } },
+      )
+        .select("venueName availability")
+        .lean(),
+    ]);
+
+    const events = [];
+
+    // 1. Platform Bookings
+    for (const b of bookings) {
+      const vName = b.eventCenter?.venueName || "Event Center";
+      const vId = b.eventCenter?._id ? String(b.eventCenter._id) : String(b.eventCenter || "");
+      const isConfirmed = ["ACTIVE", "CONFIRMED", "COMPLETED"].includes(b.status);
+
+      for (let i = 0; i < (b.selectedDates || []).length; i++) {
+        const item = b.selectedDates[i];
+        const dateStr = item.date ? new Date(item.date).toISOString().split("T")[0] : "";
+        if (!dateStr) continue;
+        if (yearMonth && !dateStr.startsWith(yearMonth)) continue;
+
+        events.push({
+          id: `${b._id}-${i}`,
+          venueId: vId,
+          venueName: vName,
+          title: `${b.guestDetails?.fullName || "Guest"} - ${vName}`,
+          clientName: b.guestDetails?.fullName || "Guest",
+          clientEmail: b.guestDetails?.email || "",
+          date: dateStr,
+          startTime: item.startTime || "00:00",
+          endTime: item.endTime || "24:00",
+          type: isConfirmed ? "BOOKING_CONFIRMED" : "BOOKING_PENDING",
+          guestCount: b.eventCenter?.capacity?.max || 1,
+          bookingReference: b.ticketNumber || String(b._id).slice(-8).toUpperCase(),
+        });
+      }
+    }
+
+    // 2. Venue Blocked Dates and Manual Bookings
+    for (const v of venues) {
+      const vId = String(v._id);
+      const vName = v.venueName || "Event Center";
+
+      const unavail = v.availability?.unavailableDates || [];
+      for (let i = 0; i < unavail.length; i++) {
+        const u = unavail[i];
+        const rawDate = typeof u === "string" ? u : u?.date;
+        if (!rawDate) continue;
+        const dateStr = new Date(rawDate).toISOString().split("T")[0];
+        if (yearMonth && !dateStr.startsWith(yearMonth)) continue;
+
+        const isManual = typeof u === "object" && u.type === "MANUAL";
+        events.push({
+          id: `block-${vId}-${i}`,
+          venueId: vId,
+          venueName: vName,
+          title: isManual
+            ? (u.clientName ? `Manual: ${u.clientName}` : "Manual Booking")
+            : "Maintenance / Blackout",
+          clientName: isManual ? (u.clientName || "Direct Client") : "Facility Hold",
+          clientEmail: isManual ? (u.clientEmail || "") : "",
+          date: dateStr,
+          startTime: "00:00",
+          endTime: "24:00",
+          type: isManual ? "BOOKING_CONFIRMED" : "MAINTENANCE_BLACKOUT",
+          bookingReference: isManual ? (u.bookingId || "MANUAL") : undefined,
+        });
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        events,
+      },
+    });
+  } catch (error) {
+    console.error("[ADMIN GET VENUE CALENDAR ERROR]", error);
+    res.status(500).json({
+      success: false,
+      message: "Server error fetching venue calendar",
+    });
+  }
+};
+
 module.exports = {
   getBookings,
   getBookingDetail,
   updateBookingStatus,
+  getVenueCalendar,
 };

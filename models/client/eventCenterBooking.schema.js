@@ -65,6 +65,12 @@ const eventCenterTicketSchema = new mongoose.Schema(
       enum: ["PENDING", "COMPLETED", "FAILED", "REFUNDED", "FAILED_REFUND"],
       default: "PENDING",
     },
+    payoutDestination: {type:mongoose.Schema.Types.Mixed,select:false},
+    checkoutAccessCode: {type:String, select:false},
+    checkoutUrl: {type:String, select:false},
+    paymentResolutionRequired: {type:Boolean, default:false},
+    reservationExpiresAt: {type:Date, index:true},
+    inventoryReserved: {type:Boolean, default:false},
     paymentReference: {
       type: String,
       unique: true,

@@ -1,7 +1,6 @@
 const mongoose = require("mongoose");
 const Conversation = require("../../models/client/conversation.schema");
 const Message = require("../../models/client/message.schema");
-const { dispatchBulkNotifications, NOTIFICATION_TYPES } = require("../../services/notification");
 const User = require("../../models/client/user.schema");
 
 const getConversations = async (req, res) => {
@@ -170,50 +169,8 @@ const sendReply = async (req, res) => {
   }
 };
 
-const broadcastNotification = async (req, res) => {
-  try {
-    const { title, message, targetGroup = "all" } = req.body;
-
-    if (!title?.trim() || !message?.trim()) {
-      return res.status(400).json({ success: false, message: "Title and message are required" });
-    }
-
-    let userQuery = {};
-    if (targetGroup === "organisers") {
-      userQuery = { roles: "organiser" };
-    } else if (targetGroup === "staff") {
-      userQuery = { roles: "staff" };
-    }
-
-    const users = await User.find(userQuery).select("_id").lean();
-    const recipientIds = users.map((u) => u._id);
-
-    const result = await dispatchBulkNotifications({
-      recipients: recipientIds,
-      sender: req.user.id,
-      type: NOTIFICATION_TYPES.ANNOUNCEMENT,
-      title: title.trim(),
-      message: message.trim(),
-      channels: ["in_app", "push"],
-    });
-
-    res.status(201).json({
-      success: true,
-      data: {
-        sent: result.inAppCount,
-        pushSent: result.pushCount,
-        targetGroup,
-      },
-    });
-  } catch (error) {
-    console.error("[ADMIN SUPPORT - BROADCAST]", error);
-    res.status(500).json({ success: false, message: "Server error" });
-  }
-};
-
 module.exports = {
   getConversations,
   getConversationMessages,
   sendReply,
-  broadcastNotification,
 };

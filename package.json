@@ -12,7 +12,9 @@
     "test:referral:unit": "node --test tests/referralPolicy.unit.spec.js",
     "test:referral": "jest --config jest.referral.config.js --runInBand",
     "test:watch": "cross-env NODE_ENV=test jest --watch",
-    "test:coverage": "cross-env NODE_ENV=test jest --coverage --runInBand --forceExit"
+    "test:coverage": "cross-env NODE_ENV=test jest --coverage --runInBand --forceExit",
+    "test:payments": "node --test tests/paymentCheckout.unit.spec.cjs",
+    "test:payments:integration": "node --test tests/paymentCheckout.integration.spec.cjs"
   },
   "keywords": [],
   "author": "",

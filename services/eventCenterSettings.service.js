@@ -2,15 +2,11 @@ const EventCenterSettings = require("../models/management/eventCenterSettings.sc
 
 const getEventCenterSettings = () => EventCenterSettings.getSingleton();
 
-const enabledKeys = (options = []) =>
-  new Set(
-    options.filter((option) => option.enabled).map((option) => option.key),
-  );
 
 const validateVenuePayload = (
   payload,
   settings,
-  { publishing = false, existing = false, changes = payload } = {},
+  { publishing = false, requireComplete = publishing, existing = false, changes = payload } = {},
 ) => {
   const errors = [];
   const shouldValidate = (field) =>
@@ -21,46 +17,7 @@ const validateVenuePayload = (
   if (!existing && !settings.general.venueCreationEnabled) {
     errors.push("Venue creation is temporarily disabled");
   }
-  if (
-    !existing &&
-    payload.isDraft !== false &&
-    !settings.general.draftsEnabled
-  ) {
-    errors.push("Draft venues are currently disabled");
-  }
 
-  const validateOptions = (values, options, label) => {
-    if (!Array.isArray(values)) return;
-    const enabled = enabledKeys(options);
-    const unavailable = values.find((value) => !enabled.has(value));
-    if (unavailable)
-      errors.push(`${label} option ${unavailable} is not available`);
-  };
-
-  if (payload.venueType && shouldValidate("venueType")) {
-    if (!enabledKeys(settings.venueTypes).has(payload.venueType)) {
-      errors.push("The selected venue type is not available");
-    }
-  }
-  if (shouldValidate("amenities")) {
-    validateOptions(payload.amenities, settings.amenities, "Amenity");
-  }
-  if (shouldValidate("venueRules")) {
-    validateOptions(payload.venueRules, settings.venueRules, "Venue rule");
-  }
-  if (shouldValidate("safety")) {
-    validateOptions(payload.safety, settings.safetyOptions, "Safety");
-  }
-  if (shouldValidate("safetyConsiderations")) {
-    validateOptions(
-      payload.safetyConsiderations,
-      settings.safetyConsiderations,
-      "Safety consideration",
-    );
-  }
-  if (shouldValidate("discounts")) {
-    validateOptions(payload.discounts, settings.discounts, "Discount");
-  }
 
   const limits = settings.contentLimits;
   const validateLength = (value, maximum, label) => {
@@ -111,45 +68,73 @@ const validateVenuePayload = (
   ) {
     errors.push("Request-to-book is currently disabled");
   }
-  if (
-    shouldValidate("weekendPrice") &&
-    payload.weekendPrice?.amount !== undefined &&
-    !settings.pricing.weekendPricingEnabled
-  ) {
-    errors.push("Weekend pricing is currently disabled");
+
+  if (shouldValidate("capacity") && payload.capacity?.max !== undefined &&
+      (!Number.isInteger(payload.capacity.max) || payload.capacity.max <= 0)) {
+    errors.push("Capacity must be a positive whole number");
   }
-  if (
-    shouldValidate("discounts") &&
-    payload.discounts?.length &&
-    !settings.pricing.discountsEnabled
-  ) {
-    errors.push("Venue discounts are currently disabled");
+  for (const field of ["basePrice", "weekendPrice"]) {
+    const price = payload[field];
+    if (shouldValidate(field) && price?.amount !== undefined &&
+        (!Number.isFinite(price.amount) || price.amount < 0)) {
+      errors.push("Price must be a finite non-negative number");
+    }
   }
 
-  if (publishing) {
-    if ((payload.images?.length || 0) < settings.publishing.minimumImages) {
+  if (shouldValidate("basePrice") && payload.basePrice?.amount !== undefined) {
+    const currency = payload.basePrice?.currency || "NGN";
+    const minRequired =
+      settings.pricing.minimumBasePrices?.[currency] ??
+      settings.pricing.minimumBasePrices?.get?.(currency) ??
+      settings.pricing.minimumBasePrice ??
+      0;
+    if (Number(payload.basePrice.amount) < minRequired) {
+      errors.push(`Base price for ${currency} must be at least ${minRequired}`);
+    }
+  }
+
+  if (requireComplete) {
+    for (const [field, label] of [
+      ["venueName", "Venue name"], ["venueType", "Venue type"],
+      ["shortDescription", "Short description"], ["description", "Description"],
+    ]) {
+      if (typeof payload[field] !== "string" || !payload[field].trim()) {
+        errors.push(label + " is required before publishing");
+      }
+    }
+    if (!Array.isArray(payload.supportedEvents) || !payload.supportedEvents.length) {
+      errors.push("At least one supported event type is required before publishing");
+    }
+    if (!Number.isInteger(payload.capacity?.max) || payload.capacity.max <= 0) {
+      errors.push("A valid maximum capacity is required before publishing");
+    }
+    if (
+      !Array.isArray(payload.images) ||
+      payload.images.length < settings.publishing.minimumImages
+    ) {
       errors.push(
-        `At least ${settings.publishing.minimumImages} venue images are required`,
+        `At least ${settings.publishing.minimumImages} property images are required before publishing`,
       );
     }
     if (
-      (payload.safety?.length || 0) < settings.publishing.minimumSafetyItems
+      !Array.isArray(payload.safety) ||
+      payload.safety.length < settings.publishing.minimumSafetyItems
     ) {
       errors.push(
-        `At least ${settings.publishing.minimumSafetyItems} safety items are required`,
+        `At least ${settings.publishing.minimumSafetyItems} safety & security items are required before publishing`,
       );
     }
-    if (
-      settings.publishing.requireSpecificLocation &&
-      !payload.location?.isSpecificLocation
-    ) {
-      errors.push("A specific venue location is required before publishing");
-    }
-    if (settings.pricing.requireBasePrice) {
+    if (payload.basePrice?.amount !== undefined) {
       const amount = payload.basePrice?.amount;
-      if (amount === undefined || amount < settings.pricing.minimumBasePrice) {
+      const currency = payload.basePrice?.currency || "NGN";
+      const minRequired =
+        settings.pricing?.minimumBasePrices?.[currency] ??
+        settings.pricing?.minimumBasePrices?.get?.(currency) ??
+        settings.pricing?.minimumBasePrice ??
+        0;
+      if (!Number.isFinite(amount) || amount < minRequired) {
         errors.push(
-          `Base price must be at least ${settings.pricing.minimumBasePrice}`,
+          `Base price for ${currency} must be at least ${minRequired}`,
         );
       }
     }
@@ -158,32 +143,32 @@ const validateVenuePayload = (
   return errors;
 };
 
-const ownerMeetsPublishingRequirements = (user, settings) =>
-  (!settings.publishing.requireIdentityVerification ||
-    Boolean(user?.isIdentityVerified)) &&
-  (!settings.publishing.requirePhoneVerification ||
-    Boolean(user?.isPhoneVerified));
-
-const publicEventCenterSettings = (settings) => {
-  const publicOptions = (options) =>
-    options
-      .filter((option) => option.enabled)
-      .sort((left, right) => left.sortOrder - right.sortOrder);
-  return {
-    general: settings.general,
-    publishing: settings.publishing,
-    contentLimits: settings.contentLimits,
-    booking: settings.booking,
-    pricing: settings.pricing,
-    venueTypes: publicOptions(settings.venueTypes),
-    amenities: publicOptions(settings.amenities),
-    venueRules: publicOptions(settings.venueRules),
-    safetyOptions: publicOptions(settings.safetyOptions),
-    safetyConsiderations: publicOptions(settings.safetyConsiderations),
-    discounts: publicOptions(settings.discounts),
-    updatedAt: settings.updatedAt,
-  };
+const ownerMeetsPublishingRequirements = (user, settings) => {
+  if (
+    settings.publishing.requireIdentityVerification &&
+    !user?.isIdentityVerified
+  ) {
+    return false;
+  }
+  const hasPayoutAccount = Boolean(
+    user?.vendorAccountCode ||
+    (user?.bankDetails?.accountNumber && user?.bankDetails?.bankCode)
+  );
+  const requirePayout = settings.publishing.requirePayoutAccount !== false;
+  if (requirePayout && !hasPayoutAccount) {
+    return false;
+  }
+  return true;
 };
+
+const publicEventCenterSettings = (settings) => ({
+  general: settings.general,
+  publishing: settings.publishing,
+  contentLimits: settings.contentLimits,
+  booking: settings.booking,
+  pricing: settings.pricing,
+  updatedAt: settings.updatedAt,
+});
 
 module.exports = {
   getEventCenterSettings,

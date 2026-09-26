@@ -14,6 +14,8 @@ mongoose.connection.once("open", () => {
   require("./jobs/notificationTrigger.job");
   require("./jobs/reviewBookingExpiry.job");
   require("./jobs/eventCompletion.job");
+  require("./jobs/paymentReservationExpiry.job");
+  require("./jobs/venuePayout.job");
   require("./jobs/referralReconciliation.job");
   server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);

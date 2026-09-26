@@ -14,7 +14,7 @@ const escapeRegex = (value = "") => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
  * Co-organiser: MANAGE_BOOKINGS, ALL_ACCESS, or VIEW_CALENDAR
  * Staff: MANAGE_BOOKINGS
  */
-async function authorizeBookingAccess(userId, eventCenterId) {
+async function authorizeBookingAccess(userId, eventCenterId, allowCalendarView = true) {
   const eventCenter = await EventCenter.findById(eventCenterId);
   if (!eventCenter) return { authorized: false, error: "Event center not found" };
 
@@ -27,7 +27,7 @@ async function authorizeBookingAccess(userId, eventCenterId) {
     host: eventCenter.createdBy,
     status: "ACCEPTED",
     "listings.listingId": eventCenter._id,
-    permissions: { $in: ["MANAGE_BOOKINGS", "ALL_ACCESS", "VIEW_CALENDAR"] }
+    permissions: { $in: allowCalendarView ? ["MANAGE_BOOKINGS", "ALL_ACCESS", "VIEW_CALENDAR"] : ["MANAGE_BOOKINGS", "ALL_ACCESS"] }
   });
   if (coOrganiserInvite) return { authorized: true };
 
@@ -277,7 +277,7 @@ exports.cancelBooking = async (req, res) => {
       return res.status(404).json({ success: false, message: "Booking not found." });
     }
 
-    const auth = await authorizeBookingAccess(req.user.id, booking.eventCenter);
+    const auth = await authorizeBookingAccess(req.user.id, booking.eventCenter, false);
     if (!auth.authorized) {
       return res.status(403).json({ success: false, message: auth.error });
     }

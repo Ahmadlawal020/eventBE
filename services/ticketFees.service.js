@@ -65,20 +65,22 @@ const publicTicketFeeSettings = (source) => {
 
 const roundMoney = (value) => Math.round(Number(value || 0) * 100) / 100;
 
-const calculateEventCenterPricing = ({ subtotalAmount, fees, feeMode }) => {
+const calculateEventCenterPricing = ({ subtotalAmount, fees, feeMode, feeCollectionMode = "ORGANISER_CHOICE", currency = "NGN" }) => {
   const safeSubtotal = roundMoney(Math.max(0, Number(subtotalAmount) || 0));
   const percentage = Number.isFinite(Number(fees?.eventCenterCommission))
     ? Number(fees.eventCenterCommission)
     : 15;
   const platformFeeAmount = roundMoney((safeSubtotal * percentage) / 100);
-  const mode = feeMode === "deduct" ? "ABSORB_BY_ORGANISER" : "PASS_TO_BUYER";
+  const mode = feeCollectionMode === "PASS_TO_BUYER" || feeCollectionMode === "ABSORB_BY_ORGANISER"
+    ? feeCollectionMode
+    : feeMode === "deduct" ? "ABSORB_BY_ORGANISER" : "PASS_TO_BUYER";
   const buyerFeeAmount = mode === "PASS_TO_BUYER" ? platformFeeAmount : 0;
   const organiserFeeAmount = mode === "ABSORB_BY_ORGANISER"
     ? Math.min(platformFeeAmount, safeSubtotal)
     : 0;
 
   return {
-    currency: "NGN",
+    currency,
     subtotalAmount: safeSubtotal,
     percentage,
     mode,

@@ -1,55 +1,13 @@
-const { getPaymentGateway } = require("../../services/payment");
-
-const gateway = getPaymentGateway();
-
-// ===================== INITIALIZE =====================
-const initializePayment = async (req, res) => {
-  const { email, amount, metadata, callback_url } = req.body;
-
+const {getPaymentGateway}=require("../../services/payment");
+const EventBooking=require("../../models/client/eventBooking.schema");
+const VenueBooking=require("../../models/client/eventCenterBooking.schema");
+const initializePayment=async(_req,res)=>res.status(410).json({success:false,message:"Start payment through an event or venue booking."});
+const verifyPayment=async(req,res)=>{
   try {
-    const data = await gateway.initializePayment({
-      email,
-      amount,
-      metadata,
-      callbackUrl: callback_url,
-    });
-
-    res.status(200).json({
-      success: true,
-      message: "Payment initialized",
-      data,
-    });
-  } catch (err) {
-    console.error("[PAYMENT INIT ERROR]", err.message);
-    res.status(500).json({
-      success: false,
-      message: "Could not initialize payment",
-    });
-  }
+    const booking=await EventBooking.findOne({paymentReference:req.params.reference}) || await VenueBooking.findOne({paymentReference:req.params.reference});
+    if(!booking || String(booking.buyer)!==String(req.user.id))return res.status(404).json({success:false,message:"Payment not found"});
+    const payment=await getPaymentGateway().verifyPayment(req.params.reference);
+    return res.json({success:payment.status==="success",data:{reference:payment.reference,status:payment.status,amount:payment.amount,currency:payment.currency}});
+  } catch(error){return res.status(502).json({success:false,message:"Could not verify payment"});}
 };
-
-// ===================== VERIFY (GENERAL) =====================
-const verifyPayment = async (req, res) => {
-  const { reference } = req.params;
-
-  try {
-    const data = await gateway.verifyPayment(reference);
-
-    res.status(200).json({
-      success: true,
-      message: "Payment verified",
-      data,
-    });
-  } catch (err) {
-    console.error("[PAYMENT VERIFY ERROR]", err.message);
-    res.status(500).json({
-      success: false,
-      message: "Payment verification failed",
-    });
-  }
-};
-
-module.exports = {
-  initializePayment,
-  verifyPayment,
-};
+module.exports={initializePayment,verifyPayment};

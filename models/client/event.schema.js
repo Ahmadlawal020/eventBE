@@ -188,10 +188,21 @@ const eventSchema = new mongoose.Schema(
       minAge: {
         type: Number,
         min: 0,
+        validate: { validator: (value) => value === undefined || Number.isInteger(value),
+          message: "Minimum age must be a non-negative whole number" },
       },
       maxAge: {
         type: Number,
         min: 0,
+        validate: {
+          validator: function (value) {
+            const min = this instanceof mongoose.Query
+              ? (this.get("ageRestriction")?.minAge ?? this.get("ageRestriction.minAge"))
+              : this.ageRestriction?.minAge;
+            return value === undefined || (Number.isInteger(value) && (min == null || value >= min));
+          },
+          message: "Maximum age must be a whole number at least equal to minimum age",
+        },
       },
     },
 

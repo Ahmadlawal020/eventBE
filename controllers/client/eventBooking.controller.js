@@ -1,3 +1,4 @@
+const {notifyPaymentCompletion}=require("../../services/paymentCompletionNotifications.service");
 const { recordBookingReferral } = require("../../services/referral.service");
 const EventBooking = require("../../models/client/eventBooking.schema");
 const UserEventTicket = require("../../models/client/userEventTicket.schema");
@@ -20,6 +21,7 @@ const {
 } = require("../../services/ticketFees.service");
 
 const gateway = getPaymentGateway();
+const { currencyForCheckout, reserveEventBooking, completePayment } = require("../../services/checkoutSafety.service");
 
 /**
  * PRICE QUOTE
@@ -39,6 +41,7 @@ const quoteBooking = async (req, res) => {
       return res.status(404).json({ success: false, message: "Event not found" });
     }
 
+    let quoteCurrency = null;
     const pricedInputs = [];
     for (const item of items) {
       const quantity = Number(item.quantity);
@@ -76,6 +79,9 @@ const quoteBooking = async (req, res) => {
           message: `Donation for ${ticket.name} is outside the allowed range.`,
         });
       }
+      const currency = currencyForCheckout(ticket.currency?.code);
+      if(quoteCurrency && quoteCurrency!==currency)return res.status(400).json({success:false,message:"Ticket currencies do not match"});
+      quoteCurrency=currency;
       pricedInputs.push({
         ticketId: ticket._id,
         name: ticket.name,
@@ -89,14 +95,14 @@ const quoteBooking = async (req, res) => {
     const pricing = calculateTicketPricing({
       items: pricedInputs,
       fees: await getPlatformFees(),
-      currency: { code: "NGN", symbol: "₦" },
+      currency: { code: quoteCurrency, symbol: "₦" },
     });
     return res.json({ success: true, data: { pricing } });
   } catch (error) {
     console.error("[TICKET QUOTE ERROR]", error);
-    return res.status(500).json({
+    return res.status(error.statusCode || 500).json({
       success: false,
-      message: "Could not calculate this ticket order.",
+      message: error.statusCode ? error.message : "Could not calculate this ticket order.",
     });
   }
 };
@@ -107,7 +113,7 @@ const quoteBooking = async (req, res) => {
 const createBooking = async (req, res) => {
   const { eventId, items, paymentMethod, totalAmount } = req.body;
   const buyerId = req.user.id; // From verifyJWT middleware
-  let reservedTickets = []; // Track atomic reservations for rollback
+  let checkoutCurrency = null;
 
   try {
     // 1. Fetch User details for automated filling
@@ -152,9 +158,10 @@ const createBooking = async (req, res) => {
       });
     }
 
+    if (!["CARD", "TRANSFER", "FREE"].includes(paymentMethod)) return res.status(400).json({success:false,message:"Invalid payment method"});
     const processedItems = [];
     for (const item of items) {
-      if (!item.product || !item.quantity || item.quantity < 1) {
+      if (!item.product || !Number.isSafeInteger(item.quantity) || item.quantity < 1) {
         return res.status(400).json({
           success: false,
           message: "Each item must have a valid product and quantity >= 1.",
@@ -191,34 +198,9 @@ const createBooking = async (req, res) => {
         });
       }
 
-      // Atomic inventory reservation: check + increment in one operation
-      const reservation = await Ticket.findOneAndUpdate(
-        {
-          _id: item.product,
-          $expr: {
-            $gte: [
-              { $subtract: ["$totalQuantity", "$soldQuantity"] },
-              item.quantity,
-            ],
-          },
-        },
-        { $inc: { soldQuantity: item.quantity } },
-        { new: true },
-      );
-
-      if (!reservation) {
-        // Rollback previous reservations
-        for (const prev of reservedTickets) {
-          await Ticket.findByIdAndUpdate(prev.ticketId, {
-            $inc: { soldQuantity: -prev.quantity },
-          });
-        }
-        return res.status(400).json({
-          success: false,
-          message: `Not enough tickets available for ${ticketType.name}`,
-        });
-      }
-      reservedTickets.push({ ticketId: item.product, quantity: item.quantity });
+      const itemCurrency = currencyForCheckout(ticketType.currency?.code);
+      if (checkoutCurrency && checkoutCurrency !== itemCurrency) return res.status(400).json({success:false,message:"All tickets in an order must use the same currency"});
+      checkoutCurrency = itemCurrency;
 
       let pricePerUnit = 0;
       if (ticketType.ticketType === "FREE") {
@@ -244,6 +226,7 @@ const createBooking = async (req, res) => {
         pricePerUnit = ticketType.price?.amountCents || 0;
       }
 
+      if (!Number.isSafeInteger(pricePerUnit) || pricePerUnit < 0) return res.status(400).json({success:false,message:"Invalid ticket amount"});
       const itemTotal = pricePerUnit * item.quantity;
 
       processedItems.push({
@@ -261,7 +244,7 @@ const createBooking = async (req, res) => {
       items: processedItems,
       fees: await getPlatformFees(),
       currency: {
-        code: "NGN",
+        code: checkoutCurrency,
         symbol: processedItems.length ? "â‚¦" : "â‚¦",
       },
     });
@@ -287,39 +270,27 @@ const createBooking = async (req, res) => {
     // 3. Prepare Reference
     const reference = `MNB_ORD_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`;
 
-    let savedBooking = null;
-
-    // Only save immediately if NOT card payment or if it's FREE
-    if (paymentMethod !== "CARD" || pricing.totalAmount === 0) {
-      const newBooking = new EventBooking({
-        eventId,
-        buyer: buyerId,
-        guestDetails: {
-          fullName,
-          phoneNumber,
-          email,
-        },
-        items: pricedItems,
-        ...bookingPricing,
-        totalAmount: pricing.totalAmount,
-        paymentMethod,
-        paymentReference: reference,
-        paymentStatus: pricing.totalAmount === 0 ? "COMPLETED" : "PENDING",
-      });
-      savedBooking = await newBooking.save();
-    }
+    if (paymentMethod === "FREE" && pricing.totalAmount > 0) return res.status(400).json({success:false,message:"This booking requires payment"});
+    const organiser = paymentMethod === "CARD" && pricing.totalAmount > 0
+      ? await User.findById(event.createdBy).select("vendorAccountCode") : null;
+    if(paymentMethod === "CARD" && pricing.totalAmount > 0 && !organiser?.vendorAccountCode)return res.status(409).json({success:false,message:"The organiser must connect a payout account before accepting online payments."});
+    const savedBooking = await reserveEventBooking({
+      eventId, buyer:buyerId, guestDetails:{fullName,phoneNumber,email},
+      items:pricedItems, ...bookingPricing, totalAmount:pricing.totalAmount,
+      currency:checkoutCurrency, paymentMethod, paymentReference:reference,
+      paymentStatus:pricing.totalAmount === 0 ? "COMPLETED" : "PENDING",
+    });
 
     // 4. Handle Payment Flow
     if (paymentMethod === "CARD" && pricing.totalAmount > 0) {
       // Get the event owner's subaccount details
-      const organiser = await User.findById(event.createdBy).select(
-        "vendorAccountCode",
-      );
+
 
       // Initialize payment with full booking details in metadata
       const paymentData = await gateway.initializePayment({
         email: email,
         amount: pricing.totalAmount / 100, // Service expects main currency unit
+        currency: checkoutCurrency,
         reference: reference,
         subaccount: organiser?.vendorAccountCode || undefined,
         transactionCharge: pricing.platformFeeAmount,
@@ -346,10 +317,11 @@ const createBooking = async (req, res) => {
         },
       });
 
+      await EventBooking.updateOne({_id:savedBooking._id}, {$set:{checkoutAccessCode:paymentData.access_code,checkoutUrl:paymentData.authorization_url}});
       return res.json({
         success: true,
         data: {
-          booking: savedBooking, // will be null for card payment
+          booking: savedBooking,
           payment: paymentData,
           pricing,
         },
@@ -358,7 +330,7 @@ const createBooking = async (req, res) => {
 
     // If Free booking, generate tickets immediately
     if (savedBooking && savedBooking.paymentStatus === "COMPLETED") {
-      const tickets = await createTicketsForBooking(savedBooking);
+      const tickets = await UserEventTicket.find({bookingId:savedBooking._id}).lean();
 
       // Dispatch Notifications & Confirmation Email for Free Tickets
       try {
@@ -392,18 +364,12 @@ const createBooking = async (req, res) => {
       data: { booking: savedBooking, pricing },
     });
   } catch (error) {
-    // Rollback any atomic reservations on unexpected error
-    for (const prev of reservedTickets) {
-      try {
-        await Ticket.findByIdAndUpdate(prev.ticketId, {
-          $inc: { soldQuantity: -prev.quantity },
-        });
-      } catch (_) {}
-    }
+    // Reservations and booking creation roll back together on transaction failure.
+    // After persistence, gateway uncertainty is reconciled by the expiry job.
     console.error("[CREATE BOOKING ERROR]", error);
     res
-      .status(500)
-      .json({ success: false, message: "Server error during checkout" });
+      .status(error.statusCode || 500)
+      .json({ success: false, message: error.statusCode ? error.message : "Server error during checkout" });
   }
 };
 
@@ -411,227 +377,16 @@ const createBooking = async (req, res) => {
  * VERIFY BOOKING
  */
 const verifyBooking = async (req, res) => {
-  const { reference } = req.params;
-
   try {
-    // 1. Verify with payment gateway
-    let transaction;
-    try {
-      transaction = await gateway.verifyPayment(reference);
-    } catch (gatewayError) {
-      console.error(
-        `[VERIFY BOOKING] Gateway verification failed for ref ${reference}:`,
-        gatewayError.message,
-      );
-      return res.status(502).json({
-        success: false,
-        message:
-          "Could not verify payment with payment provider. Please try again.",
-      });
-    }
-
-    if (transaction.status !== "success") {
-      return res.status(400).json({
-        success: false,
-        message: `Payment status: ${transaction.status}`,
-      });
-    }
-
-    // 2. Find or create booking
-    let booking = await EventBooking.findOne({ paymentReference: reference });
-
-    // Idempotent: already completed
-    if (booking && booking.paymentStatus === "COMPLETED") {
-      await recordBookingReferral(booking._id, "EVENT_TICKET");
-      return res.json({
-        success: true,
-        message: "Payment already verified and tickets generated.",
-        data: { booking },
-      });
-    }
-
-    // Create booking from Paystack metadata (for CARD payments that didn't save a booking upfront)
-    if (!booking) {
-      let metadata = transaction.metadata;
-
-      if (typeof metadata === "string" && metadata.trim() !== "") {
-        try {
-          metadata = JSON.parse(metadata);
-        } catch (e) {
-          console.error(
-            `[VERIFY BOOKING] Failed to parse metadata for ref ${reference}:`,
-            e,
-          );
-          return res.status(400).json({
-            success: false,
-            message: "Payment metadata is corrupted. Please contact support.",
-          });
-        }
-      }
-
-      const {
-        eventId,
-        buyerId,
-        items,
-        totalAmount,
-        subtotalAmount,
-        platformFeeAmount,
-        buyerFeeAmount,
-        organiserFeeAmount,
-        organiserPayoutAmount,
-        feePercentage,
-        feeMode,
-        fixedFeeAmount,
-        fullName,
-        phoneNumber,
-      } = metadata || {};
-
-      if (!eventId || !buyerId || !items) {
-        console.error(
-          `[VERIFY BOOKING] Missing metadata fields for ref ${reference}. Metadata:`,
-          JSON.stringify(metadata),
-        );
-        return res.status(400).json({
-          success: false,
-          message:
-            "Booking details missing in payment metadata. Please contact support.",
-        });
-      }
-
-      if (
-        Number.isFinite(Number(transaction.amount)) &&
-        Math.round(Number(transaction.amount)) !== Math.round(Number(totalAmount))
-      ) {
-        console.error(
-          `[VERIFY BOOKING] Amount mismatch for ref ${reference}: charged ${transaction.amount}, expected ${totalAmount}`,
-        );
-        return res.status(400).json({
-          success: false,
-          message: "Payment amount does not match this booking.",
-        });
-      }
-
-      try {
-        booking = new EventBooking({
-          eventId,
-          buyer: buyerId,
-          guestDetails: {
-            fullName,
-            phoneNumber,
-            email: transaction.customer?.email,
-          },
-          items,
-          totalAmount,
-          subtotalAmount,
-          platformFeeAmount,
-          buyerFeeAmount,
-          organiserFeeAmount,
-          organiserPayoutAmount,
-          feePercentage,
-          feeMode,
-          fixedFeeAmount,
-          paymentMethod: "CARD",
-          paymentReference: reference,
-          paymentStatus: "COMPLETED",
-          referralPaymentAt: transaction.paid_at || transaction.paidAt || new Date(),
-        });
-        await booking.save();
-      } catch (saveError) {
-        // Handle duplicate key race condition (webhook or parallel verify)
-        if (saveError.code === 11000) {
-          console.log(
-            `[VERIFY BOOKING] Duplicate booking for ref ${reference}, fetching existing`,
-          );
-          booking = await EventBooking.findOne({ paymentReference: reference });
-          if (booking && booking.paymentStatus !== "COMPLETED") {
-            booking.referralPaymentAt = transaction.paid_at || transaction.paidAt || new Date();
-            booking.paymentStatus = "COMPLETED";
-            await booking.save();
-          }
-        } else {
-          console.error(
-            `[VERIFY BOOKING] Failed to save booking for ref ${reference}:`,
-            saveError,
-          );
-          return res.status(500).json({
-            success: false,
-            message: "Failed to create booking record. Please try again.",
-          });
-        }
-      }
-    } else {
-      // Existing pending booking — mark as completed
-      booking.referralPaymentAt = transaction.paid_at || transaction.paidAt || new Date();
-      booking.paymentStatus = "COMPLETED";
-      await booking.save();
-    }
-
-    await recordBookingReferral(booking._id, "EVENT_TICKET");
-
-    // 3. Generate Individual Tickets (idempotent — skip if tickets already exist)
-    let tickets;
-    try {
-      const existingTickets = await UserEventTicket.find({
-        bookingId: booking._id,
-      }).lean();
-      if (existingTickets.length > 0) {
-        tickets = existingTickets;
-      } else {
-        tickets = await createTicketsForBooking(booking);
-
-        // Dispatch confirmation notifications if newly generated
-        try {
-          const eventDoc = await Event.findById(booking.eventId)
-            .select("title schedule location venueName createdBy")
-            .lean();
-          await notifyTicketPurchased({
-            booking,
-            event: eventDoc,
-            buyer: {
-              _id: booking.buyer,
-              fullName: booking.guestDetails?.fullName,
-            },
-            reference: booking.paymentReference,
-          });
-
-        } catch (notifErr) {
-          console.error(
-            "[VERIFY BOOKING] Notification / referral dispatch error:",
-            notifErr,
-          );
-        }
-      }
-    } catch (ticketError) {
-      console.error(
-        `[VERIFY BOOKING] Ticket generation failed for ref ${reference}:`,
-        ticketError,
-      );
-      // Booking is saved as COMPLETED, so the webhook or retry can generate tickets
-      return res.json({
-        success: true,
-        message:
-          "Payment verified. Tickets are being generated — please check your tickets shortly.",
-        data: { booking, tickets: [] },
-      });
-    }
-
-    return res.json({
-      success: true,
-      message: "Payment verified and tickets generated",
-      data: {
-        booking,
-        tickets,
-      },
-    });
-  } catch (error) {
-    console.error(
-      `[VERIFY BOOKING] Unexpected error for ref ${req.params.reference}:`,
-      error,
-    );
-    res.status(500).json({
-      success: false,
-      message: "Verification failed. Please try again.",
-    });
+    const payment = await gateway.verifyPayment(req.params.reference);
+    const result = await completePayment(req.params.reference, payment, {buyerId:req.user.id,kind:"EVENT_TICKET"});
+    if (result.conflict) return res.status(409).json({success:false,message:"Payment received for a cancelled or expired booking. Please contact the organiser.",data:{booking:result.booking}});
+    await recordBookingReferral(result.booking._id,"EVENT_TICKET");
+    await notifyPaymentCompletion(result);
+    const tickets = await UserEventTicket.find({bookingId:result.booking._id}).lean();
+    return res.json({success:true,message:"Payment verified and tickets generated",data:{booking:result.booking,tickets}});
+  } catch(error) {
+    return res.status(error.statusCode || 502).json({success:false,message:error.statusCode ? error.message : "Could not verify payment. Please try again."});
   }
 };
 

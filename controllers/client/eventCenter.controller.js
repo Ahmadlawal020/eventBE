@@ -431,6 +431,7 @@ const updateEventCenter = async (req, res) => {
       }
 
       if (errors.length > 0) {
+        console.error(`[UPDATE EVENT CENTER 400] manual booking errors:`, errors);
         return res
           .status(400)
           .json({ success: false, message: errors.join("; ") });
@@ -487,6 +488,7 @@ const updateEventCenter = async (req, res) => {
       changes: updatePayload,
     });
     if (validationErrors.length) {
+      console.error(`[UPDATE EVENT CENTER 400] validationErrors:`, validationErrors);
       return res.status(400).json({
         success: false,
         message: validationErrors.join("; "),
@@ -531,6 +533,10 @@ const updateEventCenter = async (req, res) => {
       data: updatedCenter,
     });
   } catch (err) {
+    console.error(`[UPDATE EVENT CENTER CATCH]: status=${err.status} name=${err.name} message=${err.message}`, err);
+    if (err.status === 400 || err.name === "ValidationError" || err.name === "CastError") {
+      return res.status(400).json({ success: false, message: err.message });
+    }
     console.error("[UPDATE EVENT CENTER]", err);
     res.status(500).json({ success: false, message: "Server error" });
   }

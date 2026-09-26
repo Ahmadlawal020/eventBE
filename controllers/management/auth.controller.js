@@ -135,6 +135,7 @@ const handleAdminLogin = asyncHandler(async (req, res) => {
 const handleAdminRefreshToken = asyncHandler(async (req, res) => {
   const refreshToken = req.cookies?.[REFRESH_COOKIE_NAME] || req.body.refreshToken;
   if (!refreshToken) {
+    if (req.body?.restore === true) return res.status(200).json({ success: true, message: "No active session" });
     return res.status(400).json({ success: false, message: "Refresh token required" });
   }
 

@@ -8,12 +8,10 @@ const {
 } = require("../../services/eventCenterSettings.service");
 
 const SECTION_FIELDS = {
-  general: ["venueCreationEnabled", "draftsEnabled", "defaultCurrency"],
+  general: ["venueCreationEnabled"],
   publishing: [
     "autoPublishVerifiedOwners",
     "requireIdentityVerification",
-    "requirePhoneVerification",
-    "requireSpecificLocation",
     "minimumImages",
     "minimumSafetyItems",
   ],
@@ -21,6 +19,7 @@ const SECTION_FIELDS = {
     "maxVenueNameLength",
     "maxShortDescriptionLength",
     "maxDescriptionLength",
+    "minImages",
     "maxImages",
     "maxCustomRules",
   ],
@@ -29,25 +28,13 @@ const SECTION_FIELDS = {
     "reviewBookingEnabled",
     "defaultBookingMode",
     "maximumBookingWindowMonths",
-    "maximumAdvanceNoticeDays",
-    "maximumPreparationDays",
+    "maximumBookingDate",
   ],
   pricing: [
-    "requireBasePrice",
-    "weekendPricingEnabled",
-    "customPricingEnabled",
-    "discountsEnabled",
+    "feeCollectionMode",
     "minimumBasePrice",
+    "minimumBasePrices",
   ],
-};
-
-const CATALOGS = {
-  venueTypes: EventCenterSettings.VENUE_TYPES,
-  amenities: EventCenterSettings.AMENITIES,
-  venueRules: EventCenterSettings.VENUE_RULES,
-  safetyOptions: EventCenterSettings.SAFETY_OPTIONS,
-  safetyConsiderations: EventCenterSettings.SAFETY_CONSIDERATIONS,
-  discounts: EventCenterSettings.DISCOUNTS,
 };
 
 const serialise = (settings) => {
@@ -64,43 +51,6 @@ const pick = (source, fields) =>
       .filter((field) => source?.[field] !== undefined)
       .map((field) => [field, source[field]]),
   );
-
-const mergeCatalog = (current, incoming, allowedOptions) => {
-  const incomingByKey = new Map(
-    (Array.isArray(incoming) ? incoming : []).map((option) => [
-      option.key,
-      option,
-    ]),
-  );
-  const currentByKey = new Map(
-    (current || []).map((option) => [
-      option.key,
-      option.toObject?.() || option,
-    ]),
-  );
-  return allowedOptions.map(([key, defaultLabel], index) => {
-    const previous = currentByKey.get(key) || {};
-    const update = incomingByKey.get(key) || {};
-    return {
-      key,
-      label:
-        typeof update.label === "string" && update.label.trim()
-          ? update.label.trim()
-          : previous.label || defaultLabel,
-      enabled:
-        typeof update.enabled === "boolean"
-          ? update.enabled
-          : (previous.enabled ?? true),
-      featured:
-        typeof update.featured === "boolean"
-          ? update.featured
-          : (previous.featured ?? false),
-      sortOrder: Number.isFinite(Number(update.sortOrder))
-        ? Number(update.sortOrder)
-        : (previous.sortOrder ?? index),
-    };
-  });
-};
 
 const getAdminEventCenterSettings = async (_req, res) => {
   try {
@@ -125,15 +75,14 @@ const updateAdminEventCenterSettings = async (req, res) => {
       if (!req.body[section]) continue;
       const current =
         settings[section]?.toObject?.() || settings[section] || {};
-      settings.set(section, { ...current, ...pick(req.body[section], fields) });
-      changed = true;
-    }
-    for (const [catalog, allowedOptions] of Object.entries(CATALOGS)) {
-      if (!req.body[catalog]) continue;
-      settings.set(
-        catalog,
-        mergeCatalog(settings[catalog], req.body[catalog], allowedOptions),
-      );
+      const picked = pick(req.body[section], fields);
+      if (section === "pricing" && req.body.pricing?.minimumBasePrices) {
+        picked.minimumBasePrices = {
+          ...(current.minimumBasePrices || {}),
+          ...req.body.pricing.minimumBasePrices,
+        };
+      }
+      settings.set(section, { ...current, ...picked });
       changed = true;
     }
     if (!changed) {
@@ -152,10 +101,29 @@ const updateAdminEventCenterSettings = async (req, res) => {
         message: "At least one venue booking mode must remain enabled",
       });
     }
-    if (settings.publishing.minimumImages > settings.contentLimits.maxImages) {
+
+    if (
+      !settings.booking.instantBookingEnabled &&
+      settings.booking.defaultBookingMode === "INSTANT"
+    ) {
+      settings.booking.defaultBookingMode = "REVIEW";
+    } else if (
+      !settings.booking.reviewBookingEnabled &&
+      settings.booking.defaultBookingMode === "REVIEW"
+    ) {
+      settings.booking.defaultBookingMode = "INSTANT";
+    }
+    if (req.body.contentLimits?.minImages !== undefined && req.body.publishing?.minimumImages === undefined) {
+      settings.publishing.minimumImages = settings.contentLimits.minImages;
+    } else if (req.body.publishing?.minimumImages !== undefined && req.body.contentLimits?.minImages === undefined) {
+      settings.contentLimits.minImages = settings.publishing.minimumImages;
+    }
+
+    const effectiveMinImages = settings.contentLimits.minImages ?? settings.publishing.minimumImages ?? 0;
+    if (effectiveMinImages > settings.contentLimits.maxImages) {
       return res.status(400).json({
         success: false,
-        message: "Minimum required images cannot exceed the image limit",
+        message: "Minimum property images cannot exceed maximum property images",
       });
     }
 

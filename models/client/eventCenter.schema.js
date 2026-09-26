@@ -245,7 +245,7 @@ const eventCenterSchema = new mongoose.Schema(
     availability: {
       minDuration: { type: Number, default: 1 },
       maxDuration: { type: Number, default: 365 },
-      bookingWindow: { type: Number, enum: [3, 6, 9, 12, 24], default: 12 },
+      bookingWindow: { type: Number, enum: [3, 6, 9, 12, 18, 24, 36], default: 12 },
       unavailableDates: [
         {
           date: { type: Date, required: true },
@@ -346,7 +346,9 @@ const eventCenterSchema = new mongoose.Schema(
     capacity: {
       max: {
         type: Number,
-        min: 0,
+        min: 1,
+        validate: { validator: (value) => value === undefined || Number.isInteger(value),
+          message: "Capacity must be a positive whole number" },
       },
     },
 
@@ -362,6 +364,8 @@ const eventCenterSchema = new mongoose.Schema(
       amount: {
         type: Number,
         min: 0,
+        validate: { validator: (value) => value === undefined || Number.isFinite(value),
+          message: "Price must be finite" },
       },
       currency: {
         type: String,
@@ -369,7 +373,7 @@ const eventCenterSchema = new mongoose.Schema(
       },
       unit: {
         type: String,
-        enum: ["hour", "day"],
+        enum: ["hour", "day", "event"],
       },
       feeMode: {
         type: String,
@@ -385,6 +389,8 @@ const eventCenterSchema = new mongoose.Schema(
       amount: {
         type: Number,
         min: 0,
+        validate: { validator: (value) => value === undefined || Number.isFinite(value),
+          message: "Price must be finite" },
       },
       currency: {
         type: String,
@@ -392,7 +398,7 @@ const eventCenterSchema = new mongoose.Schema(
       },
       unit: {
         type: String,
-        enum: ["hour", "day"],
+        enum: ["hour", "day", "event"],
       },
       feeMode: {
         type: String,

@@ -23,39 +23,56 @@ const positiveInteger = (value, fallback, maximum) => {
   return maximum ? Math.min(parsed, maximum) : parsed;
 };
 
-const getSummary = async (Model, includeExpired = false) => {
+const getSummary = async (Model, includeExpired = false, listingType) => {
   const now = new Date();
-  const [result = {}] = await Model.aggregate([
-    {
-      $group: {
-        _id: null,
-        total: { $sum: 1 },
-        accepted: { $sum: { $cond: [{ $eq: ["$status", "ACCEPTED"] }, 1, 0] } },
-        pending: { $sum: { $cond: [{ $eq: ["$status", "PENDING"] }, 1, 0] } },
-        declined: { $sum: { $cond: [{ $eq: ["$status", "DECLINED"] }, 1, 0] } },
-        left: { $sum: { $cond: [{ $eq: ["$status", "LEFT"] }, 1, 0] } },
-        assignments: { $sum: { $size: { $ifNull: ["$listings", []] } } },
-        ...(includeExpired
+  const pipeline = [];
+  if (listingType && ["Event", "EventCenter"].includes(listingType)) {
+    pipeline.push({ $match: { "listings.listingType": listingType } });
+  }
+  pipeline.push({
+    $group: {
+      _id: null,
+      total: { $sum: 1 },
+      accepted: { $sum: { $cond: [{ $eq: ["$status", "ACCEPTED"] }, 1, 0] } },
+      pending: { $sum: { $cond: [{ $eq: ["$status", "PENDING"] }, 1, 0] } },
+      declined: { $sum: { $cond: [{ $eq: ["$status", "DECLINED"] }, 1, 0] } },
+      left: { $sum: { $cond: [{ $eq: ["$status", "LEFT"] }, 1, 0] } },
+      assignments:
+        listingType && ["Event", "EventCenter"].includes(listingType)
           ? {
-              expired: {
-                $sum: {
-                  $cond: [
-                    {
-                      $and: [
-                        { $eq: ["$status", "PENDING"] },
-                        { $lt: ["$expiresAt", now] },
-                      ],
-                    },
-                    1,
-                    0,
-                  ],
+              $sum: {
+                $size: {
+                  $filter: {
+                    input: { $ifNull: ["$listings", []] },
+                    as: "l",
+                    cond: { $eq: ["$$l.listingType", listingType] },
+                  },
                 },
               },
             }
-          : {}),
-      },
+          : { $sum: { $size: { $ifNull: ["$listings", []] } } },
+      ...(includeExpired
+        ? {
+            expired: {
+              $sum: {
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ["$status", "PENDING"] },
+                      { $lt: ["$expiresAt", now] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
+              },
+            },
+          }
+        : {}),
     },
-  ]);
+  });
+
+  const [result = {}] = await Model.aggregate(pipeline);
 
   return {
     total: result.total || 0,
@@ -165,8 +182,8 @@ const getCoOrganisers = async (req, res) => {
           .limit(limit)
           .lean(),
         Model.countDocuments(query),
-        getSummary(CoOrganiserInvitation),
-        getSummary(StaffInvitation, true),
+        getSummary(CoOrganiserInvitation, false, req.query.listingType),
+        getSummary(StaffInvitation, true, req.query.listingType),
       ]);
 
     const pages = Math.ceil(total / limit);
@@ -242,6 +259,15 @@ const getCoOrganiserDetail = async (req, res) => {
     }
 
     invitation.listings = await populateListings(invitation.listings);
+    const requestedListingType = req.query.listingType;
+    if (
+      requestedListingType &&
+      ["Event", "EventCenter"].includes(requestedListingType)
+    ) {
+      invitation.listings = invitation.listings.filter(
+        (assignment) => assignment.listingType === requestedListingType,
+      );
+    }
 
     let recentActivity = [];
     let activityCount = 0;

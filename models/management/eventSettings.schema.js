@@ -101,9 +101,8 @@ const eventSettingsSchema = new Schema(
     publishing: {
       autoPublishVerifiedOrganisers: { type: Boolean, default: true },
       requireIdentityVerification: { type: Boolean, default: true },
-      requirePhoneVerification: { type: Boolean, default: true },
+      requirePayoutAccount: { type: Boolean, default: true },
       requireCoverImage: { type: Boolean, default: false },
-      requireSpecificLocation: { type: Boolean, default: false },
       minLeadTimeHours: { type: Number, default: 0, min: 0, max: 8760 },
       maxDurationDays: { type: Number, default: 30, min: 1, max: 365 },
     },

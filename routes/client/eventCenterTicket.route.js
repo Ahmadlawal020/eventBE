@@ -40,6 +40,14 @@ router.post("/:id/accept", verifyJWT, acceptBooking);
 router.post("/:id/decline", verifyJWT, declineBooking);
 
 // Single ticket by ID (must be LAST — /:id is a catch-all param)
+router.get("/:id/payout", verifyJWT, async (req,res) => {
+  try {
+    const Payout=require("../../models/client/venuePayout.schema");
+    const payout=await Payout.findOne({booking:req.params.id,organiser:req.user.id});
+    if(!payout)return res.status(404).json({success:false,message:"Payout not found"});
+    res.json({success:true,data:payout});
+  } catch(error){res.status(400).json({success:false,message:"Could not load payout"});}
+});
 router.get("/:id", verifyJWT, getTicketById);
 
 module.exports = router;

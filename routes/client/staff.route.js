@@ -53,13 +53,13 @@ router.get("/listing/:listingType/:listingId/stats", requireRole("staff"), staff
 router.post("/scanner/:listingType/:listingId/verify", requireRole("staff"), staffScannerController.verifyTicketStaff);
 router.post("/scanner/:listingType/:listingId/validate", requireRole("staff"), staffScannerController.validateTicketStaff);
 
-router.get("/bookings/search/:eventCenterId", requireRole("staff"), eventCenterBookingController.searchBooking);
-router.get("/bookings/stats/:eventCenterId", requireRole("staff"), eventCenterBookingController.getBookingStats);
-router.get("/bookings/details/:bookingId", requireRole("staff"), eventCenterBookingController.getBookingDetails);
-router.get("/bookings/:eventCenterId", requireRole("staff"), eventCenterBookingController.getEventCenterBookings);
-router.post("/bookings/:bookingId/check-in", requireRole("staff"), eventCenterBookingController.manualCheckIn);
-router.post("/bookings/:bookingId/cancel", requireRole("staff"), eventCenterBookingController.cancelBooking);
-router.patch("/bookings/:bookingId/reschedule", requireRole("staff"), eventCenterBookingController.rescheduleBooking);
+router.get("/bookings/search/:eventCenterId", requireRole("staff", "organiser"), eventCenterBookingController.searchBooking);
+router.get("/bookings/stats/:eventCenterId", requireRole("staff", "organiser"), eventCenterBookingController.getBookingStats);
+router.get("/bookings/details/:bookingId", requireRole("staff", "organiser"), eventCenterBookingController.getBookingDetails);
+router.get("/bookings/:eventCenterId", requireRole("staff", "organiser"), eventCenterBookingController.getEventCenterBookings);
+router.post("/bookings/:bookingId/check-in", requireRole("staff", "organiser"), eventCenterBookingController.manualCheckIn);
+router.post("/bookings/:bookingId/cancel", requireRole("staff", "organiser"), eventCenterBookingController.cancelBooking);
+router.patch("/bookings/:bookingId/reschedule", requireRole("staff", "organiser"), eventCenterBookingController.rescheduleBooking);
 
 router.get("/tickets/search/:eventId", requireRole("staff"), staffTicketController.searchStaffTickets);
 router.get("/tickets/stats/:eventId", requireRole("staff"), staffTicketController.getStaffTicketStats);

@@ -22,8 +22,19 @@ class PaymentGateway {
    * @param {string} [params.callbackUrl] - URL to redirect after payment
    * @returns {Promise<{authorization_url: string, access_code?: string, reference: string}>}
    */
-  async initializePayment({ email, amount, reference, metadata, subaccount, callbackUrl, transactionCharge, bearer }) {
+  async initializePayment({ email, amount, reference, metadata, subaccount, callbackUrl, transactionCharge, bearer, currency }) {
     throw new Error("initializePayment() not implemented");
+  }
+
+  // Recipient creation uses account details; transfers use minor currency units.
+  async createTransferRecipient(params) {
+    throw new Error("createTransferRecipient() not implemented");
+  }
+  async transferToOrganiser(params) {
+    throw new Error("transferToOrganiser() not implemented");
+  }
+  async verifyTransfer(reference) {
+    throw new Error("verifyTransfer() not implemented");
   }
 
   /**

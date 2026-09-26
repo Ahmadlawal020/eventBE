@@ -66,6 +66,11 @@ const eventBookingSchema = new Schema(
       enum: ["CARD", "TRANSFER", "FREE", "PAYSTACK"], // PAYSTACK kept for migration
       required: true,
     },
+    checkoutAccessCode: {type:String, select:false},
+    checkoutUrl: {type:String, select:false},
+    paymentResolutionRequired: {type:Boolean, default:false},
+    reservationExpiresAt: {type:Date, index:true},
+    inventoryReserved: {type:Boolean, default:false},
     paymentReference: {
       type: String,
       unique: true,

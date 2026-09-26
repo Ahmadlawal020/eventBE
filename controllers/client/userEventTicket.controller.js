@@ -93,12 +93,13 @@ const getTicketDetails = async (req, res) => {
 // Called internally after successful payment verification.
 // Designed for high throughput — batches DB writes, minimizes round trips.
 // ============================================================================
-const createTicketsForBooking = async (booking) => {
+const createTicketsForBooking = async (booking, session = null) => {
   try {
     const userEventTickets = [];
 
     // 1. Fetch Event for Snapshot (single DB call)
     const event = await Event.findById(booking.eventId)
+      .session(session)
       .populate("createdBy", "firstName surname email phoneNumber")
       .lean();
     if (!event) throw new Error("Event not found for snapshotting");
@@ -140,7 +141,7 @@ const createTicketsForBooking = async (booking) => {
       .map((item) => item.ticketId)
       .filter((id) => mongoose.isValidObjectId(id))
       .map((id) => new mongoose.Types.ObjectId(id));
-    const ticketTypes = await Ticket.find({ _id: { $in: ticketTypeIds } }).lean();
+    const ticketTypes = await Ticket.find({ _id: { $in: ticketTypeIds } }).session(session).lean();
     const ticketTypeMap = {};
     ticketTypes.forEach((tt) => {
       ticketTypeMap[tt._id.toString()] = tt;
@@ -188,7 +189,7 @@ const createTicketsForBooking = async (booking) => {
 
     // 4. Execute bulk insert for tickets
     const savedTickets = userEventTickets.length > 0
-      ? await UserEventTicket.insertMany(userEventTickets, { ordered: false })
+      ? await UserEventTicket.insertMany(userEventTickets, { ordered: true, session })
       : [];
 
     return savedTickets;

@@ -1,3 +1,4 @@
+const {notifyPaymentCompletion}=require("../../services/paymentCompletionNotifications.service");
 const { recordBookingReferral } = require("../../services/referral.service");
 const EventCenterBooking = require("../../models/client/eventCenterBooking.schema");
 const EventCenter = require("../../models/client/eventCenter.schema");
@@ -15,8 +16,12 @@ const {
   calculateEventCenterPricing,
   getPlatformFees,
 } = require("../../services/ticketFees.service");
+const {
+  getEventCenterSettings,
+} = require("../../services/eventCenterSettings.service");
 
 const gateway = getPaymentGateway();
+const { venueQuote, completePayment } = require("../../services/checkoutSafety.service");
 
 /**
  * Check if a user is authorized to scan/verify tickets for an event center.
@@ -80,6 +85,41 @@ const createTicket = async (req, res) => {
 
     if (eventCenter.status !== "LISTED") return res.status(409).json({ success: false, message: "This event center is not accepting new bookings." });
 
+    // 2a. Validate against platform venue settings
+    const platformSettings = await getEventCenterSettings();
+    if (eventCenter.bookingSettings === "INSTANT" && !platformSettings.booking.instantBookingEnabled) {
+      return res.status(400).json({ success: false, message: "Instant booking is currently disabled on the platform." });
+    }
+    if (eventCenter.bookingSettings === "REVIEW" && !platformSettings.booking.reviewBookingEnabled) {
+      return res.status(400).json({ success: false, message: "Host review booking is currently disabled on the platform." });
+    }
+
+    const quote = venueQuote(eventCenter, req.body);
+    if (selectedDates && selectedDates.length > 0) {
+      const maxMonths = platformSettings.booking?.maximumBookingWindowMonths || 12;
+      const maximumBookingDate = platformSettings.booking?.maximumBookingDate;
+      const horizonDate = maximumBookingDate
+        ? new Date(`${maximumBookingDate}T23:59:59.999Z`)
+        : new Date();
+      if (!maximumBookingDate) {
+        horizonDate.setMonth(horizonDate.getMonth() + maxMonths);
+      }
+
+      const exceedsWindow = selectedDates.some((d) => {
+        const target = new Date(d.date || d);
+        return !isNaN(target.getTime()) && target > horizonDate;
+      });
+
+      if (exceedsWindow) {
+        return res.status(400).json({
+          success: false,
+          message: maximumBookingDate
+            ? `Bookings cannot be made after ${maximumBookingDate}.`
+            : `Bookings cannot be made more than ${maxMonths} months in advance.`,
+        });
+      }
+    }
+
     // 2b. Validate selected dates are still available
     if (bookingUnit === "day" && selectedDates && selectedDates.length > 0) {
       const requestedDates = selectedDates.map(d =>
@@ -112,55 +152,19 @@ const createTicket = async (req, res) => {
       }
     }
 
-    // 2d. Server-side price validation
-    const basePriceSource = eventCenter.pricing?.basePrice || eventCenter.basePrice;
-    const weekendPriceSource = eventCenter.pricing?.weekendPrice || eventCenter.weekendPrice;
-    const basePrice = Number(basePriceSource?.amount ?? basePriceSource ?? 0);
-    const weekendPrice = Number(weekendPriceSource?.amount ?? weekendPriceSource ?? basePrice);
-    const customPrices = eventCenter.pricing?.customPrices || eventCenter.availability?.customPrices || eventCenter.customPrices || [];
-    let expectedTotal = 0;
-
-    if (basePrice > 0 && totalPrice?.amount > 0) {
-      for (const sd of selectedDates || []) {
-        const dateObj = new Date(sd.date);
-        const dateStr = dateObj.toISOString().split("T")[0];
-
-        // Check custom prices first
-        const customPrice = customPrices.find(cp =>
-          new Date(cp.date).toISOString().split("T")[0] === dateStr
-        );
-
-        if (customPrice) {
-          expectedTotal += Number(customPrice.amount ?? customPrice.price ?? 0);
-        } else {
-          const dayOfWeek = dateObj.getDay();
-          const isWeekend = dayOfWeek === 0 || dayOfWeek === 5 || dayOfWeek === 6;
-          expectedTotal += isWeekend ? weekendPrice : basePrice;
-        }
-      }
-
-      // Allow 1% tolerance for rounding differences
-      if (expectedTotal > 0 && Math.abs(totalPrice.amount - expectedTotal) > expectedTotal * 0.01) {
-        return res.status(400).json({
-          success: false,
-          message: `Price mismatch. Expected ${expectedTotal}, received ${totalPrice.amount}. Please refresh and try again.`,
-        });
-      }
-    }
-
     const pricing = calculateEventCenterPricing({
-      subtotalAmount: expectedTotal || Number(totalPrice?.amount || 0),
-      fees: await getPlatformFees(),
-      feeMode: eventCenter.basePrice?.feeMode,
+      subtotalAmount:quote.subtotalAmount, currency:quote.currency,
+      fees:await getPlatformFees(), feeMode:eventCenter.basePrice?.feeMode,
+      feeCollectionMode:platformSettings.pricing?.feeCollectionMode,
     });
     const bookingPricing = {
       totalPrice: {
         amount: pricing.totalAmount,
-        currency: totalPrice?.currency || eventCenter.basePrice?.currency || "NGN",
+        currency: quote.currency,
       },
       subtotalPrice: {
         amount: pricing.subtotalAmount,
-        currency: totalPrice?.currency || eventCenter.basePrice?.currency || "NGN",
+        currency: quote.currency,
       },
       platformFeeAmount: pricing.platformFeeAmount,
       buyerFeeAmount: pricing.buyerFeeAmount,
@@ -176,16 +180,19 @@ const createTicket = async (req, res) => {
       eventCenter: eventCenterId,
       paymentStatus: "PENDING",
       status: "ACTIVE",
-    }).sort({ createdAt: -1 });
+    }).select("+checkoutAccessCode +checkoutUrl").sort({ createdAt: -1 });
 
     if (existingPending) {
       const ageMs = Date.now() - new Date(existingPending.createdAt).getTime();
-      if (ageMs < 5 * 60 * 1000) {
+      const savedDates = existingPending.selectedDates.map(d=>({date:new Date(d.date).toISOString().slice(0,10),...(bookingUnit==="hour"?{startTime:d.startTime,endTime:d.endTime}:{})}));
+      if (ageMs < 5 * 60 * 1000 && existingPending.checkoutAccessCode && existingPending.bookingUnit === bookingUnit && JSON.stringify(savedDates) === JSON.stringify(quote.selectedDates)) {
         return res.status(201).json({
           success: true,
           message: "You already have a pending booking for this venue.",
           data: {
             reference: existingPending.paymentReference,
+            access_code:existingPending.checkoutAccessCode,
+            authorization_url:existingPending.checkoutUrl,
             pricing: {
               subtotalAmount: existingPending.subtotalPrice?.amount,
               platformFeeAmount: existingPending.platformFeeAmount,
@@ -208,17 +215,28 @@ const createTicket = async (req, res) => {
     if (paymentMethod === "paystack" || !paymentMethod) {
       // Get the authentic event center owner's subaccount details
       const owner = await User.findById(eventCenter.createdBy).select(
-        "vendorAccountCode",
+        "vendorAccountCode bankDetails",
       );
 
       const isReviewMode = eventCenter.bookingSettings === "REVIEW";
+      if(!isReviewMode && !owner?.vendorAccountCode)return res.status(409).json({success:false,message:"The organiser must connect a payout account before accepting online payments."});
+      if(isReviewMode && (!owner?.bankDetails?.accountNumber || !owner?.bankDetails?.bankCode || quote.currency!=="NGN"))return res.status(409).json({success:false,message:"Review bookings require a connected NGN payout bank account."});
 
+      // Persist immutable checkout details before contacting the payment provider.
+      const pending = await EventCenterBooking.create({
+        buyer:buyerId,organiser:eventCenter.createdBy,eventCenter:eventCenterId,
+        guestDetails:{fullName,phoneNumber,email},selectedDates:quote.selectedDates,
+        bookingUnit,duration:quote.duration,...bookingPricing,paymentReference:reference,
+        paymentStatus:"PENDING",bookingMode:isReviewMode?"REVIEW":"INSTANT",
+        payoutDestination:isReviewMode?owner.bankDetails:undefined,
+      });
       // Initialize Paystack Transaction via Service
       // For REVIEW mode: skip subaccount so payment goes to platform account (held until organizer accepts)
       // For INSTANT mode: use subaccount for split payment to organizer
       const paymentData = await gateway.initializePayment({
         email,
         amount: pricing.totalAmount,
+        currency: quote.currency,
         reference,
         subaccount: isReviewMode ? undefined : (owner?.vendorAccountCode || undefined),
         transactionCharge: isReviewMode
@@ -241,6 +259,7 @@ const createTicket = async (req, res) => {
       });
 
       const { authorization_url, access_code } = paymentData;
+      await EventCenterBooking.updateOne({_id:pending._id},{$set:{checkoutAccessCode:access_code,checkoutUrl:authorization_url}});
 
       return res.status(201).json({
         success: true,
@@ -266,9 +285,9 @@ const createTicket = async (req, res) => {
           phoneNumber,
           email,
         },
-        selectedDates,
+        selectedDates:quote.selectedDates,
         bookingUnit,
-        duration,
+        duration:quote.duration,
         ...bookingPricing,
         paymentReference: reference,
         paymentStatus: "PENDING",
@@ -394,351 +413,24 @@ const createTicket = async (req, res) => {
     }
   } catch (err) {
     console.error("[CREATE EVENT CENTER TICKET ERROR]", err);
-    res.status(500).json({
+    res.status(err.statusCode || 500).json({
       success: false,
-      message: "Server error during ticket creation",
+      message: err.statusCode ? err.message : "Server error during ticket creation",
     });
   }
 };
 
 // ===================== VERIFY PAYMENT & FINALIZE BOOKING =====================
 const verifyPayment = async (req, res) => {
-  const { reference } = req.params;
-
-  if (!reference) {
-    return res
-      .status(400)
-      .json({ success: false, message: "Missing payment reference." });
-  }
-
   try {
-    // 1. Verify with payment gateway
-    const paymentData = await gateway.verifyPayment(reference);
-
-    // Check if Paystack says it's successful
-    if (paymentData.status !== "success") {
-      return res.status(200).json({
-        success: false,
-        message: `Transaction is currently ${paymentData.status}.`,
-        data: paymentData,
-      });
-    }
-
-    // 2. Check if a ticket already exists for this reference (prevent duplicates)
-    let ticket = await EventCenterBooking.findOne({
-      paymentReference: reference,
-    });
-
-    if (ticket && ticket.paymentStatus === "COMPLETED") {
-      await recordBookingReferral(ticket._id, "EVENT_CENTER_BOOKING");
-      return res.json({
-        success: true,
-        message: "Payment already verified.",
-        data: ticket,
-      });
-    }
-
-    // 3. Extract booking details from Paystack Metadata
-    const meta = paymentData.metadata;
-    if (!meta || !meta.eventCenterId || !meta.organiserId || !meta.buyerId) {
-      console.error(`[VERIFY PAYMENT] Missing required metadata for ref ${reference}:`, JSON.stringify(paymentData.metadata));
-      return res.status(400).json({
-        success: false,
-        message: "Payment verification failed: incomplete booking metadata. Please contact support.",
-      });
-    }
-
-    const {
-      eventCenterId,
-      organiserId,
-      buyerId,
-      selectedDates,
-      bookingUnit,
-      duration,
-      totalPrice,
-      subtotalPrice,
-      platformFeeAmount,
-      buyerFeeAmount,
-      organiserFeeAmount,
-      organiserPayoutAmount,
-      feePercentage,
-      feeMode,
-      fullName,
-      phoneNumber,
-    } = meta;
-
-    if (
-      Number.isFinite(Number(paymentData.amount)) &&
-      Math.round(Number(paymentData.amount)) !==
-        Math.round(Number(totalPrice?.amount || 0) * 100)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "Payment amount does not match this venue booking.",
-      });
-    }
-
-    // 4. Determine booking mode
-    const eventCenter = await EventCenter.findById(eventCenterId).select("bookingSettings venueName availability").lean();
-    const isReviewMode = eventCenter?.bookingSettings === "REVIEW" || meta.bookingMode === "REVIEW";
-
-    // 4b. Validate selected dates are still available
-    if (bookingUnit === "day" && selectedDates && selectedDates.length > 0) {
-      const requestedDates = selectedDates.map(d =>
-        new Date(d.date).toISOString().split("T")[0]
-      );
-      const blockedDates = (eventCenter?.availability?.unavailableDates || [])
-        .filter(d => d.type === "BOOKED" || d.type === "BLOCKED" || d.type === "MANUAL")
-        .map(d => new Date(d.date).toISOString().split("T")[0]);
-
-      const conflicts = requestedDates.filter(d => blockedDates.includes(d));
-      if (conflicts.length > 0) {
-        // Refund the payment since dates are no longer available
-        try {
-          await gateway.refundPayment(reference);
-        } catch (refundErr) {
-          console.error(`[VERIFY PAYMENT] Refund failed for conflicting dates ref ${reference}:`, refundErr.message);
-        }
-        return res.status(400).json({
-          success: false,
-          message: "One or more selected dates are no longer available. Payment has been refunded.",
-        });
-      }
-    }
-
-    if (!ticket) {
-      const ticketData = {
-        buyer: buyerId,
-        organiser: organiserId,
-        eventCenter: eventCenterId,
-        guestDetails: {
-          fullName,
-          phoneNumber,
-          email: paymentData.customer.email,
-        },
-        selectedDates,
-        bookingUnit,
-        duration,
-        totalPrice,
-        subtotalPrice,
-        platformFeeAmount,
-        buyerFeeAmount,
-        organiserFeeAmount,
-        organiserPayoutAmount,
-        feePercentage,
-        feeMode,
-        paymentReference: reference,
-        paymentStatus: "COMPLETED",
-        referralPaymentAt: paymentData.paid_at || paymentData.paidAt || new Date(),
-      };
-
-      if (isReviewMode) {
-        ticketData.status = "PENDING_REVIEW";
-        ticketData.bookingMode = "REVIEW";
-        ticketData.reviewDeadline = new Date(Date.now() + 24 * 60 * 60 * 1000);
-      } else {
-        ticketData.ticketNumber = generateTicketNumber("MNS");
-        ticketData.qrPayload = generateQRPayload(ticketData.ticketNumber, eventCenterId, "EVENT_CENTER");
-      }
-
-      ticket = new EventCenterBooking(ticketData);
-    } else {
-      // Existing ticket being completed
-      ticket.referralPaymentAt = paymentData.paid_at || paymentData.paidAt || new Date();
-      ticket.paymentStatus = "COMPLETED";
-      if (isReviewMode) {
-        ticket.status = "PENDING_REVIEW";
-        ticket.bookingMode = "REVIEW";
-        ticket.reviewDeadline = new Date(Date.now() + 24 * 60 * 60 * 1000);
-      } else {
-        if (!ticket.ticketNumber) {
-          ticket.ticketNumber = generateTicketNumber("MNS");
-          ticket.qrPayload = generateQRPayload(
-            ticket.ticketNumber,
-            ticket.eventCenter,
-            "EVENT_CENTER",
-          );
-        }
-      }
-    }
-
-    try {
-      await ticket.save();
-    } catch (saveErr) {
-      // E11000 = duplicate key on paymentReference — webhook created it concurrently
-      if (saveErr.code === 11000) {
-        const existingTicket = await EventCenterBooking.findOne({ paymentReference: reference });
-        if (existingTicket) {
-          return res.json({
-            success: true,
-            message: "Payment verified (processed by webhook).",
-            data: existingTicket,
-          });
-        }
-      }
-      throw saveErr;
-    }
-
-    // 5. Update Event Center availability to prevent double-booking (both INSTANT and REVIEW modes)
-    //    For REVIEW mode, dates are blocked immediately. If organizer declines, blocks are removed.
-    const ec = await EventCenter.findById(ticket.eventCenter);
-    if (ec) {
-      if (!ec.availability) {
-        ec.availability = {
-          unavailableDates: [],
-          unavailableSlots: [],
-        };
-      }
-
-        if (ticket.bookingUnit === "day") {
-          const datesToMark = (ticket.selectedDates || []).map(
-            (d) => new Date(d.date).toISOString().split("T")[0],
-          );
-
-          const currentUnavailableStrings = (
-            ec.availability.unavailableDates || []
-          ).map((d) => new Date(d.date).toISOString().split("T")[0]);
-
-          const newDateStrings = datesToMark.filter(
-            (d) => !currentUnavailableStrings.includes(d),
-          );
-
-          newDateStrings.forEach((dateStr) => {
-            ec.availability.unavailableDates.push({
-              date: new Date(dateStr),
-              type: "BOOKED",
-              bookingId: String(ticket._id),
-              clientName: fullName || ticket.guestDetails?.fullName || "",
-              clientPhone: phoneNumber || ticket.guestDetails?.phoneNumber || "",
-              clientEmail: ticket.guestDetails?.email || paymentData?.customer?.email || "",
-            });
-          });
-        } else if (ticket.bookingUnit === "hour") {
-          const existingSlots = ec.availability.unavailableSlots || [];
-          const conflictingSlots = (ticket.selectedDates || []).filter((slot) =>
-            hasSlotConflict(slot, existingSlots, String(ticket._id))
-          );
-
-          if (conflictingSlots.length > 0) {
-            return res.status(400).json({
-              success: false,
-              message: "One or more time slots conflict with an existing booking",
-            });
-          }
-
-          const newSlots = (ticket.selectedDates || []).map((slot) => ({
-            date: new Date(slot.date),
-            startTime: slot.startTime,
-            endTime: slot.endTime,
-            type: "BOOKED",
-            bookingId: String(ticket._id),
-            clientName: fullName || ticket.guestDetails?.fullName || "",
-            clientPhone: phoneNumber || ticket.guestDetails?.phoneNumber || "",
-            clientEmail: ticket.guestDetails?.email || paymentData?.customer?.email || "",
-          }));
-
-          if (!ec.availability.unavailableSlots) {
-            ec.availability.unavailableSlots = [];
-          }
-
-          ec.availability.unavailableSlots.push(...newSlots);
-        }
-
-        await ec.save();
-      }
-
-    // 6. Send notifications
-    await recordBookingReferral(ticket._id, "EVENT_CENTER_BOOKING");
-
-    const guestName = fullName || ticket.guestDetails?.fullName || "A guest";
-    const venueName = eventCenter?.venueName || "your venue";
-
-    if (isReviewMode) {
-      await dispatchNotification({
-        recipient: organiserId,
-        sender: buyerId,
-        type: NOTIFICATION_TYPES.BOOKING_REQUEST,
-        title: "New Booking Request ⏳",
-        message: `${guestName} requested to book ${venueName}. Review within 24 hours.`,
-        referenceId: ticket._id,
-        referenceType: "EventCenterBooking",
-        data: {
-          screen: "BookingReview",
-          ticketId: String(ticket._id),
-          eventCenterId: String(ticket.eventCenter),
-        },
-      });
-
-      await dispatchNotification({
-        recipient: buyerId,
-        type: NOTIFICATION_TYPES.BOOKING_CREATED,
-        title: "Booking Request Submitted",
-        message: `Your booking request for ${venueName} has been submitted. The host will review it.`,
-        referenceId: ticket._id,
-        referenceType: "EventCenterBooking",
-        data: {
-          screen: "BookingDetails",
-          ticketId: String(ticket._id),
-        },
-      });
-    } else {
-      await dispatchNotification({
-        recipient: organiserId,
-        sender: buyerId,
-        type: NOTIFICATION_TYPES.BOOKING_CREATED,
-        title: "New Venue Booking! 🏛️",
-        message: `${guestName} booked ${venueName}.`,
-        referenceId: ticket._id,
-        referenceType: "EventCenterBooking",
-        data: {
-          screen: "BookingDetails",
-          ticketId: String(ticket._id),
-          eventCenterId: String(ticket.eventCenter),
-        },
-      });
-
-      await dispatchNotification({
-        recipient: buyerId,
-        type: NOTIFICATION_TYPES.BOOKING_CONFIRMED,
-        title: "Venue Booking Confirmed! 🎉",
-        message: `Your booking for ${venueName} is confirmed. Your ticket is ready.`,
-        referenceId: ticket._id,
-        referenceType: "EventCenterBooking",
-        data: {
-          screen: "TicketDetails",
-          ticketId: String(ticket._id),
-        },
-      });
-    }
-
-    // Log booking history
-    logBookingHistory({
-      eventCenter: ticket.eventCenter,
-      ticket: ticket._id,
-      bookingId: String(ticket._id),
-      bookingType: "PLATFORM",
-      action: "CREATED",
-      performedBy: buyerId,
-      dates: ticket.selectedDates,
-      guestName: fullName || ticket.guestDetails?.fullName || "",
-      totalPrice: ticket.totalPrice,
-    });
-
-    const successMessage = isReviewMode
-      ? "Payment verified. Booking is pending organizer review."
-      : "Payment verified and booking confirmed successfully.";
-
-    return res.status(200).json({
-      success: true,
-      message: successMessage,
-      data: ticket,
-    });
-  } catch (err) {
-    console.error("[EVENT CENTER PAYMENT VERIFICATION ERROR]", err.message);
-    return res.status(500).json({
-      success: false,
-      message: "Payment verification failed.",
-    });
+    const payment = await gateway.verifyPayment(req.params.reference);
+    const result = await completePayment(req.params.reference,payment,{buyerId:req.user.id,kind:"EVENT_CENTER"});
+    if(result.conflict) return res.status(409).json({success:false,message:"Payment received, but the selected dates could not be confirmed. Please contact the organiser.",data:result.booking});
+    await recordBookingReferral(result.booking._id,"EVENT_CENTER_BOOKING");
+    await notifyPaymentCompletion(result);
+    return res.json({success:true,message:"Payment verified",data:result.booking});
+  } catch(error) {
+    return res.status(error.statusCode || 502).json({success:false,message:error.statusCode ? error.message : "Could not verify payment. Please try again."});
   }
 };
 
@@ -1011,118 +703,10 @@ const acceptBooking = async (req, res) => {
   const organiserId = req.user.id;
 
   try {
-    const ticket = await EventCenterBooking.findById(id);
-    if (!ticket) {
-      return res.status(404).json({ success: false, message: "Booking not found." });
-    }
-
-    if (String(ticket.organiser) !== organiserId) {
-      return res.status(403).json({ success: false, message: "Not authorized to accept this booking." });
-    }
-
-    // Generate ticket number and QR payload before atomic update
-    const ticketNumber = generateTicketNumber("MNS");
-    const qrPayload = generateQRPayload(ticketNumber, ticket.eventCenter, "EVENT_CENTER");
-
-    // Atomic status transition: only succeeds if still PENDING_REVIEW
-    const updated = await EventCenterBooking.findOneAndUpdate(
-      { _id: id, status: "PENDING_REVIEW" },
-      {
-        $set: {
-          status: "CONFIRMED",
-          referralQualifiedAt: ticket.paymentStatus === "COMPLETED" ? new Date() : undefined,
-          ticketNumber,
-          qrPayload,
-          reviewedAt: new Date(),
-        },
-      },
-      { new: true },
-    );
-
-    if (!updated) {
-      await recordBookingReferral(id, "EVENT_CENTER_BOOKING");
-      const current = await EventCenterBooking.findById(id).select("status").lean();
-      return res.status(400).json({ success: false, message: `Booking is already ${current?.status || "unknown"}.` });
-    }
-
-    // Check for date conflicts before marking unavailable
-    const eventCenter = await EventCenter.findById(updated.eventCenter);
-    if (eventCenter) {
-      if (!eventCenter.availability) {
-        eventCenter.availability = { unavailableDates: [], unavailableSlots: [] };
-      }
-
-      if (updated.bookingUnit === "day") {
-        const datesToMark = (updated.selectedDates || []).map(
-          (d) => new Date(d.date).toISOString().split("T")[0]
-        );
-        const currentStrings = (eventCenter.availability.unavailableDates || [])
-          .filter((d) => String(d.bookingId) !== String(updated._id))
-          .map((d) => new Date(d.date).toISOString().split("T")[0]);
-        const conflictingDates = datesToMark.filter((d) => currentStrings.includes(d));
-
-        if (conflictingDates.length > 0) {
-          // Conflicts found — decline the booking instead of silently accepting
-          await EventCenterBooking.findByIdAndUpdate(id, {
-            $set: { status: "CANCELLED", reviewedAt: new Date() },
-          });
-          return res.status(409).json({
-            success: false,
-            message: `Cannot accept: dates ${conflictingDates.join(", ")} are already booked. Booking has been cancelled.`,
-          });
-        }
-
-        const existingBookingDateStrings = (eventCenter.availability.unavailableDates || [])
-          .filter((d) => String(d.bookingId) === String(updated._id))
-          .map((d) => new Date(d.date).toISOString().split("T")[0]);
-
-        datesToMark
-          .filter((dateStr) => !existingBookingDateStrings.includes(dateStr))
-          .forEach((dateStr) => {
-            eventCenter.availability.unavailableDates.push({
-              date: new Date(dateStr),
-              type: "BOOKED",
-              bookingId: String(updated._id),
-              clientName: updated.guestDetails?.fullName || "",
-              clientPhone: updated.guestDetails?.phoneNumber || "",
-              clientEmail: updated.guestDetails?.email || "",
-            });
-          });
-      } else if (updated.bookingUnit === "hour") {
-        const existingSlots = eventCenter.availability.unavailableSlots || [];
-        const conflictingSlots = (updated.selectedDates || []).filter((slot) =>
-          hasSlotConflict(slot, existingSlots, String(updated._id))
-        );
-
-        if (conflictingSlots.length > 0) {
-          await EventCenterBooking.findByIdAndUpdate(id, {
-            $set: { status: "CANCELLED", reviewedAt: new Date() },
-          });
-          return res.status(409).json({
-            success: false,
-            message: "Cannot accept: time slots conflict with existing bookings. Booking has been cancelled.",
-          });
-        }
-
-        const newSlots = (updated.selectedDates || []).map((slot) => ({
-          date: new Date(slot.date),
-          startTime: slot.startTime,
-          endTime: slot.endTime,
-          type: "BOOKED",
-          bookingId: String(updated._id),
-          clientName: updated.guestDetails?.fullName || "",
-          clientPhone: updated.guestDetails?.phoneNumber || "",
-          clientEmail: updated.guestDetails?.email || "",
-        }));
-
-        if (!eventCenter.availability.unavailableSlots) {
-          eventCenter.availability.unavailableSlots = [];
-        }
-        eventCenter.availability.unavailableSlots.push(...newSlots);
-      }
-
-      await eventCenter.save();
-    }
+    const {confirmReviewBooking}=require("../../services/venuePayout.service");
+    const {booking:updated,changed}=await confirmReviewBooking(id,organiserId);
+    if(!changed)return res.json({success:true,message:"Booking already confirmed. Payout is tracked separately.",data:updated});
+    const eventCenter=await EventCenter.findById(updated.eventCenter);
 
     await recordBookingReferral(updated._id, "EVENT_CENTER_BOOKING");
 
@@ -1174,12 +758,12 @@ const acceptBooking = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: "Booking accepted and confirmed.",
+      message: "Booking accepted and confirmed. Organiser payout has been queued.",
       data: updated,
     });
   } catch (err) {
     console.error("[ACCEPT BOOKING ERROR]", err);
-    return res.status(500).json({ success: false, message: "Server error accepting booking." });
+    return res.status(err.statusCode || 500).json({ success: false, message: err.statusCode ? err.message : "Server error accepting booking." });
   }
 };
 

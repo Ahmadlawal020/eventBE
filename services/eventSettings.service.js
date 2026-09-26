@@ -10,7 +10,7 @@ const enabledKeys = (options = []) =>
 const validateEventPayload = (
   payload,
   settings,
-  { publishing = false, existing = false, changes = payload } = {},
+  { publishing = false, requireComplete = publishing, existing = false, changes = payload } = {},
 ) => {
   const errors = [];
   const limits = settings.contentLimits;
@@ -106,12 +106,34 @@ const validateEventPayload = (
     errors.push("On-site ticket sales are currently disabled");
   }
 
+  if (shouldValidate("ageRestriction")) {
+    const { minAge, maxAge } = payload.ageRestriction || {};
+    for (const age of [minAge, maxAge]) {
+      if (age !== undefined && (!Number.isInteger(age) || age < 0)) {
+        errors.push("Ages must be non-negative whole numbers");
+        break;
+      }
+    }
+    if (minAge !== undefined && maxAge !== undefined && maxAge < minAge) {
+      errors.push("Maximum age cannot be below minimum age");
+    }
+  }
+
   const startsAt = payload.schedule?.from
     ? new Date(payload.schedule.from)
     : undefined;
   const endsAt = payload.schedule?.to
     ? new Date(payload.schedule.to)
     : undefined;
+
+  if (shouldValidate("schedule")) {
+    for (const value of [payload.schedule?.from, payload.schedule?.to]) {
+      if (value !== undefined && (!value || !Number.isFinite(new Date(value).getTime()))) {
+        errors.push("Event dates must be valid dates");
+        break;
+      }
+    }
+  }
 
   if (shouldValidate("schedule") && startsAt && endsAt) {
     if (endsAt <= startsAt)
@@ -124,15 +146,32 @@ const validateEventPayload = (
     }
   }
 
+  if (requireComplete) {
+    for (const [field, label] of [
+      ["title", "Title"], ["eventType", "Event type"],
+      ["shortDescription", "Short description"], ["description", "Description"],
+    ]) {
+      if (typeof payload[field] !== "string" || !payload[field].trim()) {
+        errors.push(label + " is required before publishing");
+      }
+    }
+    if (!startsAt || !endsAt || !Number.isFinite(startsAt.getTime()) ||
+        !Number.isFinite(endsAt.getTime()) || endsAt <= startsAt) {
+      errors.push("A valid start and end date are required before publishing");
+    }
+    const loc = payload.location;
+    if (!loc || !["addressString", "street", "city", "country"].every(
+      (field) => typeof loc[field] === "string" && loc[field].trim(),
+    ) || !Number.isFinite(loc.coordinates?.latitude) ||
+        !Number.isFinite(loc.coordinates?.longitude) ||
+        Math.abs(loc.coordinates.latitude) > 90 || Math.abs(loc.coordinates.longitude) > 180) {
+      errors.push("A complete event location is required before publishing");
+    }
+  }
+
   if (publishing) {
     if (settings.publishing.requireCoverImage && !payload.images?.length) {
       errors.push("A cover image is required before publishing");
-    }
-    if (
-      settings.publishing.requireSpecificLocation &&
-      !payload.location?.isSpecificLocation
-    ) {
-      errors.push("A specific event location is required before publishing");
     }
     if (startsAt) {
       const minimumStart =
@@ -175,7 +214,12 @@ const organiserMeetsPublishingRequirements = (user, settings) => {
   ) {
     return false;
   }
-  if (settings.publishing.requirePhoneVerification && !user?.isPhoneVerified) {
+  const hasPayoutAccount = Boolean(
+    user?.vendorAccountCode ||
+    (user?.bankDetails?.accountNumber && user?.bankDetails?.bankCode)
+  );
+  const requirePayout = settings.publishing.requirePayoutAccount !== false;
+  if (requirePayout && !hasPayoutAccount) {
     return false;
   }
   return true;
