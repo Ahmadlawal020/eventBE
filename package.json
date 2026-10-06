@@ -7,6 +7,7 @@
     "start": "node server",
     "dev": "nodemon server",
     "create-admin": "node scripts/createAdmin.js",
+    "seed:geography": "node scripts/seedGeography.js",
     "test": "cross-env NODE_ENV=test jest --runInBand --detectOpenHandles --forceExit",
     "test:referral:dev": "node scripts/testReferrals.js",
     "test:referral:unit": "node --test tests/referralPolicy.unit.spec.js",

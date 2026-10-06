@@ -22,7 +22,7 @@ const getAllMyTickets = async (req, res) => {
 
     // 2. Fetch User Event Tickets (Individual tickets for events)
     const userEventTickets = await UserEventTicket.find({ owner: userId })
-      .populate("eventId", "title coverImage startDateTime endDateTime venue location")
+      .populate("eventId", "title images schedule location")
       .populate("ticketTypeId", "name price")
       .sort({ createdAt: -1 })
       .lean();

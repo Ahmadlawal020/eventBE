@@ -255,6 +255,8 @@ const eventCenterSchema = new mongoose.Schema(
             default: "BLOCKED",
           },
           bookingId: { type: String },
+          holdId: String,
+          holdExpiresAt: Date,
           clientName: {
             type: String,
             validate: {
@@ -295,6 +297,8 @@ const eventCenterSchema = new mongoose.Schema(
             default: "BLOCKED",
           },
           bookingId: { type: String },
+          holdId: String,
+          holdExpiresAt: Date,
           clientName: {
             type: String,
             validate: {
@@ -516,6 +520,9 @@ const eventCenterSchema = new mongoose.Schema(
 
 /* ===================== EXPORT ===================== */
 
+eventCenterSchema.add({ managementLocation: { type: mongoose.Schema.Types.ObjectId, ref: "GeographicLocation", default: null, index: true } });
+eventCenterSchema.index({ managementLocation: 1, createdAt: -1 });
+eventCenterSchema.plugin(require("./geographicAssignment"));
 eventCenterSchema.plugin(require("./listingModeration"));
 
 module.exports = mongoose.model("EventCenter", eventCenterSchema);

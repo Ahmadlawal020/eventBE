@@ -509,66 +509,12 @@ const validateTicket = async (req, res) => {
       return res.status(403).json({ success: false, message: auth.error });
     }
 
-    // Atomic update: only the first scanner wins
-    const ticket = await EventCenterBooking.findOneAndUpdate(
-      {
-        ticketNumber: lookupTicketNumber,
-        status: { $in: ["ACTIVE", "CONFIRMED"] },
-        "checkIn.isCheckedIn": { $ne: true },
-      },
-      {
-        $set: {
-          "checkIn.isCheckedIn": true,
-          "checkIn.checkedInAt": new Date(),
-          "checkIn.checkedInBy": staffId,
-          "checkIn.method": qrPayload ? "QR" : "MANUAL",
-        },
-      },
-      { new: true },
-    )
-      .populate("buyer", "firstName surname email")
-      .populate("eventCenter", "venueName");
-
-    if (!ticket) {
-      // Check why it failed
-      const existingTicket = await EventCenterBooking.findOne({
-        ticketNumber: lookupTicketNumber,
-      })
-        .select("status checkIn guestDetails")
-        .lean();
-
-      if (!existingTicket) {
-        return res.status(404).json({
-          success: false,
-          message:
-            "Booking pass not found. Please check the code and try again.",
-        });
-      }
-
-      if (existingTicket.checkIn?.isCheckedIn) {
-        return res.status(409).json({
-          success: false,
-          message:
-            "⚠️ DUPLICATE ENTRY — This booking pass has already been used.",
-          data: {
-            checkedInAt: existingTicket.checkIn.checkedInAt,
-            guestName: existingTicket.guestDetails?.fullName,
-          },
-        });
-      }
-
-      if (existingTicket.status === "CANCELLED") {
-        return res.status(400).json({
-          success: false,
-          message: "This booking has been cancelled.",
-        });
-      }
-
-      return res.status(400).json({
-        success: false,
-        message: `Booking status: ${existingTicket.status}`,
-      });
-    }
+    const ticket = await EventCenterBooking.findOne({ ticketNumber: lookupTicketNumber })
+      .populate("buyer", "firstName surname email").populate("eventCenter", "venueName");
+    const attendance = await require("../../services/bookingAttendance.service").checkInCurrentSession({
+      booking: ticket, eventCenterId: String(ticket.eventCenter?._id || ticket.eventCenter),
+      actor: staffId, method: qrPayload ? "QR" : "MANUAL", proofVerified: true,
+    });
 
     res.status(200).json({
       success: true,
@@ -579,14 +525,14 @@ const validateTicket = async (req, res) => {
           ? `${ticket.buyer.firstName} ${ticket.buyer.surname}`
           : ticket.guestDetails?.fullName || "Guest",
         venueName: ticket.eventCenter?.venueName,
-        checkedInAt: ticket.checkIn?.checkedInAt,
+        checkedInAt: attendance.recordedAt,
       },
     });
   } catch (error) {
     console.error("[VALIDATE EVENT CENTER TICKET ERROR]", error);
-    res.status(500).json({
+    res.status(error.status || 500).json({
       success: false,
-      message: "Server error during ticket validation.",
+      message: error.status ? error.message : "Server error during ticket validation.",
     });
   }
 };
@@ -667,6 +613,7 @@ const verifyTicket = async (req, res) => {
       return res.status(403).json({ success: false, message: auth.error });
     }
 
+    const current = await require("../../services/bookingAttendance.service").currentSessionCheckIn(ticket, String(ticket.eventCenter?._id || ticket.eventCenter));
     res.status(200).json({
       success: true,
       data: {
@@ -684,8 +631,8 @@ const verifyTicket = async (req, res) => {
         bookingUnit: ticket.bookingUnit,
         duration: ticket.duration,
         selectedDates: ticket.selectedDates,
-        isCheckedIn: ticket.checkIn?.isCheckedIn,
-        checkedInAt: ticket.checkIn?.checkedInAt,
+        isCheckedIn: current.isCheckedIn,
+        checkedInAt: current.checkedInAt,
         type: "EVENT_CENTER",
       },
     });

@@ -29,8 +29,6 @@ const TicketSchema = new Schema(
       max: { type: Number, default: 50 },
     },
 
-    requiresApproval: { type: Boolean, default: false },
-
     // SALES WINDOW
     salesStartAt: { type: Date, required: true },
     salesEndAt: { type: Date, required: true },

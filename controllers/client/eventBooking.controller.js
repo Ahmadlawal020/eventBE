@@ -14,7 +14,7 @@ const {
 const { getPaymentGateway } = require("../../services/payment");
 const { createTicketsForBooking } = require("./userEventTicket.controller");
 const crypto = require("crypto");
-const { getEventSettings } = require("../../services/eventSettings.service");
+const { getEffectiveEventSettings: getEventSettings } = require("../../services/eventSettings.service");
 const {
   calculateTicketPricing,
   getPlatformFees,
@@ -146,7 +146,7 @@ const createBooking = async (req, res) => {
       });
     }
 
-    const settings = await getEventSettings();
+    const settings = await getEventSettings(event.managementLocation);
     const requestedQuantity = items.reduce(
       (total, item) => total + Number(item.quantity || 0),
       0,

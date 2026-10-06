@@ -7,10 +7,12 @@ const CoOrganiserInvitation = require("../../models/client/coOrganiserInvitation
 const cloudinary = require("../../utils/cloudinary");
 const {
   applyGuidanceDefaults,
-  getEventSettings,
+  getEffectiveEventSettings: getEventSettings,
   organiserMeetsPublishingRequirements,
   validateEventPayload,
 } = require("../../services/eventSettings.service");
+const { realignTicketSalesWindows } = require("../../services/ticketSalesWindow.service");
+
 
 // 📌 Create Event
 const createEvent = async (req, res) => {
@@ -91,7 +93,7 @@ const createEvent = async (req, res) => {
       amenities,
       eventType,
       ageRestriction,
-      schedule,
+      schedule: payload.schedule,
       location,
       capacity,
       status,
@@ -248,7 +250,7 @@ const updateEvent = async (req, res) => {
     }
 
     const updatePayload = prepareListingPatch(req.body, EVENT_FIELDS, prevEvent.toObject());
-    const settings = await getEventSettings();
+    const settings = await getEventSettings(prevEvent.managementLocation);
 
     /* ================================
        IMAGE POSITION MANAGEMENT
@@ -376,11 +378,41 @@ const updateEvent = async (req, res) => {
     });
 
     if (!updatedEvent) return res.status(409).json({ success: false, message: "A moderator must restore this listing before its status can change." });
+
+    // Check if event schedule was updated and clamp existing ticket tiers if salesEndAt exceeds new event end time
+    let adjustedTicketCount = 0;
+    const newEventEnd = updatedEvent.schedule?.to || updatedEvent.schedule?.from;
+    if (newEventEnd) {
+      adjustedTicketCount = await realignTicketSalesWindows(id, newEventEnd);
+
+      if (adjustedTicketCount > 0) {
+        try {
+          const notificationService = require("../../services/notification");
+          const { NOTIFICATION_TYPES } = require("../../constants/notificationTypes");
+          await notificationService.dispatchNotification({
+            recipient: updatedEvent.createdBy,
+            type: NOTIFICATION_TYPES.SYSTEM,
+            title: "Ticket Sales Window Adjusted",
+            message: `Your event schedule was updated. ${adjustedTicketCount} ticket tier(s) had their sales end time automatically updated to match the new event wrap-up time.`,
+            referenceId: updatedEvent._id,
+            referenceType: "Event",
+            data: { eventId: updatedEvent._id, adjustedTicketCount },
+          });
+        } catch (notifErr) {
+          console.error("[EVENT RESCHEDULE NOTIFICATION ERROR]", notifErr);
+        }
+      }
+    }
+
     res.json({
       success: true,
-      message: "Event updated successfully",
+      message: adjustedTicketCount > 0
+        ? `Event updated successfully. ${adjustedTicketCount} ticket tier(s) had their sales end time adjusted to match the new event end time.`
+        : "Event updated successfully",
       data: updatedEvent,
+      adjustedTicketCount,
     });
+
   } catch (err) {
     console.error("[UPDATE EVENT]", err);
     if (err.status === 400 || err.name === "ValidationError" || err.name === "CastError") {

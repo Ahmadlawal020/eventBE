@@ -4,6 +4,7 @@ const {
   getMyTickets,
   getTicketDetails,
   validateTicket,
+  uncheckInTicket,
   verifyTicket,
   getEventCheckInStats,
 } = require("../../controllers/client/userEventTicket.controller");
@@ -19,6 +20,8 @@ router.get("/:id", getTicketDetails);
 // Entry control (organisers/staff)
 router.post("/verify", verifyTicket);
 router.post("/validate", validateTicket);
+router.post("/uncheck-in", uncheckInTicket);
+
 
 // Analytics (organisers)
 router.get("/stats/:eventId", getEventCheckInStats);

@@ -331,6 +331,22 @@ const updateEventCenter = async (req, res) => {
       updatePayload = { ...req.body };
     }
 
+    const expectedUpdatedAt = req.body.expectedUpdatedAt;
+    delete updatePayload.expectedUpdatedAt;
+    delete updatePayload.updatedAt;
+    delete updatePayload.__v;
+    if (updatePayload.availability && prevCenter.updatedAt &&
+        (!expectedUpdatedAt || new Date(expectedUpdatedAt).getTime() !== new Date(prevCenter.updatedAt).getTime())) {
+      return res.status(409).json({ success: false, message: "The calendar changed. Refresh it before saving your changes." });
+    }
+    // Platform reservations are server-owned and cannot be removed by a calendar save.
+    if (updatePayload.availability) for (const field of ["unavailableDates", "unavailableSlots"]) {
+      if (updatePayload.availability[field]) updatePayload.availability[field] = [
+        ...updatePayload.availability[field].filter(entry => entry.type !== "BOOKED" && !entry.holdId),
+        ...(prevCenter.availability?.[field] || []).filter(entry => entry.type === "BOOKED" || (entry.holdId && new Date(entry.holdExpiresAt) > new Date())),
+      ];
+    }
+
     // ===== Price unit consistency synchronization =====
     if (updatePayload.basePrice && updatePayload.basePrice.unit) {
       const newUnit = updatePayload.basePrice.unit;
@@ -383,19 +399,35 @@ const updateEventCenter = async (req, res) => {
     }
 
     // ===== Manual booking validation =====
-    if (updatePayload.availability?.unavailableDates) {
-      const existingBooked = (
-        prevCenter.availability?.unavailableDates || []
-      ).filter((d) => typeof d === "object" && d.type === "BOOKED");
-      const newDates = updatePayload.availability.unavailableDates;
+    if (updatePayload.availability?.unavailableDates || updatePayload.availability?.unavailableSlots) {
+      const existingBooked = [
+        ...(prevCenter.availability?.unavailableDates || []),
+        ...(prevCenter.availability?.unavailableSlots || []),
+      ].filter((d) => d && typeof d === "object" && d.type === "BOOKED");
+      const newDates = [
+        ...(updatePayload.availability.unavailableDates || []),
+        ...(updatePayload.availability.unavailableSlots || []),
+      ];
       const errors = [];
+      const manualIds = [...new Set(newDates.filter(entry => entry?.type === "MANUAL" && entry.bookingId).map(entry => String(entry.bookingId)))];
+      const ledgers = manualIds.length ? await require("../../models/client/bookingOperations.schema").find({ eventCenter: id, bookingId: { $in: manualIds } }).lean() : [];
+      // Recorded collections can only change through the finance-authorized ledger API.
+      for (const entry of newDates) {
+        if (entry?.type !== "MANUAL") continue;
+        const ledger = ledgers.find(record => record.bookingId === String(entry.bookingId));
+        if (!ledger) continue;
+        const summary = require("../../services/bookingOperations.service").paymentSummary({ totalPrice: { amount: entry.totalPrice } }, ledger);
+        if (summary.totalMinor < summary.paidMinor) errors.push("The agreed price cannot be lower than recorded payments. Record a refund first.");
+        entry.depositAmount = summary.paidMinor / 100;
+        entry.paymentStatus = summary.balanceMinor === 0 ? "paid" : summary.paidMinor > 0 ? "partially_paid" : "pending";
+      }
 
       for (let i = 0; i < newDates.length; i++) {
         const entry = newDates[i];
-        if (typeof entry !== "object" || entry.type !== "MANUAL") continue;
+        if (!entry || typeof entry !== "object" || entry.type !== "MANUAL") continue;
 
-        // Server-generated bookingId (replace client-generated ones)
-        if (!entry.bookingId || entry.bookingId.startsWith("manual-")) {
+        // Preserve the shared ID used by calendar grouping and booking history.
+        if (!entry.bookingId) {
           entry.bookingId = `manual-${crypto.randomBytes(8).toString("hex")}`;
         }
 
@@ -416,17 +448,45 @@ const updateEventCenter = async (req, res) => {
         }
 
         // Conflict detection against existing BOOKED entries
+        if (Number.isNaN(new Date(entry.date).getTime())) {
+          errors.push(`Entry ${i + 1}: a valid date is required`);
+          continue;
+        }
+        const isSlot = entry.startTime !== undefined || entry.endTime !== undefined;
+        if (isSlot && (!/^([01]\d|2[0-3]):[0-5]\d$/.test(entry.startTime) ||
+            !/^(([01]\d|2[0-3]):[0-5]\d|24:00)$/.test(entry.endTime) ||
+            entry.startTime >= entry.endTime)) {
+          errors.push(`Entry ${i + 1}: a valid time range is required`);
+          continue;
+        }
         const entryDateKey = new Date(entry.date).toISOString().split("T")[0];
         const hasConflict = existingBooked.some((booked) => {
           const bookedDateKey = new Date(booked.date)
             .toISOString()
             .split("T")[0];
-          return bookedDateKey === entryDateKey;
+          if (bookedDateKey !== entryDateKey) return false;
+          if (!isSlot || !booked.startTime || !booked.endTime) return true;
+          return entry.startTime < booked.endTime && entry.endTime > booked.startTime;
         });
         if (hasConflict) {
           errors.push(
             `Entry ${i + 1}: date ${entryDateKey} conflicts with an existing platform booking`,
           );
+        }
+      }
+
+      const combined = [
+        ...(updatePayload.availability.unavailableDates || prevCenter.availability?.unavailableDates || []),
+        ...(updatePayload.availability.unavailableSlots || prevCenter.availability?.unavailableSlots || []),
+      ];
+      for (let i = 0; i < combined.length; i++) for (let j = i + 1; j < combined.length; j++) {
+        const a = combined[i], b = combined[j];
+        if (Number.isNaN(new Date(a.date).getTime()) || Number.isNaN(new Date(b.date).getTime())) continue;
+        if (a.type === "BOOKED" && b.type === "BOOKED") continue;
+        if (a.bookingId && a.bookingId === b.bookingId) continue;
+        if (new Date(a.date).toISOString().slice(0, 10) !== new Date(b.date).toISOString().slice(0, 10)) continue;
+        if (!a.startTime || !b.startTime || (a.startTime < (b.endTime === "00:00" ? "24:00" : b.endTime) && b.startTime < (a.endTime === "00:00" ? "24:00" : a.endTime))) {
+          errors.push("A selected date or time overlaps another booking or blocked period.");
         }
       }
 
@@ -517,14 +577,10 @@ const updateEventCenter = async (req, res) => {
       updatePayload.status = canAutoPublish ? "LISTED" : "ACTION_REQUIRED";
     }
 
-    const updatedCenter = await EventCenter.findByIdAndUpdate(
-      id,
-      updatePayload,
-      {
-        new: true,
-        runValidators: true,
-      },
-    );
+    const updatedCenter = updatePayload.availability && prevCenter.updatedAt
+      ? await EventCenter.findOneAndUpdate({ _id: id, updatedAt: prevCenter.updatedAt }, updatePayload, { new: true, runValidators: true })
+      : await EventCenter.findByIdAndUpdate(id, updatePayload, { new: true, runValidators: true });
+    if (!updatedCenter && updatePayload.availability) return res.status(409).json({ success: false, message: "The calendar changed while saving. Refresh and try again." });
 
     if (!updatedCenter) return res.status(409).json({ success: false, message: "A moderator must restore this listing before its status can change." });
     res.json({

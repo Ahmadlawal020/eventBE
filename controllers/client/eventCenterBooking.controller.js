@@ -86,7 +86,7 @@ exports.getEventCenterBookings = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      data: bookings,
+      data: await require("../../services/bookingAttendance.service").withCurrentCheckIns(bookings),
       pagination: {
         total,
         page: parseInt(page),
@@ -124,7 +124,7 @@ exports.getBookingDetails = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      data: booking,
+      data: (await require("../../services/bookingAttendance.service").withCurrentCheckIns([booking]))[0],
     });
   } catch (error) {
     console.error("Error fetching booking details:", error);
@@ -174,7 +174,7 @@ exports.searchBooking = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      data: bookings,
+      data: await require("../../services/bookingAttendance.service").withCurrentCheckIns(bookings),
     });
   } catch (error) {
     console.error("Error searching booking:", error);
@@ -199,63 +199,52 @@ exports.manualCheckIn = async (req, res) => {
       return res.status(404).json({ success: false, message: "Booking not found." });
     }
 
-    const auth = await authorizeBookingAccess(req.user.id, booking.eventCenter);
+    if (req.body?.eventCenterId && String(booking.eventCenter) !== req.body.eventCenterId) {
+      return res.status(404).json({ success: false, message: "Booking not found for this venue." });
+    }
+    const auth = await authorizeBookingAccess(req.user.id, booking.eventCenter, false);
     if (!auth.authorized) {
       return res.status(403).json({ success: false, message: auth.error });
     }
 
-    // Atomic check-in: only succeeds if not already checked in
-    const updated = await EventCenterBooking.findOneAndUpdate(
-      {
-        _id: bookingId,
-        status: { $in: ["ACTIVE", "CONFIRMED"] },
-        "checkIn.isCheckedIn": { $ne: true },
-      },
-      {
-        $set: {
-          "checkIn.isCheckedIn": true,
-          "checkIn.checkedInAt": new Date(),
-          "checkIn.checkedInBy": staffId,
-          "checkIn.method": "MANUAL",
-        },
-      },
-      { new: true },
-    );
-
-    if (!updated) {
-      // Check why it failed
-      const existing = await EventCenterBooking.findById(bookingId).select("status checkIn").lean();
-      if (!existing) {
-        return res.status(404).json({ success: false, message: "Booking not found." });
-      }
-      if (existing.checkIn?.isCheckedIn) {
-        return res.status(400).json({ success: false, message: "Guest is already checked in." });
-      }
-      return res.status(400).json({ success: false, message: `Cannot check in. Booking is ${existing.status}.` });
-    }
-
-    // Log booking history
-    logBookingHistory({
-      eventCenter: updated.eventCenter,
-      ticket: updated._id,
-      bookingId: String(updated._id),
-      bookingType: "PLATFORM",
-      bookingUnit: updated.bookingUnit,
-      action: "CHECKED_IN",
-      performedBy: staffId,
-      dates: updated.selectedDates,
-      guestName: updated.guestDetails?.fullName || "",
-      totalPrice: updated.totalPrice,
+    const attendance = await require("../../services/bookingAttendance.service").checkInCurrentSession({
+      booking, eventCenterId: String(booking.eventCenter), actor: staffId,
+      proofVerified: true,
     });
-
-    res.status(200).json({
-      success: true,
-      message: "Guest successfully checked in manually.",
-      data: updated,
-    });
+    return res.status(200).json({ success: true, message: "Guest checked in for this session.",
+      data: { ...booking.toObject(), checkIn: { isCheckedIn: true, checkedInAt: attendance.recordedAt }, attendance } });
   } catch (error) {
     console.error("Error checking in guest manually:", error);
-    res.status(500).json({ success: false, message: "Server error." });
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Server error." });
+  }
+};
+
+// The organiser action now requires an explicit session; old clients cannot
+// accidentally mark every date in a grouped booking as attended.
+const attendanceHandlers = () => require("./bookingAttendance.controller").handlers(authorizeBookingAccess);
+exports.getVenueAttendance = (req, res) => attendanceHandlers().get(req, res);
+exports.updateBookingAttendance = (req, res) => attendanceHandlers().update(req, res);
+exports.organiserManualCheckIn = (req, res) => attendanceHandlers().update(req, res);
+
+/** Authoritative check-in state, shared by the calendar and upcoming list. */
+exports.getVenueCheckIns = async (req, res) => {
+  try {
+    const { eventCenterId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(eventCenterId)) return res.status(400).json({ success: false, message: "Invalid venue ID." });
+    const access = await authorizeBookingAccess(req.user.id, eventCenterId);
+    if (!access.authorized) return res.status(403).json({ success: false, message: access.error });
+    const manageAccess = await authorizeBookingAccess(req.user.id, eventCenterId, false);
+    const venue = await EventCenter.findById(eventCenterId).lean();
+    const [platform, manual] = await Promise.all([
+      EventCenterBooking.find({ eventCenter: eventCenterId }).lean(),
+      require("../../services/manualBookingRead.service").getManualBookings([venue]),
+    ]);
+    const current = await require("../../services/bookingAttendance.service").withCurrentCheckIns([...platform, ...manual]);
+    const bookings = Object.fromEntries(current.map(booking => [String(booking._id), booking.checkIn]));
+    return res.json({ success: true, data: { bookings, canCheckIn: manageAccess.authorized && req.user.roles?.includes("organiser") } });
+  } catch (error) {
+    console.error("[VENUE CHECK-INS]", error);
+    return res.status(500).json({ success: false, message: "Could not load check-in status." });
   }
 };
 
@@ -294,9 +283,13 @@ exports.cancelBooking = async (req, res) => {
       });
     }
 
-    if (booking.checkIn && booking.checkIn.isCheckedIn) {
+    const attendance = (await require("../../services/bookingAttendance.service").attendanceForBookings([booking.toObject()]))[0].attendance;
+    if (attendance.summary.attended > 0) {
       return res.status(400).json({ success: false, message: "Cannot cancel. Guest is already checked in." });
     }
+
+    const refundMinor = booking.paymentStatus === "COMPLETED" && booking.paymentReference ? Math.round(booking.totalPrice.amount * 100) : 0;
+    if (req.body.expectedRefundMinor !== undefined && req.body.expectedRefundMinor !== refundMinor) return res.status(409).json({ success: false, message: "The refund amount changed. Review the cancellation details again." });
 
     booking.status = "CANCELLED";
 
@@ -351,8 +344,8 @@ exports.cancelBooking = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      message: "Booking successfully cancelled.",
-      data: booking,
+      message: booking.paymentStatus === "FAILED_REFUND" ? "Booking cancelled, but the refund needs support follow-up." : "Booking successfully cancelled.",
+      data: (await require("../../services/bookingAttendance.service").withCurrentCheckIns([booking]))[0],
     });
   } catch (error) {
     console.error("Error cancelling booking:", error);
@@ -390,10 +383,10 @@ exports.getBookingStats = async (req, res) => {
 
     const totalExpectedToday = await EventCenterBooking.countDocuments(todaysBookingsQuery);
 
-    const checkedInToday = await EventCenterBooking.countDocuments({
-      ...todaysBookingsQuery,
-      "checkIn.isCheckedIn": true,
-    });
+    const attendanceBookings = await require("../../services/bookingAttendance.service").attendanceForBookings(
+      await EventCenterBooking.find(todaysBookingsQuery).lean());
+    const today = require("../../services/bookingAttendance.service").bookingSessions({ bookingUnit: "day", selectedDates: [{ date: new Date() }] })[0].date;
+    const checkedInToday = attendanceBookings.filter(b => b.attendance.sessions.some(session => session.date === today && session.status === "ATTENDED")).length;
 
     const totalActiveBookings = await EventCenterBooking.countDocuments({
       eventCenter: eventCenterId,
@@ -554,10 +547,34 @@ exports.rescheduleBooking = async (req, res) => {
     res.status(200).json({
       success: true,
       message: "Booking rescheduled successfully.",
-      data: booking,
+      data: (await require("../../services/bookingAttendance.service").withCurrentCheckIns([booking]))[0],
     });
   } catch (error) {
     console.error("Error rescheduling booking:", error);
     res.status(500).json({ success: false, message: "Server error." });
   }
+};
+
+const operationHandlers = () => require("./bookingOperations.controller").handlers(authorizeBookingAccess);
+exports.getBookingOperations = (req, res) => operationHandlers().details(req, res);
+exports.updateBookingOperations = (req, res) => operationHandlers().update(req, res);
+exports.getVenueToday = (req, res) => operationHandlers().today(req, res);
+
+exports.getVenueHolds = (req, res) => operationHandlers().holds(req, res);
+exports.changeVenueHold = (req, res) => operationHandlers().changeHold(req, res);
+
+exports.getCancellationPreview = async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.bookingId)) return res.status(400).json({ message: "Invalid booking ID." });
+    const booking = await EventCenterBooking.findById(req.params.bookingId).lean();
+    if (!booking) return res.status(404).json({ message: "Booking not found." });
+    const access = await authorizeBookingAccess(req.user.id, booking.eventCenter, false);
+    if (!access.authorized) return res.status(403).json({ message: access.error });
+    const attendance = (await require("../../services/bookingAttendance.service").attendanceForBookings([booking]))[0].attendance;
+    const canCancel = ["ACTIVE", "CONFIRMED"].includes(booking.status) && attendance.summary.attended === 0;
+    return res.json({ success: true, data: { canCancel, currency: booking.totalPrice.currency,
+      refundMinor: booking.paymentStatus === "COMPLETED" && booking.paymentReference ? Math.round(booking.totalPrice.amount * 100) : 0,
+      paymentStatus: booking.paymentStatus,
+      terms: "Cancelling a paid booking before attendance requests a full refund. Refund processing may require follow-up if the payment provider rejects it." } });
+  } catch (error) { console.error("[CANCELLATION PREVIEW]", error); return res.status(500).json({ message: "Could not load cancellation details." }); }
 };

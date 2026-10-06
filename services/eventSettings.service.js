@@ -1,11 +1,16 @@
 const EventSettings = require("../models/management/eventSettings.schema");
 
 const getEventSettings = () => EventSettings.getSingleton();
-
-const enabledKeys = (options = []) =>
-  new Set(
-    options.filter((option) => option.enabled).map((option) => option.key),
-  );
+const getEffectiveEventSettings = async (locationId = null) => {
+  const settings = await getEventSettings();
+  const { values } = await require("./management/geography.service").settingsFor(locationId ? String(locationId) : "global");
+  const result = settings.toObject();
+  result.general.defaultTimezone = values.defaultTimezone;
+  result.general.defaultCurrency = values.defaultCurrency;
+  result.ticketing.onSiteTicketsEnabled = values.onSiteTicketsEnabled;
+  result.ticketing.maxTicketsPerOrder = values.maxTicketsPerOrder;
+  return result;
+};
 
 const validateEventPayload = (
   payload,
@@ -22,42 +27,8 @@ const validateEventPayload = (
   if (!existing && !settings.general.eventCreationEnabled) {
     errors.push("Event creation is temporarily disabled");
   }
-  if (
-    !existing &&
-    payload.isDraft !== false &&
-    !settings.general.draftsEnabled
-  ) {
-    errors.push("Draft events are currently disabled");
-  }
 
-  if (payload.eventType && shouldValidate("eventType")) {
-    const categories = enabledKeys(settings.categories);
-    if (!categories.has(payload.eventType)) {
-      errors.push("The selected event category is not available");
-    }
-  }
 
-  const validateOptions = (values, options, label) => {
-    if (!Array.isArray(values)) return;
-    const enabled = enabledKeys(options);
-    const unavailable = values.find((value) => !enabled.has(value));
-    if (unavailable)
-      errors.push(`${label} option ${unavailable} is not available`);
-  };
-
-  if (shouldValidate("amenities")) {
-    validateOptions(payload.amenities, settings.amenities, "Amenity");
-  }
-  if (shouldValidate("safety")) {
-    validateOptions(payload.safety, settings.safetyOptions, "Safety");
-  }
-  if (shouldValidate("safetyConsiderations")) {
-    validateOptions(
-      payload.safetyConsiderations,
-      settings.safetyConsiderations,
-      "Safety consideration",
-    );
-  }
 
   const validateLength = (value, maximum, label) => {
     if (typeof value === "string" && value.length > maximum) {
@@ -82,21 +53,11 @@ const validateEventPayload = (
     );
   }
 
-  if (shouldValidate("images") && payload.images?.length > limits.maxImages) {
+  if (publishing && payload.images?.length > limits.maxImages) {
     errors.push(`An event can have at most ${limits.maxImages} images`);
   }
-  if (
-    shouldValidate("highlights") &&
-    payload.highlights?.length > limits.maxHighlights
-  ) {
-    errors.push(`An event can have at most ${limits.maxHighlights} highlights`);
-  }
-  if (
-    shouldValidate("performers") &&
-    payload.performers?.length > limits.maxPerformers
-  ) {
-    errors.push(`An event can have at most ${limits.maxPerformers} performers`);
-  }
+
+
 
   if (
     shouldValidate("entry") &&
@@ -127,6 +88,11 @@ const validateEventPayload = (
     : undefined;
 
   if (shouldValidate("schedule")) {
+    if (payload.schedule?.timeZone !== undefined) {
+      try { new Intl.DateTimeFormat("en", { timeZone: payload.schedule.timeZone }).format(); }
+      catch { errors.push("Choose a valid event timezone"); }
+    }
+
     for (const value of [payload.schedule?.from, payload.schedule?.to]) {
       if (value !== undefined && (!value || !Number.isFinite(new Date(value).getTime()))) {
         errors.push("Event dates must be valid dates");
@@ -170,8 +136,17 @@ const validateEventPayload = (
   }
 
   if (publishing) {
-    if (settings.publishing.requireCoverImage && !payload.images?.length) {
-      errors.push("A cover image is required before publishing");
+    const requiredImages = Math.max(
+      settings.publishing.requireCoverImage ? 1 : 0,
+      settings.publishing.minimumImages ?? 0,
+      settings.contentLimits?.minImages ?? 0,
+    );
+    if (requiredImages > 0 && (!payload.images || payload.images.length < requiredImages)) {
+      errors.push(
+        requiredImages === 1
+          ? "A cover image is required before publishing"
+          : `At least ${requiredImages} images are required before publishing`,
+      );
     }
     if (startsAt) {
       const minimumStart =
@@ -189,6 +164,7 @@ const validateEventPayload = (
 
 const applyGuidanceDefaults = (payload, settings) => ({
   ...payload,
+  schedule: { ...payload.schedule, timeZone: payload.schedule?.timeZone || settings.general.defaultTimezone },
   ticketGuide: {
     ...payload.ticketGuide,
     refundPolicy:
@@ -226,29 +202,30 @@ const organiserMeetsPublishingRequirements = (user, settings) => {
 };
 
 const publicEventSettings = (settings) => ({
-  general: settings.general,
+  general: { eventCreationEnabled: settings.general.eventCreationEnabled, defaultTimezone: settings.general.defaultTimezone, defaultCurrency: settings.general.defaultCurrency },
   publishing: settings.publishing,
   contentLimits: settings.contentLimits,
   ticketing: settings.ticketing,
+  pricing: settings.pricing,
   guidance: settings.guidance,
-  categories: settings.categories
-    .filter((option) => option.enabled)
-    .sort((left, right) => left.sortOrder - right.sortOrder),
-  amenities: settings.amenities
-    .filter((option) => option.enabled)
-    .sort((left, right) => left.sortOrder - right.sortOrder),
-  safetyOptions: settings.safetyOptions
-    .filter((option) => option.enabled)
-    .sort((left, right) => left.sortOrder - right.sortOrder),
-  safetyConsiderations: settings.safetyConsiderations
-    .filter((option) => option.enabled)
-    .sort((left, right) => left.sortOrder - right.sortOrder),
   updatedAt: settings.updatedAt,
 });
+
+const getTicketMinBasePrice = (pricing, currencyCode = "NGN") => {
+  const code = (currencyCode || "NGN").toUpperCase();
+  const minRequired =
+    pricing?.minimumBasePrices?.[code] ??
+    pricing?.minimumBasePrices?.get?.(code) ??
+    pricing?.minimumBasePrice ??
+    0;
+  return Number(minRequired) || 0;
+};
 
 module.exports = {
   applyGuidanceDefaults,
   getEventSettings,
+  getEffectiveEventSettings,
+  getTicketMinBasePrice,
   organiserMeetsPublishingRequirements,
   publicEventSettings,
   validateEventPayload,

@@ -16,6 +16,8 @@ mongoose.connection.once("open", () => {
   require("./jobs/eventCompletion.job");
   require("./jobs/paymentReservationExpiry.job");
   require("./jobs/venuePayout.job");
+  require("./jobs/venueHoldExpiry.job");
+  require("./jobs/venueReminder.job");
   require("./jobs/referralReconciliation.job");
   server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
@@ -32,17 +34,22 @@ mongoose.connection.on("error", (err) => {
 
 // Graceful Shutdown Handling
 const gracefulShutdown = (signal) => {
-  console.log(`${signal} signal received: closing HTTP server and MongoDB connection...`);
+  console.log(
+    `${signal} signal received: closing HTTP server and MongoDB connection...`,
+  );
   if (server) {
     server.close(() => {
       console.log("HTTP server closed.");
-      mongoose.connection.close(false).then(() => {
-        console.log("MongoDB connection closed.");
-        process.exit(0);
-      }).catch((err) => {
-        console.error("Error closing MongoDB connection:", err);
-        process.exit(1);
-      });
+      mongoose.connection
+        .close(false)
+        .then(() => {
+          console.log("MongoDB connection closed.");
+          process.exit(0);
+        })
+        .catch((err) => {
+          console.error("Error closing MongoDB connection:", err);
+          process.exit(1);
+        });
     });
   } else {
     process.exit(0);
@@ -59,6 +66,8 @@ process.on("unhandledRejection", (reason, promise) => {
 
 process.on("uncaughtException", (error) => {
   console.error("Uncaught Exception thrown:", error);
-  logEvents(`Uncaught Exception: ${error.stack || error.message}`, "errLog.log");
+  logEvents(
+    `Uncaught Exception: ${error.stack || error.message}`,
+    "errLog.log",
+  );
 });
-

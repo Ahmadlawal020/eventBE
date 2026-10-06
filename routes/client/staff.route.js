@@ -53,11 +53,22 @@ router.get("/listing/:listingType/:listingId/stats", requireRole("staff"), staff
 router.post("/scanner/:listingType/:listingId/verify", requireRole("staff"), staffScannerController.verifyTicketStaff);
 router.post("/scanner/:listingType/:listingId/validate", requireRole("staff"), staffScannerController.validateTicketStaff);
 
+router.get("/bookings/venue/:eventCenterId/holds", requireRole("organiser"), eventCenterBookingController.getVenueHolds);
+router.post("/bookings/venue/:eventCenterId/holds", requireRole("organiser"), eventCenterBookingController.changeVenueHold);
+router.patch("/bookings/venue/:eventCenterId/holds/:holdId", requireRole("organiser"), eventCenterBookingController.changeVenueHold);
+router.get("/bookings/venue/:eventCenterId/today", requireRole("staff", "organiser"), eventCenterBookingController.getVenueToday);
+router.get("/bookings/:bookingId/operations", requireRole("staff", "organiser"), eventCenterBookingController.getBookingOperations);
+router.patch("/bookings/:bookingId/operations", requireRole("staff", "organiser"), eventCenterBookingController.updateBookingOperations);
 router.get("/bookings/search/:eventCenterId", requireRole("staff", "organiser"), eventCenterBookingController.searchBooking);
 router.get("/bookings/stats/:eventCenterId", requireRole("staff", "organiser"), eventCenterBookingController.getBookingStats);
 router.get("/bookings/details/:bookingId", requireRole("staff", "organiser"), eventCenterBookingController.getBookingDetails);
 router.get("/bookings/:eventCenterId", requireRole("staff", "organiser"), eventCenterBookingController.getEventCenterBookings);
+router.get("/bookings/venue/:eventCenterId/check-ins", requireRole("staff", "organiser"), eventCenterBookingController.getVenueCheckIns);
+router.get("/bookings/venue/:eventCenterId/attendance", requireRole("staff", "organiser"), eventCenterBookingController.getVenueAttendance);
+router.patch("/bookings/:bookingId/attendance", requireRole("organiser"), eventCenterBookingController.updateBookingAttendance);
+router.post("/bookings/:bookingId/organiser-check-in", requireRole("organiser"), eventCenterBookingController.organiserManualCheckIn);
 router.post("/bookings/:bookingId/check-in", requireRole("staff", "organiser"), eventCenterBookingController.manualCheckIn);
+router.get("/bookings/:bookingId/cancellation-preview", requireRole("staff", "organiser"), eventCenterBookingController.getCancellationPreview);
 router.post("/bookings/:bookingId/cancel", requireRole("staff", "organiser"), eventCenterBookingController.cancelBooking);
 router.patch("/bookings/:bookingId/reschedule", requireRole("staff", "organiser"), eventCenterBookingController.rescheduleBooking);
 

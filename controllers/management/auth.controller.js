@@ -47,6 +47,8 @@ const getAdminUserPayload = (user) => ({
   roles: user.roles,
   pageOverrides: user.pageOverrides,
   profilePicture: user.profilePicture,
+  geographicAccess: require("../../services/management/geographicPolicy").accessFor(user),
+  dataRestrictions: user.dataRestrictions,
 });
 
 const handleAdminLogin = asyncHandler(async (req, res) => {
@@ -223,7 +225,9 @@ const registerAdmin = asyncHandler(async (req, res) => {
       const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
       requestingUser = decoded.UserInfo;
       
-      if (!requestingUser || !requestingUser.roles || !requestingUser.roles.some(role => ADMIN_ROLES.includes(role))) {
+      const currentStaff = requestingUser?.id ? await Staff.findById(requestingUser.id).lean() : null;
+      const policy = require("../../services/management/geographicPolicy");
+      if (!policy.activeStaff(currentStaff) || !policy.isOwner(currentStaff)) {
         return res.status(403).json({ success: false, message: "Admin access required to register a new admin" });
       }
     } catch (err) {
@@ -242,6 +246,7 @@ const registerAdmin = asyncHandler(async (req, res) => {
     email: email.toLowerCase(),
     password,
     roles: [assignedRole],
+    geographicAccess: { mode: adminCount === 0 ? "global" : "scoped", grants: [] },
   });
 
   if (requestingUser && requestingUser.id) {

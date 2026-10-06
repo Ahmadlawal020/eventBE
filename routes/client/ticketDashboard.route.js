@@ -12,7 +12,10 @@ router.get("/stats", ticketDashboardController.getOrganiserTicketStats);
 // GET /api/organiser/ticket-stats/:eventId
 router.get("/stats/:eventId", ticketDashboardController.getSingleEventTicketStats);
 
-// GET /api/organiser/ticket-stats/:eventId/attendees
+// GET /api/ticket-dashboard/stats/:eventId/attendees
 router.get("/stats/:eventId/attendees", ticketDashboardController.getEventAttendees);
+
+// GET /api/ticket-dashboard/stats/:eventId/attendees/export
+router.get("/stats/:eventId/attendees/export", ticketDashboardController.exportEventAttendeesCSV);
 
 module.exports = router;

@@ -13,6 +13,9 @@ const NOTIFICATION_CATEGORIES = {
 };
 
 const NOTIFICATION_TYPES = {
+  VENUE_SESSION_REMINDER: "VENUE_SESSION_REMINDER",
+  VENUE_PAYMENT_DUE: "VENUE_PAYMENT_DUE",
+  VENUE_ATTENDANCE_FOLLOWUP: "VENUE_ATTENDANCE_FOLLOWUP",
   // Bookings & Venues
   BOOKING_CREATED: "BOOKING_CREATED",
   BOOKING_REQUEST: "BOOKING_REQUEST",
@@ -61,6 +64,9 @@ const NOTIFICATION_TYPES = {
  * Maps notification types to categories and default delivery channels.
  */
 const TYPE_CONFIG = {
+  [NOTIFICATION_TYPES.VENUE_SESSION_REMINDER]: { category: NOTIFICATION_CATEGORIES.REMINDERS, defaultChannels: ["in_app", "push"], priority: "normal" },
+  [NOTIFICATION_TYPES.VENUE_PAYMENT_DUE]: { category: NOTIFICATION_CATEGORIES.REMINDERS, defaultChannels: ["in_app", "push"], priority: "normal" },
+  [NOTIFICATION_TYPES.VENUE_ATTENDANCE_FOLLOWUP]: { category: NOTIFICATION_CATEGORIES.REMINDERS, defaultChannels: ["in_app", "push"], priority: "normal" },
   // Bookings
   [NOTIFICATION_TYPES.BOOKING_CREATED]: {
     category: NOTIFICATION_CATEGORIES.BOOKINGS,

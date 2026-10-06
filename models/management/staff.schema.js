@@ -113,6 +113,20 @@ const staffSchema = new mongoose.Schema(
       _id: false,
     }],
 
+    geographicAccess: {
+      type: new mongoose.Schema({
+        mode: { type: String, enum: ["global", "scoped"], default: "scoped" },
+        grants: [{
+          location: { type: mongoose.Schema.Types.ObjectId, ref: "GeographicLocation", required: true },
+          role: { type: String, enum: ["viewer", "moderator", "regional_manager"], required: true },
+          includeDescendants: { type: Boolean, default: true },
+          expiresAt: { type: Date, default: null },
+          _id: false,
+        }],
+      }, { _id: false }),
+      default: undefined,
+    },
+
     // Account Status
     isActive: {
       type: Boolean,

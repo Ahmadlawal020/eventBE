@@ -46,7 +46,7 @@ const getMyTickets = async (req, res) => {
 
   try {
     const tickets = await UserEventTicket.find({ owner: userId })
-      .populate("eventId", "title coverImage startDateTime endDateTime venue")
+      .populate("eventId", "title images schedule location")
       .populate("ticketTypeId", "name price")
       .sort({ createdAt: -1 })
       .lean(); // .lean() for read-only performance
@@ -330,6 +330,110 @@ const validateTicket = async (req, res) => {
 };
 
 // ============================================================================
+// UNDO CHECK-IN / REVERT REDEMPTION
+// Allows authorized gate staff / organisers to revert an accidental check-in
+// back to UNREDEEMED status.
+// ============================================================================
+const uncheckInTicket = async (req, res) => {
+  const { ticketNumber, qrPayload } = req.body;
+  const staffId = req.user.id;
+
+  try {
+    let lookupTicketNumber = ticketNumber;
+
+    if (qrPayload) {
+      const { valid, data } = verifyQRPayload(qrPayload);
+      if (!valid) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid or tampered QR code.",
+        });
+      }
+      lookupTicketNumber = data.tn;
+    }
+
+    if (!lookupTicketNumber) {
+      return res.status(400).json({
+        success: false,
+        message: "Ticket number or QR payload is required.",
+      });
+    }
+
+    const existingTicket = await UserEventTicket.findOne({ ticketNumber: lookupTicketNumber })
+      .select("eventId status")
+      .lean();
+
+    if (!existingTicket) {
+      return res.status(404).json({
+        success: false,
+        message: "Ticket not found.",
+      });
+    }
+
+    const auth = await authorizeScanAccess(staffId, existingTicket.eventId);
+    if (!auth.authorized) {
+      return res.status(403).json({ success: false, message: auth.error });
+    }
+
+    if (existingTicket.status !== "REDEEMED") {
+      return res.status(400).json({
+        success: false,
+        message: `Cannot revert check-in. Current ticket status is ${existingTicket.status}.`,
+      });
+    }
+
+    // Atomic update from REDEEMED back to UNREDEEMED
+    const ticket = await UserEventTicket.findOneAndUpdate(
+      {
+        ticketNumber: lookupTicketNumber,
+        status: "REDEEMED",
+      },
+      {
+        $set: {
+          status: "UNREDEEMED",
+          "checkIn.isCheckedIn": false,
+        },
+        $unset: {
+          redeemedAt: 1,
+          redeemedBy: 1,
+          "checkIn.checkedInAt": 1,
+          "checkIn.checkedInBy": 1,
+          "checkIn.method": 1,
+        },
+      },
+      { new: true }
+    ).populate("owner", "firstName surname email");
+
+    if (!ticket) {
+      return res.status(409).json({
+        success: false,
+        message: "Failed to revert check-in. Ticket is no longer in redeemed status.",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Check-in reverted successfully. Ticket is now unredeemed.",
+      data: {
+        ticketNumber: ticket.ticketNumber,
+        ticketName: ticket.ticketName,
+        status: ticket.status,
+        ownerName: ticket.owner
+          ? `${ticket.owner.firstName} ${ticket.owner.surname || ticket.owner.lastName || ""}`.trim()
+          : "Guest",
+      },
+    });
+  } catch (error) {
+    console.error("[UNCHECK-IN TICKET ERROR]", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to revert check-in. Please try again.",
+    });
+  }
+};
+
+
+// ============================================================================
 // GET EVENT CHECK-IN STATS (Analytics for organisers)
 // ============================================================================
 const getEventCheckInStats = async (req, res) => {
@@ -428,6 +532,7 @@ module.exports = {
   getTicketDetails,
   createTicketsForBooking,
   validateTicket,
+  uncheckInTicket,
   verifyTicket,
   getEventCheckInStats,
 };

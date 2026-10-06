@@ -1,3 +1,4 @@
+const { getManualBookings } = require("../../services/manualBookingRead.service");
 const BookingHistory = require("../../models/client/bookingHistory.schema");
 const EventCenter = require("../../models/client/eventCenter.schema");
 const EventCenterBooking = require("../../models/client/eventCenterBooking.schema");
@@ -217,11 +218,9 @@ const getUnifiedBookings = async (req, res) => {
         { coOrganisers: organiserId },
       ],
       staff: { $ne: organiserId },
-    }).select("_id venueName").lean();
+    }).select("_id venueName availability basePrice images location createdAt updatedAt").lean();
 
     const venueIds = venues.map((v) => v._id);
-    const venueMap = {};
-    venues.forEach((v) => { venueMap[v._id.toString()] = v; });
 
     if (venueIds.length === 0) {
       return res.status(200).json({
@@ -261,55 +260,8 @@ const getUnifiedBookings = async (req, res) => {
       updatedAt: t.updatedAt,
     }));
 
-    // 2. Fetch manual bookings (BookingHistory with action CREATED, bookingType MANUAL)
-    const manualCreatedQuery = {
-      eventCenter: { $in: venueIds },
-      bookingType: "MANUAL",
-      action: "CREATED",
-    };
-
-    const manualCreatedEntries = await BookingHistory.find(manualCreatedQuery)
-      .populate("eventCenter", "venueName")
-      .sort({ createdAt: -1 })
-      .lean();
-
-    // Batch fetch latest entries for all manual bookings to avoid N+1 queries
-    const manualBookingIds = manualCreatedEntries.map((e) => e.bookingId);
-
-    const latestEntries = await BookingHistory.aggregate([
-      { $match: { bookingId: { $in: manualBookingIds } } },
-      { $sort: { createdAt: -1 } },
-      { $group: { _id: "$bookingId", latestEntry: { $first: "$$ROOT" } } },
-    ]);
-
-    const latestEntryMap = {};
-    latestEntries.forEach((e) => { latestEntryMap[e._id] = e.latestEntry; });
-
-    const manualBookings = [];
-    for (const entry of manualCreatedEntries) {
-      const latestEntry = latestEntryMap[entry.bookingId];
-
-      let currentStatus = "ACTIVE";
-      if (latestEntry && latestEntry.action === "CANCELLED") {
-        currentStatus = "CANCELLED";
-      }
-
-      // Apply status filter
-      if (status && currentStatus !== status) continue;
-
-      manualBookings.push({
-        bookingId: entry.bookingId,
-        bookingType: "MANUAL",
-        bookingUnit: entry.bookingUnit || "day",
-        status: currentStatus,
-        guestName: entry.guestName || "",
-        dates: entry.dates || [],
-        totalPrice: entry.totalPrice,
-        eventCenter: entry.eventCenter,
-        createdAt: entry.createdAt,
-        updatedAt: latestEntry ? latestEntry.createdAt : entry.createdAt,
-      });
-    }
+    // Read current grouped availability, retaining cancelled bookings from history.
+    const manualBookings = (await getManualBookings(venues)).filter(booking => !status || booking.status === status);
 
     // 3. Merge and sort
     let allBookings = [...platformBookings, ...manualBookings];
@@ -354,7 +306,8 @@ const getBookingActivity = async (req, res) => {
     let eventCenterId = null;
 
     // Try platform booking first
-    const platformBooking = await EventCenterBooking.findById(bookingId).select("eventCenter").lean();
+    const platformBooking = mongoose.Types.ObjectId.isValid(bookingId)
+      ? await EventCenterBooking.findById(bookingId).select("eventCenter").lean() : null;
     if (platformBooking) {
       eventCenterId = platformBooking.eventCenter;
     } else {
@@ -374,7 +327,7 @@ const getBookingActivity = async (req, res) => {
       return res.status(403).json({ success: false, message: auth.error });
     }
 
-    const entries = await BookingHistory.find({ bookingId })
+    const entries = await BookingHistory.find({ bookingId, eventCenter: eventCenterId })
       .populate("performedBy", "firstName surname")
       .populate("eventCenter", "venueName")
       .sort({ createdAt: 1 })
@@ -417,41 +370,20 @@ const getBookingFullDetails = async (req, res) => {
     }
 
     if (!booking) {
-      // Manual booking — reconstruct from history
-      const createdEntry = await BookingHistory.findOne({
-        bookingId,
-        action: "CREATED",
-      })
-        .populate("eventCenter", "venueName images location")
-        .lean();
-
-      if (!createdEntry) {
-        return res.status(404).json({ success: false, message: "Booking not found" });
+      let venue = await EventCenter.findOne({ $or: [
+        { "availability.unavailableDates": { $elemMatch: { bookingId, type: "MANUAL" } } },
+        { "availability.unavailableSlots": { $elemMatch: { bookingId, type: "MANUAL" } } },
+      ] }).lean();
+      if (!venue) {
+        const historyEntry = await BookingHistory.findOne({ bookingId, bookingType: "MANUAL" }).lean();
+        if (historyEntry) venue = await EventCenter.findById(historyEntry.eventCenter).lean();
       }
-
-      eventCenterId = createdEntry.eventCenter?._id || createdEntry.eventCenter;
-
-      // Get latest entry for current status
-      const latestEntry = await BookingHistory.findOne({ bookingId })
-        .sort({ createdAt: -1 })
-        .lean();
-
-      let currentStatus = "ACTIVE";
-      if (latestEntry && latestEntry.action === "CANCELLED") {
-        currentStatus = "CANCELLED";
-      }
-
-      booking = {
-        _id: bookingId,
-        bookingType: "MANUAL",
-        bookingUnit: createdEntry.bookingUnit || "day",
-        status: currentStatus,
-        guestName: createdEntry.guestName || "",
-        dates: createdEntry.dates || [],
-        totalPrice: createdEntry.totalPrice,
-        eventCenter: createdEntry.eventCenter,
-        createdAt: createdEntry.createdAt,
-      };
+      if (!venue) return res.status(404).json({ success: false, message: "Booking not found" });
+      eventCenterId = venue._id;
+      const auth = await authorizeBookingAccess(req.user.id, eventCenterId);
+      if (!auth.authorized) return res.status(403).json({ success: false, message: auth.error });
+      booking = (await getManualBookings([venue])).find(item => item.bookingId === bookingId);
+      if (!booking) return res.status(404).json({ success: false, message: "Booking not found" });
     }
 
     // Authorization check
@@ -463,7 +395,7 @@ const getBookingFullDetails = async (req, res) => {
     }
 
     // Fetch activity timeline
-    const activity = await BookingHistory.find({ bookingId })
+    const activity = await BookingHistory.find({ bookingId, eventCenter: eventCenterId })
       .populate("performedBy", "firstName surname")
       .sort({ createdAt: 1 })
       .lean();

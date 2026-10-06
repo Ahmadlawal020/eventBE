@@ -59,6 +59,7 @@ const venueQuote = (venue, input) => {
     subtotalCents += Math.round(amount * 100) * units;
     return {date, ...(unit === "hour" ? {startTime:slot.startTime, endTime:minutes(slot.endTime,true) === 1440 ? "24:00" : slot.endTime} : {})};
   }).sort((a,b)=>a.date.localeCompare(b.date));
+  require("./venueBookingRules.service").assertVenueSchedule(venue, dates, unit);
   const min = venue.availability?.minDuration || 1, max = venue.availability?.maxDuration || 365;
   if (duration < min || duration > max) throw fail(`Booking duration must be between ${min} and ${max} ${unit}s`);
   return {subtotalAmount:subtotalCents/100, currency, duration, selectedDates:dates};
@@ -114,7 +115,12 @@ async function completePayment(reference, transaction, {buyerId, kind} = {}) {
       const venue = await Venue.findById(booking.eventCenter).session(session);
       const availability = venue?.availability;
       const dates = booking.selectedDates;
-      const conflict = !venue || venue.status !== "LISTED" || dates.some(slot => {
+      let preparationConflict = false;
+      if (venue) {
+        try { require("./venueBookingRules.service").assertVenueSchedule(venue, dates, booking.bookingUnit, { bookingId: booking._id, checkTiming: false }); }
+        catch { preparationConflict = true; }
+      }
+      const conflict = !venue || venue.status !== "LISTED" || preparationConflict || dates.some(slot => {
         const date = dayKey(slot.date);
         const dayBlocked = (availability?.unavailableDates || []).some(d=>dayKey(d.date)===date && String(d.bookingId)!==String(booking._id));
         const hoursBlocked = (availability?.unavailableSlots || []).some(d=>dayKey(d.date)===date && String(d.bookingId)!==String(booking._id) &&

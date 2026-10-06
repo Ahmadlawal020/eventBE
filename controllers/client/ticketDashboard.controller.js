@@ -4,6 +4,8 @@ const UserEventTicket = require("../../models/client/userEventTicket.schema");
 const EventBooking = require("../../models/client/eventBooking.schema");
 const CoOrganiserInvitation = require("../../models/client/coOrganiserInvitation.schema");
 const StaffInvitation = require("../../models/client/staffInvitation.schema");
+const { formatCsvRow, formatDateForCsv } = require("../../services/csvExport.service");
+
 
 /**
  * @desc    Get aggregate ticket statistics for an organiser across all their events
@@ -606,7 +608,7 @@ const getEventAttendees = async (req, res) => {
     // }
 
     const attendees = await UserEventTicket.find(query)
-      .populate('owner', 'firstName lastName email profileImage')
+      .populate('owner', 'firstName surname email phoneNumber profileImage')
       .sort({ createdAt: -1 })
       .lean();
 
@@ -620,8 +622,141 @@ const getEventAttendees = async (req, res) => {
   }
 };
 
+/**
+ * @desc    Export list of attendees/tickets for a single event as CSV
+ * @route   GET /api/ticket-dashboard/stats/:eventId/attendees/export
+ * @access  Private (Organiser/Co-organiser/Staff)
+ */
+const exportEventAttendeesCSV = async (req, res) => {
+  const { eventId } = req.params;
+  const { tier, status } = req.query;
+  const organiserId = req.user.id;
+
+  try {
+    // 1. Verify access to the event
+    const event = await Event.findOne({
+      _id: eventId,
+      $or: [
+        { createdBy: organiserId },
+        { coOrganisers: organiserId },
+        { staff: organiserId },
+      ],
+    }).select("_id title createdBy").lean();
+
+    if (!event) {
+      const [coOrganiserInvite, staffInvite] = await Promise.all([
+        CoOrganiserInvitation.findOne({ coOrganiser: organiserId, status: "ACCEPTED", "listings.listingId": eventId }).lean(),
+        StaffInvitation.findOne({ staff: organiserId, status: "ACCEPTED", "assignedListings.listingId": eventId }).lean(),
+      ]);
+      if (!coOrganiserInvite && !staffInvite) {
+        return res.status(404).json({ success: false, message: "Event not found or access denied" });
+      }
+    }
+
+    const eventTitle = event?.title || "Event";
+
+    // 2. Build Query
+    const query = { eventId };
+    if (tier && tier !== "All") query.ticketName = tier;
+
+    if (status === "SCANNED") {
+      query.status = "REDEEMED";
+    } else if (status === "BOUGHT") {
+      query.status = { $in: ["UNREDEEMED", "REDEEMED"] };
+    } else if (status === "CANCELLED") {
+      query.status = "CANCELLED";
+    }
+
+    // 3. Format filename safely
+    const safeTitle = eventTitle.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 30);
+    const dateStamp = new Date().toISOString().slice(0, 10);
+    const filename = `guest_list_${safeTitle}_${dateStamp}.csv`;
+
+    // 4. Set streaming headers
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+
+    // Write UTF-8 BOM so Microsoft Excel and Apple Numbers properly render symbols (₦) and unicode names
+    res.write("\uFEFF");
+
+    // 5. CSV Header Row
+    const headers = [
+      "Ticket Number",
+      "Full Name",
+      "First Name",
+      "Surname",
+      "Email",
+      "Phone Number",
+      "Ticket Tier",
+      "Ticket Type",
+      "Price Amount",
+      "Currency",
+      "Ticket Status",
+      "Checked In",
+      "Check-In Time",
+      "Check-In Method",
+      "Order Date",
+      "Booking Reference"
+    ];
+    res.write(formatCsvRow(headers) + "\r\n");
+
+    // 6. Stream cursor in batches to keep memory usage minimal
+    const cursor = UserEventTicket.find(query)
+      .populate("owner", "firstName surname email phoneNumber")
+      .sort({ createdAt: -1 })
+      .cursor();
+
+    for await (const doc of cursor) {
+      const owner = doc.owner || {};
+      const firstName = owner.firstName || "";
+      const surname = owner.surname || owner.lastName || "";
+      const fullName = `${firstName} ${surname}`.trim() || "Guest";
+      const isCheckedIn = doc.status === "REDEEMED" || doc.checkIn?.isCheckedIn ? "Yes" : "No";
+      const checkInTime = formatDateForCsv(doc.checkIn?.checkedInAt || doc.redeemedAt);
+      const price = doc.ticketSnapshot?.price?.amount !== undefined ? doc.ticketSnapshot.price.amount : "";
+      const currency = doc.ticketSnapshot?.price?.currency || "NGN";
+      const orderDate = formatDateForCsv(doc.createdAt);
+
+      const row = [
+        doc.ticketNumber || "",
+        fullName,
+        firstName,
+        surname,
+        owner.email || "",
+        owner.phoneNumber || "",
+        doc.ticketName || "",
+        doc.ticketSnapshot?.ticketType || "",
+        price,
+        currency,
+        doc.status || "",
+        isCheckedIn,
+        checkInTime,
+        doc.checkIn?.method || "",
+        orderDate,
+        doc.bookingId ? doc.bookingId.toString() : ""
+      ];
+
+      res.write(formatCsvRow(row) + "\r\n");
+    }
+
+    res.end();
+  } catch (error) {
+    console.error("[EXPORT EVENT ATTENDEES ERROR]", error);
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, message: "Server error exporting attendees" });
+    } else {
+      res.end();
+    }
+  }
+};
+
 module.exports = {
   getOrganiserTicketStats,
   getSingleEventTicketStats,
   getEventAttendees,
+  exportEventAttendeesCSV,
 };
+

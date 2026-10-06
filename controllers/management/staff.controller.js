@@ -121,7 +121,11 @@ const inviteStaff = asyncHandler(async (req, res) => {
   const inviteTokenHash = crypto.createHash("sha256").update(inviteToken).digest("hex");
   const inviteTokenExpiresAt = new Date(Date.now() + 48 * 60 * 60 * 1000); // 48 hours
 
+  let geographicAccess;
+  try { geographicAccess = await require("../../services/management/geography.service").validateAccess(req.body.geographicAccess || { mode: "scoped", grants: [] }); }
+  catch (error) { return res.status(error.status || 400).json({ success: false, message: error.message }); }
   const newStaff = await Staff.create({
+    geographicAccess,
     firstName,
     surname,
     email: email.toLowerCase(),
@@ -234,6 +238,7 @@ const updateStaffRole = asyncHandler(async (req, res) => {
   }
 
   const previousValue = { roles: staff.roles };
+  if (!staff.geographicAccess) staff.geographicAccess = require("../../services/management/geographicPolicy").accessFor(staff);
   staff.roles = [role];
   if (role === "super_admin") staff.mfaRequired = true;
   if (Array.isArray(pageOverrides)) staff.pageOverrides = pageOverrides;
@@ -435,10 +440,18 @@ const updateStaffProfile = asyncHandler(async (req, res) => {
     manager: staff.manager,
     startDate: staff.startDate,
     accessExpiresAt: staff.accessExpiresAt,
+    geographicAccess: staff.geographicAccess,
     accessScope: staff.accessScope,
     dataRestrictions: staff.dataRestrictions,
   };
 
+  if (req.body.geographicAccess !== undefined) {
+    const ownRecord = String(staff._id) === String(req.user.id);
+    const currentAccess = require("../../services/management/geographicPolicy").accessFor(staff);
+    if (ownRecord && JSON.stringify(currentAccess) !== JSON.stringify(req.body.geographicAccess)) return res.status(403).json({ success: false, message: "Another global administrator must change your geographic access" });
+    try { if (!ownRecord) staff.geographicAccess = await require("../../services/management/geography.service").validateAccess(req.body.geographicAccess); }
+    catch (error) { return res.status(error.status || 400).json({ success: false, message: error.message }); }
+  }
   if (firstName !== undefined) staff.firstName = firstName;
   if (surname !== undefined) staff.surname = surname;
   if (phoneNumber !== undefined) staff.phoneNumber = phoneNumber;
@@ -474,7 +487,7 @@ const updateStaffProfile = asyncHandler(async (req, res) => {
     targetType: "Staff",
     targetId: staff._id,
     previousValue,
-    newValue: { firstName: staff.firstName, surname: staff.surname, department: staff.department },
+    newValue: { firstName: staff.firstName, surname: staff.surname, department: staff.department, geographicAccess: staff.geographicAccess },
   });
 
   res.status(200).json({

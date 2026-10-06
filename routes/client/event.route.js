@@ -116,7 +116,8 @@ router.patch(
   verifyJWT,
   deletePerformerImage,
 );
-router.patch("/:id/performers/:performerId", verifyJWT, updateEventPerformer);
+router.post("/:id/performers", verifyJWT, require("../../controllers/client/eventPerformer.controller").save);
+router.patch("/:id/performers/:performerId", verifyJWT, require("../../controllers/client/eventPerformer.controller").save);
 router.delete("/:id/performers/:performerId", verifyJWT, deleteEventPerformer);
 
 router.patch("/:id", verifyJWT, require("../../middleware/protectModerationFields"), updateEvent);
@@ -126,6 +127,7 @@ router.delete("/:id", verifyJWT, deleteEvent);
 // PUBLIC ROUTES
 // ====================
 router.get("/config", getPublicEventSettings);
+router.get("/settings", getPublicEventSettings);
 router.get("/", getEvents);
 router.get("/:id", require("../../middleware/optionalJWT"), getEventById); // MUST remain last
 

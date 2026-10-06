@@ -10,14 +10,15 @@ const {
 const SECTION_FIELDS = {
   general: [
     "eventCreationEnabled",
-    "draftsEnabled",
     "defaultTimezone",
     "defaultCurrency",
   ],
   publishing: [
     "autoPublishVerifiedOrganisers",
     "requireIdentityVerification",
+    "requirePayoutAccount",
     "requireCoverImage",
+    "minimumImages",
     "minLeadTimeHours",
     "maxDurationDays",
   ],
@@ -25,9 +26,8 @@ const SECTION_FIELDS = {
     "maxTitleLength",
     "maxShortDescriptionLength",
     "maxDescriptionLength",
+    "minImages",
     "maxImages",
-    "maxHighlights",
-    "maxPerformers",
   ],
   ticketing: [
     "freeEventsEnabled",
@@ -38,6 +38,11 @@ const SECTION_FIELDS = {
     "maxTicketsPerOrder",
     "salesCutoffMinutes",
   ],
+  pricing: [
+    "feeCollectionMode",
+    "minimumBasePrice",
+    "minimumBasePrices",
+  ],
   lifecycle: ["autoCompletePastEvents", "completionGraceHours"],
   guidance: [
     "defaultRefundPolicy",
@@ -47,18 +52,13 @@ const SECTION_FIELDS = {
   ],
 };
 
-const CATALOGS = {
-  categories: EventSettings.EVENT_CATEGORIES,
-  amenities: EventSettings.EVENT_AMENITIES,
-  safetyOptions: EventSettings.EVENT_SAFETY_OPTIONS,
-  safetyConsiderations: EventSettings.EVENT_SAFETY_CONSIDERATIONS,
-};
 
 const serialise = (settings) => {
   const value = settings.toObject();
   delete value._id;
   delete value.__v;
   delete value.key;
+  if (value.general) delete value.general.draftsEnabled;
   return value;
 };
 
@@ -68,44 +68,6 @@ const pick = (source, fields) =>
       .filter((field) => source?.[field] !== undefined)
       .map((field) => [field, source[field]]),
   );
-
-const mergeCatalog = (current, incoming, allowedOptions) => {
-  const incomingByKey = new Map(
-    (Array.isArray(incoming) ? incoming : []).map((option) => [
-      option.key,
-      option,
-    ]),
-  );
-  const currentByKey = new Map(
-    (current || []).map((option) => [
-      option.key,
-      option.toObject?.() || option,
-    ]),
-  );
-
-  return allowedOptions.map(([key, defaultLabel], index) => {
-    const previous = currentByKey.get(key) || {};
-    const update = incomingByKey.get(key) || {};
-    return {
-      key,
-      label:
-        typeof update.label === "string" && update.label.trim()
-          ? update.label.trim()
-          : previous.label || defaultLabel,
-      enabled:
-        typeof update.enabled === "boolean"
-          ? update.enabled
-          : (previous.enabled ?? true),
-      featured:
-        typeof update.featured === "boolean"
-          ? update.featured
-          : (previous.featured ?? false),
-      sortOrder: Number.isFinite(Number(update.sortOrder))
-        ? Number(update.sortOrder)
-        : (previous.sortOrder ?? index),
-    };
-  });
-};
 
 const getAdminEventSettings = async (_req, res) => {
   try {
@@ -128,18 +90,16 @@ const updateAdminEventSettings = async (req, res) => {
 
     for (const [section, fields] of Object.entries(SECTION_FIELDS)) {
       if (!req.body[section]) continue;
-      const current =
-        settings[section]?.toObject?.() || settings[section] || {};
-      settings.set(section, { ...current, ...pick(req.body[section], fields) });
-      changed = true;
-    }
-
-    for (const [catalog, allowedOptions] of Object.entries(CATALOGS)) {
-      if (!req.body[catalog]) continue;
-      settings.set(
-        catalog,
-        mergeCatalog(settings[catalog], req.body[catalog], allowedOptions),
-      );
+      const current = previousValue[section] || {};
+      const picked = pick(req.body[section], fields);
+      if (!Object.keys(picked).length) continue;
+      if (section === "pricing" && req.body.pricing?.minimumBasePrices) {
+        picked.minimumBasePrices = {
+          ...(current.minimumBasePrices || {}),
+          ...req.body.pricing.minimumBasePrices,
+        };
+      }
+      settings.set(section, { ...current, ...picked });
       changed = true;
     }
 
@@ -147,6 +107,23 @@ const updateAdminEventSettings = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: "No valid event settings were provided",
+      });
+    }
+
+    if (req.body.contentLimits?.minImages !== undefined && req.body.publishing?.minimumImages === undefined) {
+      settings.publishing.minimumImages = settings.contentLimits.minImages;
+    } else if (req.body.publishing?.minimumImages !== undefined && req.body.contentLimits?.minImages === undefined) {
+      settings.contentLimits.minImages = settings.publishing.minimumImages;
+    }
+
+    try { new Intl.DateTimeFormat("en", { timeZone: settings.general.defaultTimezone }).format(); }
+    catch { return res.status(400).json({ message: "Choose a valid IANA timezone." }); }
+    if (!["NGN", "USD", "EUR", "GBP", "AED", "SAR", "GHS", "KES", "ZAR"].includes(settings.general.defaultCurrency)) return res.status(400).json({ message: "Choose a supported default currency." });
+    const effectiveMinImages = Math.max(settings.contentLimits.minImages ?? 0, settings.publishing.minimumImages ?? 0, settings.publishing.requireCoverImage ? 1 : 0);
+    if (effectiveMinImages > settings.contentLimits.maxImages) {
+      return res.status(400).json({
+        success: false,
+        message: "Minimum event images cannot exceed maximum event images",
       });
     }
 
@@ -184,7 +161,7 @@ const updateAdminEventSettings = async (req, res) => {
 
 const getPublicEventSettings = async (_req, res) => {
   try {
-    const settings = await getEventSettings();
+    const settings = await require("../../services/eventSettings.service").getEffectiveEventSettings();
     return res.json({ success: true, data: publicEventSettings(settings) });
   } catch (error) {
     console.error("[GET EVENT SETTINGS]", error);

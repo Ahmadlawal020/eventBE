@@ -1,6 +1,43 @@
 const { CronJob } = require("cron");
 const Event = require("../models/client/event.schema");
-const { getEventSettings } = require("../services/eventSettings.service");
+const { getEffectiveEventSettings: getEventSettings } = require("../services/eventSettings.service");
+
+/**
+ * Builds the MongoDB query filter for events that are past and eligible to be marked COMPLETED.
+ *
+ * @param {Date} completionCutoff - Cutoff date for events with explicit schedule.to (accounting for grace hours)
+ * @param {Date} singleDayCutoff - Cutoff date for single-day events without schedule.to (accounts for standard 24h event window + grace hours)
+ */
+function buildCompletionFilter(completionCutoff, singleDayCutoff) {
+  return {
+    status: { $in: ["LISTED", "ACTION_REQUIRED", "UNLISTED"] },
+    $or: [
+      {
+        "schedule.to": {
+          $type: "date",
+          $lt: completionCutoff,
+        },
+      },
+      {
+        $and: [
+          {
+            $or: [
+              { "schedule.to": { $exists: false } },
+              { "schedule.to": null },
+              { "schedule.to": "" },
+            ],
+          },
+          {
+            "schedule.from": {
+              $type: "date",
+              $lt: singleDayCutoff,
+            },
+          },
+        ],
+      },
+    ],
+  };
+}
 
 /**
  * Mark past events as COMPLETED
@@ -8,34 +45,48 @@ const { getEventSettings } = require("../services/eventSettings.service");
  * Replaces the expensive pre-find hook that ran updateMany on every Event.find() call.
  * This cron job runs every 15 minutes instead.
  */
-const markCompletedEvents = async () => {
+const markCompletedEvents = async (options = {}) => {
   try {
-    const settings = await getEventSettings();
-    if (!settings.lifecycle.autoCompletePastEvents) return;
-    const completionCutoff = new Date(
-      Date.now() - settings.lifecycle.completionGraceHours * 3600000,
-    );
-    const result = await Event.updateMany(
-      {
-        status: { $in: ["LISTED", "ACTION_REQUIRED", "UNLISTED"] },
-        "schedule.to": { $lt: completionCutoff },
-      },
-      { $set: { status: "COMPLETED" } },
-    );
+    const EventModel = options.EventModel || Event;
+    const settings = options.settingsOverride || (await getEventSettings());
+    if (!settings?.lifecycle?.autoCompletePastEvents) {
+      return { modifiedCount: 0 };
+    }
 
-    if (result.modifiedCount > 0) {
+    const now = options.now || new Date();
+    const graceHours = Number(settings.lifecycle?.completionGraceHours) || 0;
+    const completionCutoff = new Date(now.getTime() - graceHours * 3600000);
+
+    // If an event has no explicit end time (single-day event where schedule.to is absent/null),
+    // allocate 24 hours from the start date/time so it is not prematurely marked completed while still ongoing.
+    const singleDayGraceMs = 24 * 3600000;
+    const singleDayCutoff = new Date(completionCutoff.getTime() - singleDayGraceMs);
+
+    const query = buildCompletionFilter(completionCutoff, singleDayCutoff);
+    const result = await EventModel.updateMany(query, { $set: { status: "COMPLETED" } });
+
+    if (result?.modifiedCount > 0) {
       console.log(
         `[Event Completion] Marked ${result.modifiedCount} event(s) as COMPLETED`,
       );
     }
+    return result;
   } catch (err) {
     console.error("[Event Completion] Error:", err);
+    throw err;
   }
 };
 
-// Run every 15 minutes
-const job = new CronJob("*/15 * * * *", markCompletedEvents, null, true, "UTC");
+// Run every 15 minutes (avoid auto-starting during unit tests to allow process exit)
+const isTest = process.env.NODE_ENV === "test" || process.execArgv.includes("--test") || process.argv.includes("--test");
+const job = new CronJob("*/15 * * * *", markCompletedEvents, null, !isTest, "UTC");
 
-console.log("[Cron Job] Event Completion Job scheduled every 15 minutes.");
+if (!isTest) {
+  console.log("[Cron Job] Event Completion Job scheduled every 15 minutes.");
+}
+
+job.markCompletedEvents = markCompletedEvents;
+job.buildCompletionFilter = buildCompletionFilter;
 
 module.exports = job;
+

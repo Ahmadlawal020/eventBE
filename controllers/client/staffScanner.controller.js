@@ -125,6 +125,7 @@ const verifyTicketStaff = async (req, res) => {
         return res.status(400).json({ success: false, message: "This booking pass does not belong to the currently active event center." });
       }
 
+      const currentCheckIn = await require("../../services/bookingAttendance.service").currentSessionCheckIn(ticket, listingId);
       return res.status(200).json({
         success: true,
         data: {
@@ -139,8 +140,8 @@ const verifyTicketStaff = async (req, res) => {
           selectedDates: ticket.selectedDates,
           status: ticket.status,
           paymentStatus: ticket.paymentStatus,
-          isCheckedIn: ticket.checkIn?.isCheckedIn,
-          checkedInAt: ticket.checkIn?.checkedInAt,
+          isCheckedIn: currentCheckIn.isCheckedIn,
+          checkedInAt: currentCheckIn.checkedInAt,
           type: "EVENT_CENTER"
         }
       });
@@ -272,56 +273,12 @@ const validateTicketStaff = async (req, res) => {
       }
 
     } else if (listingType === "event-center") {
-      const ticket = await EventCenterBooking.findOneAndUpdate(
-        {
-          ticketNumber: lookupTicketNumber,
-          eventCenter: listingId,
-          status: { $in: ["ACTIVE", "CONFIRMED"] },
-          "checkIn.isCheckedIn": { $ne: true },
-        },
-        {
-          $set: {
-            "checkIn.isCheckedIn": true,
-            "checkIn.checkedInAt": new Date(),
-            "checkIn.checkedInBy": staffId,
-            "checkIn.method": qrPayload ? "QR" : "MANUAL",
-          },
-        },
-        { new: true }
-      )
-      .populate("buyer", "firstName surname email")
-      .populate("eventCenter", "venueName");
-
-      if (!ticket) {
-        const existingTicket = await EventCenterBooking.findOne({
-          ticketNumber: lookupTicketNumber,
-        }).select("status checkIn guestDetails eventCenter").lean();
-
-        if (!existingTicket) {
-          return res.status(404).json({ success: false, message: "Booking pass not found. Please check the code and try again." });
-        }
-
-        if (existingTicket.eventCenter.toString() !== listingId) {
-          return res.status(400).json({ success: false, message: "This booking pass does not belong to the currently active event center." });
-        }
-
-        if (existingTicket.checkIn?.isCheckedIn) {
-          return res.status(409).json({
-            success: false,
-            message: "⚠️ DUPLICATE ENTRY — This booking pass has already been used.",
-            data: {
-              checkedInAt: existingTicket.checkIn.checkedInAt,
-              guestName: existingTicket.guestDetails?.fullName,
-            },
-          });
-        }
-
-        if (existingTicket.status === "CANCELLED") {
-          return res.status(400).json({ success: false, message: "This booking has been cancelled." });
-        }
-
-        return res.status(400).json({ success: false, message: `Booking status: ${existingTicket.status}` });
-      }
+      const ticket = await EventCenterBooking.findOne({ ticketNumber: lookupTicketNumber, eventCenter: listingId })
+        .populate("buyer", "firstName surname email").populate("eventCenter", "venueName");
+      if (!ticket) return res.status(404).json({ success: false, message: "Booking pass not found for this venue." });
+      const attendance = await require("../../services/bookingAttendance.service").checkInCurrentSession({
+        booking: ticket, eventCenterId: listingId, actor: staffId, method: qrPayload ? "QR" : "MANUAL", proofVerified: true,
+      });
 
       res.status(200).json({
         success: true,
@@ -335,7 +292,7 @@ const validateTicketStaff = async (req, res) => {
           totalPrice: ticket.totalPrice,
           selectedDates: ticket.selectedDates,
           isCheckedIn: true,
-          checkedInAt: ticket.checkIn?.checkedInAt,
+          checkedInAt: attendance.recordedAt,
         },
       });
 
@@ -357,7 +314,7 @@ const validateTicketStaff = async (req, res) => {
     }
   } catch (error) {
     console.error("[STAFF VALIDATE TICKET ERROR]", error);
-    res.status(500).json({ success: false, message: "Server error during ticket validation." });
+    res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Server error during ticket validation." });
   }
 };
 

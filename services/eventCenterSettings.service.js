@@ -42,7 +42,7 @@ const validateVenuePayload = (
       "Description",
     );
   }
-  if (shouldValidate("images") && payload.images?.length > limits.maxImages) {
+  if (publishing && payload.images?.length > limits.maxImages) {
     errors.push(`A venue can have at most ${limits.maxImages} images`);
   }
   if (

@@ -1,3 +1,5 @@
+const { attendanceForBookings } = require("../../services/bookingAttendance.service");
+const { getManualBookings, manualCollectedAmount } = require("../../services/manualBookingRead.service");
 const EventCenter = require("../../models/client/eventCenter.schema");
 const EventCenterBooking = require("../../models/client/eventCenterBooking.schema");
 const mongoose = require("mongoose");
@@ -21,7 +23,7 @@ const getOrganiserBookingStats = async (req, res) => {
       ],
       staff: { $ne: organiserId },
     })
-      .select("_id venueName status location images venueType performance createdBy")
+      .select("_id venueName status location images venueType performance createdBy availability basePrice createdAt updatedAt")
       .sort({ createdAt: -1 })
       .lean();
 
@@ -163,6 +165,55 @@ const getOrganiserBookingStats = async (req, res) => {
       totalRevenue: 0, pendingRevenue: 0, pendingPayments: 0,
     };
 
+    const manualBookings = await getManualBookings(venues);
+    const financeIds = new Set(financeVenueIds.map(String));
+    const addRevenue = (rows, key, amount) => {
+      const row = rows.find(item => item._id === key);
+      if (row) row.revenue += amount;
+      else rows.push({ _id: key, revenue: amount });
+    };
+    for (const booking of manualBookings) {
+      agg.totalBookings++;
+      if (booking.status === "ACTIVE") agg.activeBookings++;
+      if (booking.status === "COMPLETED") agg.completedBookings++;
+      if (booking.status === "CANCELLED") agg.cancelledBookings++;
+      if (booking.checkIn.isCheckedIn) { agg.totalCheckedIn++; agg.manualCheckIn++; }
+      if (financeIds.has(String(booking.eventCenter._id))) {
+        const collected = manualCollectedAmount(booking);
+        agg.totalRevenue += collected;
+        if (booking.status !== "CANCELLED" && booking.paymentStatus !== "COMPLETED") {
+          agg.pendingRevenue += Math.max(0, booking.totalPrice.amount - collected);
+          agg.pendingPayments++;
+        }
+        if (collected) {
+          addRevenue(facetData.revenueByCurrency, booking.totalPrice.currency, collected);
+          addRevenue(facetData.revenueByBookingUnit, booking.bookingUnit, collected);
+        }
+      }
+    }
+
+    const attendanceBookings = await attendanceForBookings([
+      ...await EventCenterBooking.find({ eventCenter: { $in: venueIds } }).select("_id eventCenter selectedDates bookingUnit status checkIn").lean(),
+      ...manualBookings,
+    ]);
+    agg.totalCheckedIn = attendanceBookings.filter(b => b.attendance.summary.attended > 0).length;
+    const attendedByMethod = method => attendanceBookings.filter(b => b.attendance.sessions.some(session =>
+      session.status === "ATTENDED" && session.audit[session.audit.length - 1]?.method === method)).length;
+    agg.qrCheckIn = attendedByMethod("QR");
+    agg.manualCheckIn = attendedByMethod("MANUAL");
+
+    const attendanceActors = new Map();
+    for (const booking of attendanceBookings) {
+      for (const session of booking.attendance.sessions) {
+        const audit = session.audit[session.audit.length - 1];
+        if (session.status === "ATTENDED" && audit?.actor) {
+          const id = String(audit.actor._id || audit.actor);
+          attendanceActors.set(id, (attendanceActors.get(id) || 0) + 1);
+        }
+      }
+    }
+    facetData.staffEfficiency = [...attendanceActors].map(([_id, count]) => ({ _id, count })).sort((a, b) => b.count - a.count).slice(0, 5);
+
     const avgBookingValue = financeVenueIds.length > 0 && agg.totalBookings > 0 ? (agg.totalRevenue / agg.totalBookings).toFixed(2) : null;
 
     const venueAnalytics = {
@@ -212,6 +263,13 @@ const getOrganiserBookingStats = async (req, res) => {
       venueStatsMap[s._id.toString()] = s;
     });
 
+    for (const booking of manualBookings) {
+      const key = String(booking.eventCenter._id);
+      const stats = venueStatsMap[key] ||= { count: 0, revenue: 0, checkedIn: 0, pendingReview: 0 };
+      stats.count++;
+      stats.revenue += manualCollectedAmount(booking);
+      if (booking.checkIn.isCheckedIn) stats.checkedIn++;
+    }
     const venueList = venues.map((v) => {
       const stats = venueStatsMap[v._id.toString()] || { count: 0, revenue: 0, checkedIn: 0, pendingReview: 0 };
       return {
@@ -223,7 +281,7 @@ const getOrganiserBookingStats = async (req, res) => {
         bookings: {
           total: stats.count,
           revenue: v.hasFinancePerm ? stats.revenue : null,
-          checkedIn: stats.checkedIn,
+          checkedIn: attendanceBookings.filter(b => String(b.eventCenter?._id || b.eventCenter) === String(v._id) && b.attendance.summary.attended > 0).length,
           pendingReview: stats.pendingReview,
         },
       };
@@ -301,7 +359,7 @@ const getSingleVenueBookingStats = async (req, res) => {
         { coOrganisers: organiserId },
         { staff: organiserId },
       ],
-    }).select("_id venueName images status createdBy bookingSettings").lean();
+    }).select("_id venueName images status createdBy bookingSettings availability basePrice createdAt updatedAt").lean();
 
     if (!venue) {
       return res.status(404).json({ success: false, message: "Venue not found or access denied" });
@@ -316,23 +374,24 @@ const getSingleVenueBookingStats = async (req, res) => {
       ]);
 
       const userPerms = (coOrganiserInvite?.permissions || []).concat(staffInvite?.permissions || []);
-      const hasCalendarPerm = userPerms.includes("VIEW_CALENDAR") || userPerms.includes("MANAGE_CALENDAR");
       const hasFinancePermCheck = userPerms.includes("VIEW_FINANCES") || userPerms.includes("ALL_ACCESS");
 
-      if (hasCalendarPerm && !hasFinancePermCheck) {
-        hasFinancePerm = false;
-      }
+      hasFinancePerm = hasFinancePermCheck;
     }
 
-    const bookings = await EventCenterBooking.find({ eventCenter: venueId })
+    const platformBookings = await EventCenterBooking.find({ eventCenter: venueId })
       .populate("buyer", "firstName surname email profileImage")
       .sort({ createdAt: -1 })
       .lean();
 
+    const manualBookings = await getManualBookings([venue]);
+    const bookings = (await attendanceForBookings([...platformBookings.map(booking => ({ ...booking, bookingType: "PLATFORM" })), ...manualBookings]))
+      .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
     const bookingsList = bookings.map(b => {
       if (!hasFinancePerm) {
         return {
           ...b,
+          depositAmount: null,
           totalPrice: {
             ...b.totalPrice,
             amount: null
@@ -347,14 +406,14 @@ const getSingleVenueBookingStats = async (req, res) => {
       total: bookings.length,
       active: bookings.filter(b => b.status === 'ACTIVE' || b.status === 'CONFIRMED').length,
       pendingReview: bookings.filter(b => b.status === 'PENDING_REVIEW').length,
-      checkedIn: bookings.filter(b => b.checkIn.isCheckedIn).length,
-      revenue: hasFinancePerm ? bookings.filter(b => b.paymentStatus === 'COMPLETED').reduce((acc, b) => acc + b.totalPrice.amount, 0) : null,
+      checkedIn: bookings.filter(b => b.attendance.summary.attended > 0).length,
+      revenue: hasFinancePerm ? bookings.reduce((acc, b) => acc + (b.bookingType === 'MANUAL' ? manualCollectedAmount(b) : b.paymentStatus === 'COMPLETED' ? b.totalPrice.amount : 0), 0) : null,
     };
 
     res.status(200).json({
       success: true,
       data: {
-        venue,
+        venue: { _id: venue._id, venueName: venue.venueName, images: venue.images, status: venue.status, createdBy: venue.createdBy, bookingSettings: venue.bookingSettings },
         stats,
         bookings: bookingsList,
         hasFinancePerm

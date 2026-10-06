@@ -221,7 +221,14 @@ const getFinanceStats = async (req, res) => {
     };
 
     const totalEarnings = (venueData.totalRevenue || 0) + (ticketData.totalRevenue || 0);
-    const pendingPayouts = (venueData.pendingRevenue || 0) + (ticketData.pendingRevenue || 0);
+    const [payoutRecords, ownedVenues] = await Promise.all([
+      require("../../models/client/venuePayout.schema").find({ organiser: userId }).lean(),
+      require("../../models/client/eventCenter.schema").find({ createdBy: userId }).lean(),
+    ]);
+    const directBookings = await require("../../services/manualBookingRead.service").getManualBookings(ownedVenues);
+    const venueFinance = require("../../services/venueFinanceSummary.service").venueFinanceSummary(payoutRecords, directBookings);
+    const naira = venueFinance.find(row => row.currency === "NGN");
+    const pendingPayouts = naira?.pendingPayouts || 0;
     const thisMonthEarnings = (venueData.thisMonthRevenue || 0) + (ticketData.thisMonthRevenue || 0);
     const thisWeekEarnings = (venueData.thisWeekRevenue || 0) + (ticketData.thisWeekRevenue || 0);
     const todayEarnings = (venueData.todayRevenue || 0) + (ticketData.todayRevenue || 0);
@@ -336,7 +343,8 @@ const getFinanceStats = async (req, res) => {
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
       .slice(0, 20);
 
-    const availableBalance = totalEarnings;
+    // No withdrawable wallet ledger exists; earnings are not a bank balance.
+    const availableBalance = null;
 
     res.status(200).json({
       success: true,
@@ -345,11 +353,14 @@ const getFinanceStats = async (req, res) => {
           available: availableBalance,
           totalEarnings,
           pendingPayouts,
-          successfulPayouts: 0,
+          successfulPayouts: naira?.confirmedPayouts || 0,
+          directCollections: naira?.directCollections || 0,
+          outstandingDirect: naira?.outstandingDirect || 0,
           thisMonthEarnings,
           thisWeekEarnings,
           todayEarnings,
         },
+        venueFinance,
         breakdown: {
           ticketRevenue: ticketData.totalRevenue || 0,
           ticketSalesCount: ticketData.completedTicketsCount || 0,

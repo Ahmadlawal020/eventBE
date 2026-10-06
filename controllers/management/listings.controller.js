@@ -5,6 +5,7 @@ const User = require("../../models/client/user.schema");
 const {
   recordAdminAction,
 } = require("../../services/management/adminAudit.service");
+const geo = require("../../services/management/geography.service");
 
 const LISTING_MODELS = {
   event: {
@@ -34,6 +35,15 @@ const getListings = async (req, res) => {
       page = 1,
       limit = 20,
     } = req.query;
+
+    const workingLocation = req.query.location || req.headers["x-working-location"];
+    let geoFilter = {};
+    try {
+      geoFilter = await geo.recordFilter(req.managementStaff, workingLocation, "records.read");
+    } catch (err) {
+      return res.status(err.status || 403).json({ success: false, message: err.message });
+    }
+
     const requestedTypes = type === "all" ? ["event", "event-center"] : [type];
     const pageNumber = Math.max(1, Number(page) || 1);
     const limitNumber = Math.min(100, Math.max(1, Number(limit) || 20));
@@ -43,174 +53,178 @@ const getListings = async (req, res) => {
       : null;
     const matchingCreators = searchExpression
       ? await User.find({
-          $or: [
-            { firstName: searchExpression },
-            { surname: searchExpression },
-            { email: searchExpression },
-          ],
-        })
-          .select("_id")
-          .limit(250)
-          .lean()
+        $or: [
+          { firstName: searchExpression },
+          { surname: searchExpression },
+          { email: searchExpression },
+        ],
+      })
+        .select("_id")
+        .limit(250)
+        .lean()
       : [];
     const matchingCreatorIds = matchingCreators.map((creator) => creator._id);
 
+    const geoMatch = geoFilter.managementLocation ? [{ $match: geoFilter }] : [];
+
     const eventMetricsPromise = requestedTypes.includes("event")
       ? Event.aggregate([
-          {
-            $facet: {
-              summary: [
-                {
-                  $group: {
-                    _id: null,
-                    total: { $sum: 1 },
-                    listed: {
-                      $sum: {
-                        $cond: [{ $eq: ["$status", "LISTED"] }, 1, 0],
-                      },
-                    },
-                    actionRequired: {
-                      $sum: {
-                        $cond: [{ $eq: ["$status", "ACTION_REQUIRED"] }, 1, 0],
-                      },
-                    },
-                    inProgress: {
-                      $sum: {
-                        $cond: [{ $eq: ["$status", "IN_PROGRESS"] }, 1, 0],
-                      },
-                    },
-                    unlisted: {
-                      $sum: {
-                        $cond: [{ $eq: ["$status", "UNLISTED"] }, 1, 0],
-                      },
-                    },
-                    completed: {
-                      $sum: {
-                        $cond: [{ $eq: ["$status", "COMPLETED"] }, 1, 0],
-                      },
-                    },
-                    upcoming: {
-                      $sum: {
-                        $cond: [{ $gte: ["$schedule.to", new Date()] }, 1, 0],
-                      },
-                    },
-                    past: {
-                      $sum: {
-                        $cond: [{ $lt: ["$schedule.to", new Date()] }, 1, 0],
-                      },
-                    },
-                    capacity: { $sum: { $ifNull: ["$capacity", 0] } },
-                    views: { $sum: { $ifNull: ["$performance.views", 0] } },
-                    clicks: {
-                      $sum: { $ifNull: ["$performance.clicks", 0] },
-                    },
-                    wishlists: {
-                      $sum: { $ifNull: ["$performance.wishlists", 0] },
-                    },
-                    reach: { $sum: { $ifNull: ["$performance.reach", 0] } },
-                    shares: {
-                      $sum: { $ifNull: ["$performance.shares", 0] },
-                    },
-                    ticketSales: {
-                      $sum: { $ifNull: ["$performance.ticketSales", 0] },
-                    },
-                    revenue: {
-                      $sum: { $ifNull: ["$performance.revenue", 0] },
+        ...geoMatch,
+        {
+          $facet: {
+            summary: [
+              {
+                $group: {
+                  _id: null,
+                  total: { $sum: 1 },
+                  listed: {
+                    $sum: {
+                      $cond: [{ $eq: ["$status", "LISTED"] }, 1, 0],
                     },
                   },
+                  actionRequired: {
+                    $sum: {
+                      $cond: [{ $eq: ["$status", "ACTION_REQUIRED"] }, 1, 0],
+                    },
+                  },
+                  inProgress: {
+                    $sum: {
+                      $cond: [{ $eq: ["$status", "IN_PROGRESS"] }, 1, 0],
+                    },
+                  },
+                  unlisted: {
+                    $sum: {
+                      $cond: [{ $eq: ["$status", "UNLISTED"] }, 1, 0],
+                    },
+                  },
+                  completed: {
+                    $sum: {
+                      $cond: [{ $eq: ["$status", "COMPLETED"] }, 1, 0],
+                    },
+                  },
+                  upcoming: {
+                    $sum: {
+                      $cond: [{ $gte: ["$schedule.to", new Date()] }, 1, 0],
+                    },
+                  },
+                  past: {
+                    $sum: {
+                      $cond: [{ $lt: ["$schedule.to", new Date()] }, 1, 0],
+                    },
+                  },
+                  capacity: { $sum: { $ifNull: ["$capacity", 0] } },
+                  views: { $sum: { $ifNull: ["$performance.views", 0] } },
+                  clicks: {
+                    $sum: { $ifNull: ["$performance.clicks", 0] },
+                  },
+                  wishlists: {
+                    $sum: { $ifNull: ["$performance.wishlists", 0] },
+                  },
+                  reach: { $sum: { $ifNull: ["$performance.reach", 0] } },
+                  shares: {
+                    $sum: { $ifNull: ["$performance.shares", 0] },
+                  },
+                  ticketSales: {
+                    $sum: { $ifNull: ["$performance.ticketSales", 0] },
+                  },
+                  revenue: {
+                    $sum: { $ifNull: ["$performance.revenue", 0] },
+                  },
                 },
-              ],
-              categories: [
-                { $match: { eventType: { $exists: true, $ne: null } } },
-                { $group: { _id: "$eventType", count: { $sum: 1 } } },
-                { $sort: { count: -1, _id: 1 } },
-                { $limit: 8 },
-              ],
-            },
+              },
+            ],
+            categories: [
+              { $match: { eventType: { $exists: true, $ne: null } } },
+              { $group: { _id: "$eventType", count: { $sum: 1 } } },
+              { $sort: { count: -1, _id: 1 } },
+              { $limit: 8 },
+            ],
           },
-        ])
+        },
+      ])
       : Promise.resolve([]);
 
     const venueMetricsPromise = requestedTypes.includes("event-center")
       ? EventCenter.aggregate([
-          {
-            $facet: {
-              summary: [
-                {
-                  $group: {
-                    _id: null,
-                    total: { $sum: 1 },
-                    listed: {
-                      $sum: {
-                        $cond: [{ $eq: ["$status", "LISTED"] }, 1, 0],
-                      },
-                    },
-                    actionRequired: {
-                      $sum: {
-                        $cond: [{ $eq: ["$status", "ACTION_REQUIRED"] }, 1, 0],
-                      },
-                    },
-                    inProgress: {
-                      $sum: {
-                        $cond: [{ $eq: ["$status", "IN_PROGRESS"] }, 1, 0],
-                      },
-                    },
-                    unlisted: {
-                      $sum: {
-                        $cond: [{ $eq: ["$status", "UNLISTED"] }, 1, 0],
-                      },
-                    },
-                    instantBooking: {
-                      $sum: {
-                        $cond: [{ $eq: ["$bookingSettings", "INSTANT"] }, 1, 0],
-                      },
-                    },
-                    reviewBooking: {
-                      $sum: {
-                        $cond: [{ $eq: ["$bookingSettings", "REVIEW"] }, 1, 0],
-                      },
-                    },
-                    totalCapacity: {
-                      $sum: { $ifNull: ["$capacity.max", 0] },
-                    },
-                    views: {
-                      $sum: { $ifNull: ["$performance.views", 0] },
-                    },
-                    clicks: {
-                      $sum: { $ifNull: ["$performance.clicks", 0] },
-                    },
-                    reach: {
-                      $sum: { $ifNull: ["$performance.reach", 0] },
-                    },
-                    wishlists: {
-                      $sum: { $ifNull: ["$performance.wishlists", 0] },
-                    },
-                    shares: {
-                      $sum: { $ifNull: ["$performance.shares", 0] },
-                    },
-                    pendingInquiries: {
-                      $sum: {
-                        $ifNull: ["$performance.pendingInquiries", 0],
-                      },
-                    },
-                    bookings: {
-                      $sum: { $ifNull: ["$performance.bookings", 0] },
-                    },
-                    revenue: {
-                      $sum: { $ifNull: ["$performance.revenue", 0] },
+        ...geoMatch,
+        {
+          $facet: {
+            summary: [
+              {
+                $group: {
+                  _id: null,
+                  total: { $sum: 1 },
+                  listed: {
+                    $sum: {
+                      $cond: [{ $eq: ["$status", "LISTED"] }, 1, 0],
                     },
                   },
+                  actionRequired: {
+                    $sum: {
+                      $cond: [{ $eq: ["$status", "ACTION_REQUIRED"] }, 1, 0],
+                    },
+                  },
+                  inProgress: {
+                    $sum: {
+                      $cond: [{ $eq: ["$status", "IN_PROGRESS"] }, 1, 0],
+                    },
+                  },
+                  unlisted: {
+                    $sum: {
+                      $cond: [{ $eq: ["$status", "UNLISTED"] }, 1, 0],
+                    },
+                  },
+                  instantBooking: {
+                    $sum: {
+                      $cond: [{ $eq: ["$bookingSettings", "INSTANT"] }, 1, 0],
+                    },
+                  },
+                  reviewBooking: {
+                    $sum: {
+                      $cond: [{ $eq: ["$bookingSettings", "REVIEW"] }, 1, 0],
+                    },
+                  },
+                  totalCapacity: {
+                    $sum: { $ifNull: ["$capacity.max", 0] },
+                  },
+                  views: {
+                    $sum: { $ifNull: ["$performance.views", 0] },
+                  },
+                  clicks: {
+                    $sum: { $ifNull: ["$performance.clicks", 0] },
+                  },
+                  reach: {
+                    $sum: { $ifNull: ["$performance.reach", 0] },
+                  },
+                  wishlists: {
+                    $sum: { $ifNull: ["$performance.wishlists", 0] },
+                  },
+                  shares: {
+                    $sum: { $ifNull: ["$performance.shares", 0] },
+                  },
+                  pendingInquiries: {
+                    $sum: {
+                      $ifNull: ["$performance.pendingInquiries", 0],
+                    },
+                  },
+                  bookings: {
+                    $sum: { $ifNull: ["$performance.bookings", 0] },
+                  },
+                  revenue: {
+                    $sum: { $ifNull: ["$performance.revenue", 0] },
+                  },
                 },
-              ],
-              categories: [
-                { $match: { venueType: { $exists: true, $ne: null } } },
-                { $group: { _id: "$venueType", count: { $sum: 1 } } },
-                { $sort: { count: -1, _id: 1 } },
-                { $limit: 8 },
-              ],
-            },
+              },
+            ],
+            categories: [
+              { $match: { venueType: { $exists: true, $ne: null } } },
+              { $group: { _id: "$venueType", count: { $sum: 1 } } },
+              { $sort: { count: -1, _id: 1 } },
+              { $limit: 8 },
+            ],
           },
-        ])
+        },
+      ])
       : Promise.resolve([]);
 
     const [results, eventMetricRows, venueMetricRows] = await Promise.all([
@@ -219,7 +233,7 @@ const getListings = async (req, res) => {
           .filter((item) => LISTING_MODELS[item])
           .map(async (listingType) => {
             const config = LISTING_MODELS[listingType];
-            const query = {};
+            const query = { ...geoFilter };
 
             if (status) query.status = status;
             if (searchExpression) {
@@ -300,6 +314,35 @@ const getListings = async (req, res) => {
     const eventMetrics = eventMetricFacet.summary?.[0] || {};
     const venueMetricFacet = venueMetricRows[0] || {};
     const venueMetrics = venueMetricFacet.summary?.[0] || {};
+
+    const dataRestrictions = req.managementStaff?.dataRestrictions || [];
+    if (
+      dataRestrictions.includes("attendee_pii") ||
+      dataRestrictions.includes("identity_documents")
+    ) {
+      for (const item of listings) {
+        if (item.createdBy && typeof item.createdBy === "object") {
+          item.createdBy.email = "[Restricted]";
+          item.createdBy.phoneNumber = "[Restricted]";
+        }
+      }
+    }
+    if (dataRestrictions.includes("financial_data")) {
+      for (const item of listings) {
+        if (item.performance) {
+          item.performance.revenue = 0;
+          item.performance.ticketSales = 0;
+        }
+      }
+      if (eventMetrics) {
+        eventMetrics.revenue = 0;
+        eventMetrics.ticketSales = 0;
+      }
+      if (venueMetrics) {
+        venueMetrics.revenue = 0;
+        venueMetrics.bookings = 0;
+      }
+    }
 
     res.status(200).json({
       success: true,
@@ -392,6 +435,47 @@ const getListingDetails = async (req, res) => {
         .json({ success: false, message: "Listing not found" });
     }
 
+    if (!geo.isGlobal(req.managementStaff)) {
+      const allowed = await geo.locationsFor(req.managementStaff, "records.read");
+      const allowedIds = new Set(allowed.map((l) => String(l._id)));
+      if (
+        !listing.managementLocation ||
+        !allowedIds.has(String(listing.managementLocation))
+      ) {
+        return res.status(404).json({
+          success: false,
+          message: "Listing not found or not accessible in your region",
+        });
+      }
+    }
+
+    const dataRestrictions = req.managementStaff?.dataRestrictions || [];
+    if (
+      dataRestrictions.includes("attendee_pii") ||
+      dataRestrictions.includes("identity_documents")
+    ) {
+      if (listing.createdBy && typeof listing.createdBy === "object") {
+        listing.createdBy.email = "[Restricted]";
+        listing.createdBy.phoneNumber = "[Restricted]";
+      }
+      if (Array.isArray(listing.coOrganisers)) {
+        listing.coOrganisers.forEach((co) => {
+          if (co && typeof co === "object") co.email = "[Restricted]";
+        });
+      }
+      if (Array.isArray(listing.staff)) {
+        listing.staff.forEach((st) => {
+          if (st && typeof st === "object") st.email = "[Restricted]";
+        });
+      }
+    }
+    if (dataRestrictions.includes("financial_data")) {
+      if (listing.performance) {
+        listing.performance.revenue = 0;
+        listing.performance.ticketSales = 0;
+      }
+    }
+
     res.status(200).json({
       success: true,
       data: {
@@ -436,6 +520,20 @@ const updateListingStatus = async (req, res, next) => {
       return res
         .status(404)
         .json({ success: false, message: "Listing not found" });
+    }
+
+    if (!geo.isGlobal(req.managementStaff)) {
+      const allowed = await geo.locationsFor(req.managementStaff, "records.unlist");
+      const allowedIds = new Set(allowed.map((l) => String(l._id)));
+      if (
+        !listing.managementLocation ||
+        !allowedIds.has(String(listing.managementLocation))
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: "You do not have permission to moderate listings for this location",
+        });
+      }
     }
 
     if (status === "LISTED" || status === "UNLISTED") {
@@ -532,6 +630,20 @@ const updateListing = async (req, res) => {
       return res
         .status(404)
         .json({ success: false, message: "Listing not found" });
+    }
+
+    if (!geo.isGlobal(req.managementStaff)) {
+      const allowed = await geo.locationsFor(req.managementStaff, "settings.write");
+      const allowedIds = new Set(allowed.map((l) => String(l._id)));
+      if (
+        !listing.managementLocation ||
+        !allowedIds.has(String(listing.managementLocation))
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: "You do not have edit permission for this location",
+        });
+      }
     }
 
     const allowedFields =

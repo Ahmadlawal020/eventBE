@@ -111,6 +111,7 @@ const eventCenterTicketSchema = new mongoose.Schema(
     // CHECK-IN TRACKING
     checkIn: {
       isCheckedIn: { type: Boolean, default: false },
+      proofVerified: { type: Boolean, default: false },
       checkedInAt: Date,
       checkedInBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
       method: {
