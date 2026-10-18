@@ -288,10 +288,12 @@ const generalNotificationTemplate = ({
   actionUrl,
   actionText = "Open App",
 }) => {
+  const escape = (value) => String(value ?? "").replace(/[&<>"']/g, (character) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
   const content = `
-    <h1 class="h1">${title}</h1>
-    <p class="text">Hello ${recipientName || "there"},</p>
-    <p class="text">${message}</p>
+    <h1 class="h1">${escape(title)}</h1>
+    <p class="text">Hello ${escape(recipientName || "there")},</p>
+    <p class="text">${escape(message).replace(/\n/g, "<br>")}</p>
 
     ${actionUrl ? `
     <div class="btn-container">
@@ -299,7 +301,7 @@ const generalNotificationTemplate = ({
     </div>
     ` : ""}
   `;
-  return baseEmailLayout(title, content);
+  return baseEmailLayout(escape(title), content);
 };
 
 module.exports = {

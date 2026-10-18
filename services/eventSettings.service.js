@@ -12,6 +12,63 @@ const getEffectiveEventSettings = async (locationId = null) => {
   return result;
 };
 
+// Clears refund fields that do not belong to the selected policy type so a
+// stored ticketGuide can never hold contradictory terms.
+const normalizeTicketGuide = (guide) => {
+  if (!guide || typeof guide !== "object" || Array.isArray(guide)) return guide;
+  const normalized = { ...guide };
+  for (const field of ["customRefundTerms", "cancellationNotificationMethod",
+    "cancellationRefundProcess", "cancellationRefundTimeline"]) {
+    if (typeof normalized[field] === "string") normalized[field] = normalized[field].trim();
+  }
+  if (normalized.refundPolicyType === "NO_REFUNDS") {
+    normalized.refundWindowDays = null;
+    normalized.refundAmountType = null;
+    normalized.partialRefundPercentage = null;
+    normalized.customRefundTerms = null;
+  } else if (normalized.refundPolicyType === "REFUNDS_BEFORE_EVENT") {
+    normalized.customRefundTerms = null;
+    if (normalized.refundAmountType === "FULL") {
+      normalized.partialRefundPercentage = null;
+    }
+  } else if (normalized.refundPolicyType === "CUSTOM") {
+    normalized.refundWindowDays = null;
+    normalized.refundAmountType = null;
+    normalized.partialRefundPercentage = null;
+  }
+  return normalized;
+};
+
+// Keep the two-field creation form compatible with existing ticket-guide readers.
+// Only explicit policy edits are mirrored; unrelated listing patches stay untouched.
+const normalizeEventCancellationPolicy = (payload, previous = {}) => {
+  const fields = ["cancellationRefundProcess", "cancellationRefundTimeline"];
+  const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+  const topLevelEdit = fields.some((field) => hasOwn(payload, field));
+  const nestedEdit = fields.some((field) => hasOwn(payload.ticketGuide || {}, field));
+  if (!topLevelEdit && !nestedEdit) return payload;
+  const result = { ...payload };
+  const guide = { ...previous.ticketGuide, ...payload.ticketGuide };
+  if (topLevelEdit) {
+    Object.assign(guide, {
+      platformPolicyAcknowledged: true,
+      refundPolicyType: "NO_REFUNDS",
+      cancellationNotificationMethod: "Email and in-app notification",
+    });
+  }
+  for (const field of fields) {
+    const value = topLevelEdit
+      ? (hasOwn(payload, field) ? payload[field] : previous[field] ?? guide[field])
+      : guide[field];
+    if (value !== undefined) {
+      result[field] = typeof value === "string" ? value.trim() : value;
+      guide[field] = result[field];
+    }
+  }
+  result.ticketGuide = normalizeTicketGuide(guide);
+  return result;
+};
+
 const validateEventPayload = (
   payload,
   settings,
@@ -135,6 +192,96 @@ const validateEventPayload = (
     }
   }
 
+  // Terms are always required for publishing. They are also re-checked whenever
+  // an existing, non-draft listing receives a ticketGuide patch, so terms can
+  // never be cleared or emptied on a live listing without validation.
+  const ticketGuidePatched =
+    existing && Object.prototype.hasOwnProperty.call(changes, "ticketGuide");
+  const guide = payload.ticketGuide;
+  const hasText = (value) => typeof value === "string" && Boolean(value.trim());
+  if (shouldValidate("ticketGuide") && guide !== undefined) {
+    if (!guide || typeof guide !== "object" || Array.isArray(guide)) {
+      errors.push("Refund and cancellation policy must be an object");
+    } else {
+      for (const [field, maximum] of [
+        ["customRefundTerms", 1000], ["cancellationNotificationMethod", 500],
+        ["cancellationRefundProcess", 1000], ["cancellationRefundTimeline", 500],
+      ]) {
+        if (guide[field] != null && typeof guide[field] !== "string") {
+          errors.push(field + " must be text");
+        }
+        validateLength(guide[field], maximum, field);
+      }
+      if (guide.platformPolicyAcknowledged != null && typeof guide.platformPolicyAcknowledged !== "boolean") {
+        errors.push("Platform policy acknowledgement must be a boolean");
+      }
+      if (guide.refundPolicyType != null && !["NO_REFUNDS", "REFUNDS_BEFORE_EVENT", "CUSTOM"].includes(guide.refundPolicyType)) {
+        errors.push("Choose a valid attendee refund policy");
+      }
+      if (guide.refundAmountType != null && !["FULL", "PARTIAL"].includes(guide.refundAmountType)) {
+        errors.push("Choose whether the refund is full or partial");
+      }
+      if (guide.refundWindowDays != null &&
+          (!Number.isInteger(guide.refundWindowDays) || guide.refundWindowDays < 1 || guide.refundWindowDays > 365)) {
+        errors.push("Refund window must be a whole number between 1 and 365 days");
+      }
+      if (guide.partialRefundPercentage != null &&
+          (!Number.isFinite(guide.partialRefundPercentage) || guide.partialRefundPercentage < 1 || guide.partialRefundPercentage > 99)) {
+        errors.push("Choose a partial refund percentage between 1 and 99");
+      }
+    }
+  }
+  for (const [field, maximum] of [
+    ["cancellationRefundProcess", 1000], ["cancellationRefundTimeline", 500],
+  ]) {
+    if (shouldValidate(field) && payload[field] !== undefined &&
+        (typeof payload[field] !== "string" || payload[field].length > maximum)) {
+      errors.push(field + " must be text of at most " + maximum + " characters");
+    }
+  }
+  const termsRequired =
+    requireComplete || (ticketGuidePatched && payload.status !== "IN_PROGRESS");
+
+  if (termsRequired) {
+    const policy = payload.ticketGuide;
+    if (policy?.platformPolicyAcknowledged !== true) {
+      errors.push("Acknowledge the platform non-refundable-fees policy before publishing");
+    }
+    if (!["NO_REFUNDS", "REFUNDS_BEFORE_EVENT", "CUSTOM"].includes(policy?.refundPolicyType)) {
+      errors.push("Choose an attendee refund policy before publishing");
+    } else if (policy.refundPolicyType === "REFUNDS_BEFORE_EVENT") {
+      if (!Number.isInteger(policy.refundWindowDays) || policy.refundWindowDays < 1) {
+        errors.push("Choose a valid refund window before publishing");
+      } else if (policy.refundWindowDays > 365) {
+        errors.push("Refund window cannot exceed 365 days");
+      }
+      if (!["FULL", "PARTIAL"].includes(policy.refundAmountType)) {
+        errors.push("Choose whether the refund is full or partial before publishing");
+      } else if (
+        policy.refundAmountType === "PARTIAL" &&
+        (!Number.isFinite(policy.partialRefundPercentage) ||
+          policy.partialRefundPercentage < 1 ||
+          policy.partialRefundPercentage > 99)
+      ) {
+        errors.push("Choose a partial refund percentage between 1 and 99");
+      }
+    } else if (
+      policy.refundPolicyType === "CUSTOM" &&
+      !hasText(policy?.customRefundTerms)
+    ) {
+      errors.push("Enter your custom refund terms before publishing");
+    }
+    if (!hasText(policy?.cancellationNotificationMethod)) {
+      errors.push("Explain how attendees will be notified if the event is cancelled");
+    }
+    if (!hasText(policy?.cancellationRefundProcess)) {
+      errors.push("Explain how eligible manual refunds will be triggered");
+    }
+    if (!hasText(policy?.cancellationRefundTimeline)) {
+      errors.push("Provide a refund processing timeline for event cancellations");
+    }
+  }
+
   if (publishing) {
     const requiredImages = Math.max(
       settings.publishing.requireCoverImage ? 1 : 0,
@@ -226,6 +373,8 @@ module.exports = {
   getEventSettings,
   getEffectiveEventSettings,
   getTicketMinBasePrice,
+  normalizeTicketGuide,
+  normalizeEventCancellationPolicy,
   organiserMeetsPublishingRequirements,
   publicEventSettings,
   validateEventPayload,

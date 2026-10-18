@@ -233,7 +233,7 @@ const dispatchBulkNotifications = async ({
   channels,
 }) => {
   if (!recipients || recipients.length === 0) {
-    return { total: 0, inAppCount: 0, pushCount: 0 };
+    return { total: 0, inAppCount: 0, pushCount: 0, emailCount: 0 };
   }
 
   const typeConfig = TYPE_CONFIG[type] || {
@@ -246,11 +246,12 @@ const dispatchBulkNotifications = async ({
   const configuredChannels = channels || typeConfig.defaultChannels || ["in_app", "push"];
 
   const users = await User.find({ _id: { $in: recipients } })
-    .select("_id pushTokens notificationPreferences")
+    .select("_id firstName email pushTokens notificationPreferences")
     .lean();
 
   const inAppDocs = [];
   const pushTokensToSend = [];
+  const emailRecipients = [];
 
   for (const user of users) {
     const prefs = user.notificationPreferences;
@@ -272,6 +273,10 @@ const dispatchBulkNotifications = async ({
       const userTokens = (user.pushTokens || []).map((t) => t.token);
       pushTokensToSend.push(...userTokens);
     }
+    if (configuredChannels.includes("email") && user.email &&
+        (type === NOTIFICATION_TYPES.EVENT_CANCELLED || isChannelEnabled(prefs, category, "email"))) {
+      emailRecipients.push(user);
+    }
   }
 
   let inAppCount = 0;
@@ -280,6 +285,7 @@ const dispatchBulkNotifications = async ({
       const inserted = await Notification.insertMany(inAppDocs, { ordered: false });
       inAppCount = inserted.length;
     } catch (insertErr) {
+      inAppCount = insertErr.insertedDocs?.length || 0;
       console.error("[NOTIFICATION ENGINE] Bulk in-app insert error:", insertErr.message);
     }
   }
@@ -300,10 +306,36 @@ const dispatchBulkNotifications = async ({
     }
   }
 
+  let emailCount = 0;
+  if (emailRecipients.length > 0) {
+    const deliveries = await Promise.allSettled(emailRecipients.map((user) => sendEmail({
+      to: user.email,
+      subject: title,
+      html: emailTemplates.generalNotificationTemplate({
+        recipientName: user.firstName,
+        title,
+        message,
+        actionUrl: data.deepLink || null,
+      }),
+    })));
+    emailCount = deliveries.filter((delivery) =>
+      delivery.status === "fulfilled" && delivery.value?.id,
+    ).length;
+    const failedCount = deliveries.length - emailCount;
+    if (failedCount) {
+      console.error("[NOTIFICATION ENGINE] Bulk email delivery incomplete:", {
+        failedCount,
+        reason: deliveries.find((delivery) => delivery.status === "rejected")?.reason?.message ||
+          "Email provider did not confirm delivery; check email configuration.",
+      });
+    }
+  }
+
   return {
     total: recipients.length,
     inAppCount,
     pushCount,
+    emailCount,
   };
 };
 

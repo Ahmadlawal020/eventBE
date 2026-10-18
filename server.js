@@ -19,6 +19,8 @@ mongoose.connection.once("open", () => {
   require("./jobs/venueHoldExpiry.job");
   require("./jobs/venueReminder.job");
   require("./jobs/referralReconciliation.job");
+  require("./jobs/eventRefundOverdue.job");
+  require("./jobs/refundNotifications.job");
   server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });

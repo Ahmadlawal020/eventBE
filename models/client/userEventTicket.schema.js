@@ -37,6 +37,8 @@ const userEventTicketSchema = new Schema(
       enum: ["UNREDEEMED", "REDEEMED", "CANCELLED"],
       default: "UNREDEEMED",
     },
+    invalidatedReason: { type: String, enum: ["EVENT_CANCELLED", null], default: null },
+    invalidatedAt: Date,
     redeemedAt: { type: Date },
     redeemedBy: { type: Schema.Types.ObjectId, ref: "User" },
     // CHECK-IN TRACKING

@@ -33,7 +33,6 @@ const SECTION_FIELDS = {
     "freeEventsEnabled",
     "paidEventsEnabled",
     "onSiteTicketsEnabled",
-    "requireRefundPolicyForPaidEvents",
     "maxTicketTiers",
     "maxTicketsPerOrder",
     "salesCutoffMinutes",

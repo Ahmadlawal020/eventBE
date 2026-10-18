@@ -39,7 +39,6 @@ const eventSettingsSchema = new Schema(
             freeEventsEnabled: { type: Boolean, default: true },
             paidEventsEnabled: { type: Boolean, default: true },
             onSiteTicketsEnabled: { type: Boolean, default: true },
-            requireRefundPolicyForPaidEvents: { type: Boolean, default: false },
             maxTicketTiers: { type: Number, default: 20, min: 1, max: 100 },
             maxTicketsPerOrder: { type: Number, default: 20, min: 1, max: 1000 },
             salesCutoffMinutes: { type: Number, default: 0, min: 0, max: 10080 },

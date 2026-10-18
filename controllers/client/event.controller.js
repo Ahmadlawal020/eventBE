@@ -8,6 +8,8 @@ const cloudinary = require("../../utils/cloudinary");
 const {
   applyGuidanceDefaults,
   getEffectiveEventSettings: getEventSettings,
+  normalizeTicketGuide,
+  normalizeEventCancellationPolicy,
   organiserMeetsPublishingRequirements,
   validateEventPayload,
 } = require("../../services/eventSettings.service");
@@ -32,6 +34,8 @@ const createEvent = async (req, res) => {
     safety,
     safetyConsiderations,
     ticketGuide,
+    cancellationRefundProcess,
+    cancellationRefundTimeline,
     arrivalGuide,
     performers,
     entry,
@@ -39,7 +43,7 @@ const createEvent = async (req, res) => {
 
   try {
     const settings = await getEventSettings();
-    const payload = applyGuidanceDefaults(
+    const payload = normalizeEventCancellationPolicy(applyGuidanceDefaults(
       {
         title,
         shortDescription,
@@ -56,12 +60,15 @@ const createEvent = async (req, res) => {
         safety,
         safetyConsiderations,
         ticketGuide,
+        ...(cancellationRefundProcess !== undefined ? { cancellationRefundProcess } : {}),
+        ...(cancellationRefundTimeline !== undefined ? { cancellationRefundTimeline } : {}),
         arrivalGuide,
         performers,
         entry,
       },
       settings,
-    );
+    ));
+    payload.ticketGuide = normalizeTicketGuide(payload.ticketGuide);
     const validationErrors = validateEventPayload(payload, settings, {
       publishing: isDraft === false,
     });
@@ -101,6 +108,8 @@ const createEvent = async (req, res) => {
       safety,
       safetyConsiderations,
       ticketGuide: payload.ticketGuide,
+      cancellationRefundProcess: payload.cancellationRefundProcess,
+      cancellationRefundTimeline: payload.cancellationRefundTimeline,
       arrivalGuide: payload.arrivalGuide,
       performers,
       entry,
@@ -249,7 +258,14 @@ const updateEvent = async (req, res) => {
       }
     }
 
-    const updatePayload = prepareListingPatch(req.body, EVENT_FIELDS, prevEvent.toObject());
+    const updatePayload = normalizeEventCancellationPolicy(
+      prepareListingPatch(req.body, EVENT_FIELDS, prevEvent.toObject()),
+      prevEvent.toObject(),
+    );
+    if (prevEvent.status === "CANCELLED" &&
+        (updatePayload.status !== undefined || updatePayload.isDraft !== undefined)) {
+      return res.status(409).json({ success: false, message: "A cancelled event cannot be relisted. Create a new event instead." });
+    }
     const settings = await getEventSettings(prevEvent.managementLocation);
 
     /* ================================
@@ -316,6 +332,13 @@ const updateEvent = async (req, res) => {
       };
     }
 
+    /* ================================
+       TICKET GUIDE / TERMS & POLICY (NORMALIZATION)
+    ================================= */
+    if (updatePayload.ticketGuide) {
+      updatePayload.ticketGuide = normalizeTicketGuide(updatePayload.ticketGuide);
+    }
+
     const previousObject = prevEvent.toObject();
     const mergedPayload = { ...previousObject, ...updatePayload };
     const resubmittingCompletedEvent =
@@ -372,17 +395,17 @@ const updateEvent = async (req, res) => {
     }
 
     delete updatePayload.isDraft;
-    const updatedEvent = await Event.findByIdAndUpdate(id, updatePayload, {
+    const updatedEvent = await Event.findOneAndUpdate({ _id: id, status: prevEvent.status }, updatePayload, {
       new: true,
       runValidators: true,
     });
 
-    if (!updatedEvent) return res.status(409).json({ success: false, message: "A moderator must restore this listing before its status can change." });
+    if (!updatedEvent) return res.status(409).json({ success: false, message: "This listing changed while you were editing. Refresh before trying again." });
 
     // Check if event schedule was updated and clamp existing ticket tiers if salesEndAt exceeds new event end time
     let adjustedTicketCount = 0;
     const newEventEnd = updatedEvent.schedule?.to || updatedEvent.schedule?.from;
-    if (newEventEnd) {
+    if (updatePayload.schedule && newEventEnd) {
       adjustedTicketCount = await realignTicketSalesWindows(id, newEventEnd);
 
       if (adjustedTicketCount > 0) {
@@ -569,10 +592,16 @@ const deleteEvent = async (req, res) => {
     }
 
     // 1️⃣ Delete associated tickets
-    await Ticket.deleteMany({ eventId: id });
-
-    // 2️⃣ Delete the event itself
-    await Event.findByIdAndDelete(id);
+    await mongoose.connection.transaction(async session => {
+      const draft = await Event.findOneAndUpdate({ _id: id, status: "IN_PROGRESS", createdBy: req.user.id },
+        { $inc: { saleVersion: 1 } }, { new: true, session });
+      if (!draft || await require("../../models/client/eventBooking.schema").exists({ eventId: id }).session(session) ||
+          await require("../../models/client/eventRefund.schema").exists({ eventId: id }).session(session)) {
+        throw Object.assign(new Error("Only unused drafts can be deleted. Cancel or unlist published events to preserve buyer and refund records."), { statusCode: 409 });
+      }
+      await Ticket.deleteMany({ eventId: id }, { session });
+      await Event.deleteOne({ _id: id }, { session });
+    });
 
     // 3️⃣ Respond immediately so the client doesn't time out
     res.json({
@@ -608,7 +637,7 @@ const deleteEvent = async (req, res) => {
     }
   } catch (err) {
     console.error("[DELETE EVENT]", err);
-    res.status(500).json({ success: false, message: "Server error" });
+    res.status(err.statusCode || 500).json({ success: false, message: err.statusCode ? err.message : "Server error" });
   }
 };
 

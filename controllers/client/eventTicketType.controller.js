@@ -99,6 +99,9 @@ const createTicket = async (req, res) => {
         }
 
         const settings = await getEventSettings(event.managementLocation);
+        if (["CANCELLED", "COMPLETED"].includes(event.status)) {
+            return res.status(409).json({ success: false, message: "Tickets cannot be created after an event has ended or been cancelled." });
+        }
         const isFree = ticketType === "FREE";
         if (isFree && !settings.ticketing.freeEventsEnabled) {
             return res.status(400).json({
@@ -127,17 +130,6 @@ const createTicket = async (req, res) => {
             return res.status(400).json({
                 success: false,
                 message: `The ticket order limit cannot exceed ${settings.ticketing.maxTicketsPerOrder}`,
-            });
-        }
-        if (
-            !isFree &&
-            settings.ticketing.requireRefundPolicyForPaidEvents &&
-            !event.ticketGuide?.refundPolicy?.trim()
-        ) {
-            return res.status(400).json({
-                success: false,
-                message:
-                    "A refund policy is required before paid tickets can be created",
             });
         }
         const salesError = salesWindowError(
@@ -346,16 +338,6 @@ const updateTicket = async (req, res) => {
                 return res.status(400).json({
                     success: false,
                     message: "Paid and donation event tickets are currently disabled",
-                });
-            }
-            if (
-                !isFree &&
-                settings.ticketing.requireRefundPolicyForPaidEvents &&
-                !event.ticketGuide?.refundPolicy?.trim()
-            ) {
-                return res.status(400).json({
-                    success: false,
-                    message: "A refund policy is required before using paid tickets",
                 });
             }
         }

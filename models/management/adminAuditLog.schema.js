@@ -28,6 +28,7 @@ const adminAuditLogSchema = new mongoose.Schema(
         "EventCenterBooking",
         "EventCenterTicket",
         "Ticket",
+        "EventRefund",
         "System",
       ],
       index: true,

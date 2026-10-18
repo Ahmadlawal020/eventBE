@@ -8,6 +8,11 @@ const Event = require("../models/client/event.schema");
 const CoOrganiserInvitation = require("../models/client/coOrganiserInvitation.schema");
 const StaffInvitation = require("../models/client/staffInvitation.schema");
 
+test.beforeEach(t => {
+  t.mock.method(require("mongoose").connection, "transaction", fn => fn({}));
+  t.mock.method(Event, "findOneAndUpdate", async () => ({ status: "LISTED" }));
+});
+
 test("uncheckInTicket successfully reverts a REDEEMED ticket back to UNREDEEMED", async (t) => {
   const eventId = "507f1f77bcf86cd799439011";
   const ownerId = "507f1f77bcf86cd799439012";
@@ -157,4 +162,21 @@ test("uncheckInTicket returns 404 if ticket does not exist", async (t) => {
   assert.equal(statusCode, 404);
   assert.equal(responseData.success, false);
   assert.match(responseData.message, /Ticket not found/);
+});
+
+test("cancelled event check-ins cannot be undone", async (t) => {
+  t.mock.method(UserEventTicket, "findOne", () => ({
+    select: () => ({ lean: async () => ({ eventId: "event", status: "REDEEMED" }) }),
+  }));
+  t.mock.method(Event, "findById", () => ({
+    select: () => ({ lean: async () => ({ createdBy: "owner", status: "CANCELLED" }) }),
+  }));
+  const write = t.mock.method(UserEventTicket, "findOneAndUpdate", () => {
+    throw new Error("Cancelled tickets must not be reactivated");
+  });
+  const res = { code: 200, status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };
+  await uncheckInTicket({ body: { ticketNumber: "TKT-CANCELLED" }, user: { id: "owner" } }, res);
+  assert.equal(res.code, 400);
+  assert.match(res.body.message, /cancelled/);
+  assert.equal(write.mock.callCount(), 0);
 });

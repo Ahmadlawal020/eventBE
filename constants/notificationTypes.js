@@ -52,6 +52,9 @@ const NOTIFICATION_TYPES = {
   TICKET_SALES_STARTED: "TICKET_SALES_STARTED",
   TICKET_SALES_ENDED: "TICKET_SALES_ENDED",
   EVENT_COMPLETED: "EVENT_COMPLETED",
+  EVENT_CANCELLED: "EVENT_CANCELLED",
+  ORGANISER_REFUND_DUE: "ORGANISER_REFUND_DUE",
+  ORGANISER_REFUND_MARKED_PAID: "ORGANISER_REFUND_MARKED_PAID",
 
   // System & Marketing
   SYSTEM: "SYSTEM",
@@ -210,6 +213,21 @@ const TYPE_CONFIG = {
     category: NOTIFICATION_CATEGORIES.REMINDERS,
     defaultChannels: ["in_app", "push"],
     priority: "normal",
+  },
+  [NOTIFICATION_TYPES.EVENT_CANCELLED]: {
+    category: NOTIFICATION_CATEGORIES.TICKETS,
+    defaultChannels: ["in_app", "push", "email"],
+    priority: "urgent",
+  },
+  [NOTIFICATION_TYPES.ORGANISER_REFUND_DUE]: {
+    category: NOTIFICATION_CATEGORIES.TICKETS,
+    defaultChannels: ["in_app", "push", "email"],
+    priority: "urgent",
+  },
+  [NOTIFICATION_TYPES.ORGANISER_REFUND_MARKED_PAID]: {
+    category: NOTIFICATION_CATEGORIES.TICKETS,
+    defaultChannels: ["in_app", "push", "email"],
+    priority: "high",
   },
 
   // System & Marketing

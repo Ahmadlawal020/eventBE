@@ -2,6 +2,7 @@ const Event = require("../../models/client/event.schema");
 const Ticket = require("../../models/client/eventTicketType.schema");
 const UserEventTicket = require("../../models/client/userEventTicket.schema");
 const EventBooking = require("../../models/client/eventBooking.schema");
+const EventRefund = require("../../models/client/eventRefund.schema");
 const CoOrganiserInvitation = require("../../models/client/coOrganiserInvitation.schema");
 const StaffInvitation = require("../../models/client/staffInvitation.schema");
 const { formatCsvRow, formatDateForCsv } = require("../../services/csvExport.service");
@@ -61,6 +62,7 @@ const getOrganiserTicketStats = async (req, res) => {
 
       return {
         ...event,
+        canManageRefunds: String(event.createdBy) === String(organiserId),
         hasFinancePerm
       };
     });
@@ -292,6 +294,7 @@ const getOrganiserTicketStats = async (req, res) => {
         status: event.status,
         image: event.images?.[0]?.url || "",
         date: event.schedule?.from,
+        endDate: event.schedule?.to,
         hasFinancePerm: event.hasFinancePerm,
         tickets: {
           total: inv.totalQuantity,
@@ -538,6 +541,7 @@ const getSingleEventTicketStats = async (req, res) => {
           status: event.status,
           image: event.images?.[0]?.url || "",
           date: event.schedule?.from,
+        endDate: event.schedule?.to,
         },
         stats: {
           totalCapacity: inv.totalQuantity,
@@ -553,6 +557,7 @@ const getSingleEventTicketStats = async (req, res) => {
           salesVelocity,
         },
         distribution: formattedDistribution,
+        canManageRefunds: String(event.createdBy) === String(organiserId),
         hasFinancePerm
       },
     });
@@ -581,7 +586,7 @@ const getEventAttendees = async (req, res) => {
         { coOrganisers: organiserId },
         { staff: organiserId },
       ],
-    }).select("_id title").lean();
+    }).select("_id title status createdBy").lean();
 
     if (!event) {
       return res.status(404).json({ success: false, message: "Event not found or access denied" });
@@ -594,7 +599,7 @@ const getEventAttendees = async (req, res) => {
     if (status === 'SCANNED') {
       query.status = 'REDEEMED';
     } else if (status === 'BOUGHT') {
-      query.status = { $in: ['UNREDEEMED', 'REDEEMED'] };
+      query.status = { $in: ['UNREDEEMED', 'REDEEMED', 'CANCELLED'] };
     } else if (status === 'CANCELLED') {
       query.status = 'CANCELLED';
     }
@@ -612,9 +617,21 @@ const getEventAttendees = async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
+    const canManageRefunds = String(event.createdBy) === String(organiserId);
+    const refunds = canManageRefunds
+      ? await EventRefund.find({ eventId: event._id })
+          .select("ticketId status").lean()
+      : [];
+    const refundsByTicket = new Map(refunds.map(refund => [String(refund.ticketId), {
+      id: refund._id, status: refund.status,
+    }]));
     res.status(200).json({
       success: true,
-      data: attendees
+      event: { id: event._id, title: event.title, status: event.status, canManageRefunds },
+      data: attendees.map(attendee => ({
+        ...attendee,
+        ...(canManageRefunds ? { refund: refundsByTicket.get(String(attendee._id)) || null } : {}),
+      })),
     });
   } catch (error) {
     console.error("[GET EVENT ATTENDEES ERROR]", error);
@@ -662,7 +679,7 @@ const exportEventAttendeesCSV = async (req, res) => {
     if (status === "SCANNED") {
       query.status = "REDEEMED";
     } else if (status === "BOUGHT") {
-      query.status = { $in: ["UNREDEEMED", "REDEEMED"] };
+      query.status = { $in: ["UNREDEEMED", "REDEEMED", "CANCELLED"] };
     } else if (status === "CANCELLED") {
       query.status = "CANCELLED";
     }

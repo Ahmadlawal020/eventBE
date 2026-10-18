@@ -129,6 +129,7 @@ app.use(
 );
 app.use("/api/ticket-export", require("./routes/client/ticketExport.route"));
 app.use("/api/referrals", require("./routes/client/referral.route"));
+app.use("/api/event-refunds", require("./routes/client/eventRefund.route"));
 
 // Mount admin routes
 app.use("/api/admin/auth", require("./routes/management/auth.route"));

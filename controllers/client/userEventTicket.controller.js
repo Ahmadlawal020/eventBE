@@ -247,6 +247,10 @@ const validateTicket = async (req, res) => {
     if (!auth.authorized) {
       return res.status(403).json({ success: false, message: auth.error });
     }
+    const event = await Event.findById(existingTicket.eventId).select("status").lean();
+    if (event?.status === "CANCELLED") {
+      return res.status(400).json({ success: false, message: "This event has been cancelled. Entry is not permitted." });
+    }
 
     // Atomic update: find UNREDEEMED ticket and mark as REDEEMED in one operation.
     // This prevents race conditions — only the first scanner wins.
@@ -375,6 +379,11 @@ const uncheckInTicket = async (req, res) => {
       return res.status(403).json({ success: false, message: auth.error });
     }
 
+    const event = await Event.findById(existingTicket.eventId).select("status").lean();
+    if (!event || event.status === "CANCELLED") {
+      return res.status(400).json({ success: false, message: "Check-in cannot be changed for a cancelled or unavailable event." });
+    }
+
     if (existingTicket.status !== "REDEEMED") {
       return res.status(400).json({
         success: false,
@@ -383,7 +392,12 @@ const uncheckInTicket = async (req, res) => {
     }
 
     // Atomic update from REDEEMED back to UNREDEEMED
-    const ticket = await UserEventTicket.findOneAndUpdate(
+    const ticket = await require("mongoose").connection.transaction(async session => {
+      const activeEvent = await Event.findOneAndUpdate(
+        { _id: existingTicket.eventId, status: { $ne: "CANCELLED" } },
+        { $inc: { saleVersion: 1 } }, { new: true, session });
+      if (!activeEvent) return null;
+      return UserEventTicket.findOneAndUpdate(
       {
         ticketNumber: lookupTicketNumber,
         status: "REDEEMED",
@@ -401,8 +415,9 @@ const uncheckInTicket = async (req, res) => {
           "checkIn.method": 1,
         },
       },
-      { new: true }
+      { new: true, session }
     ).populate("owner", "firstName surname email");
+    });
 
     if (!ticket) {
       return res.status(409).json({

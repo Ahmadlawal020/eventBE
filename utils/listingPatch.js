@@ -2,6 +2,7 @@ const EVENT_FIELDS = new Set([
     "title", "shortDescription", "description", "images", "highlights", "amenities",
     "eventType", "ageRestriction", "schedule", "location", "capacity", "safety",
     "safetyConsiderations", "ticketGuide", "arrivalGuide", "performers", "entry",
+    "cancellationRefundProcess", "cancellationRefundTimeline",
     "status", "isDraft",
 ]);
 const VENUE_FIELDS = new Set([

@@ -39,7 +39,7 @@ const getListings = async (req, res) => {
 
     // --- 1️⃣ Process Events ---
     if (showEvents) {
-      const eventQuery = { status: { $in: ["LISTED", "PUBLISHED"] } };
+      const eventQuery = { status: "LISTED" };
 
       if (q) eventQuery.title = { $regex: escapeRegex(q), $options: "i" };
       if (location) {
@@ -93,6 +93,7 @@ const getListings = async (req, res) => {
         return {
           id: event._id,
           title: event.title,
+          status: event.status,
           images: event.images,
           location: event.location,
           schedule: event.schedule,
@@ -160,6 +161,7 @@ const getListings = async (req, res) => {
           id: center._id,
           venueType: center.venueType,
           venueName: center.venueName,
+          status: center.status,
           images: center.images,
           location: center.location,
           capacity: center.capacity?.max,

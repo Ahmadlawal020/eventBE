@@ -1,10 +1,11 @@
 // Does not load .env, connect to MongoDB, or call a payment provider.
 process.env.QR_SIGNING_SECRET="payment-unit-test-only";
 process.env.PAYSTACK_SUPPORTED_CURRENCIES="NGN";
-const {test,mock,afterEach}=require("node:test");
+const {test,mock,afterEach,beforeEach}=require("node:test");
 const assert=require("node:assert/strict");
 const mongoose=require("mongoose");
 const axios=require("axios");
+const Event=require("../models/client/event.schema");
 const EventBooking=require("../models/client/eventBooking.schema");
 const Booking=require("../models/client/eventCenterBooking.schema");
 const Venue=require("../models/client/eventCenter.schema");
@@ -25,6 +26,7 @@ const transaction=()=>mock.method(mongoose.connection,"transaction",fn=>fn({test
 const response=()=>({code:200,status(code){this.code=code;return this},json(body){this.body=body;return this},send(body){this.body=body;return this}});
 const booking=(extra={})=>({_id:id,buyer:"buyer",organiser:"owner",eventCenter:id,status:"ACTIVE",paymentStatus:"PENDING",paymentReference:"saved-ref",totalAmount:1150000,currency:"NGN",totalPrice:{amount:11500,currency:"NGN"},organiserPayoutAmount:10000,bookingUnit:"day",bookingMode:"REVIEW",selectedDates:[{date:future}],save:async function(){return this},...extra});
 const payment={status:"success",reference:"saved-ref",amount:1150000,currency:"NGN"};
+beforeEach(()=>mock.method(Event,"findOneAndUpdate",()=>query({_id:id,status:"LISTED"})));
 afterEach(()=>mock.restoreAll());
 
 test("generic initialization rejects client-supplied payment metadata",async()=>{

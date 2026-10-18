@@ -4,6 +4,7 @@ const VenueBooking = require("../models/client/eventCenterBooking.schema");
 const Venue = require("../models/client/eventCenter.schema");
 const Ticket = require("../models/client/eventTicketType.schema");
 const UserTicket = require("../models/client/userEventTicket.schema");
+const Event = require("../models/client/event.schema");
 const { generateTicketNumber, generateQRPayload } = require("../utils/qr");
 
 const fail = (message, statusCode = 400) => Object.assign(new Error(message), { statusCode });
@@ -67,6 +68,16 @@ const venueQuote = (venue, input) => {
 
 async function reserveEventBooking(data) {
   return mongoose.connection.transaction(async session => {
+    // Re-check sale eligibility inside the reservation transaction. The earlier
+    // controller check is not sufficient if an organiser cancels concurrently.
+    // This is a write, not merely a read: it creates a transaction conflict
+    // with a simultaneous cancellation, so a late sale cannot commit after it.
+    const event = await Event.findOneAndUpdate(
+      { _id: data.eventId, status: "LISTED" },
+      { $inc: { saleVersion: 1 } },
+      { new: true, session },
+    ).select("_id");
+    if (!event) throw fail("This event is not accepting new bookings.", 409);
     for (const item of data.items) {
       const updated = await Ticket.findOneAndUpdate({_id:item.ticketId,
         $expr:{$gte:[{$subtract:["$totalQuantity",{$ifNull:["$soldQuantity",0]}]}, item.quantity]}},
@@ -102,6 +113,42 @@ async function completePayment(reference, transaction, {buyerId, kind} = {}) {
     if (!booking && kind !== "EVENT_TICKET") booking = await VenueBooking.findOne({paymentReference:reference}).session(session);
     validatePayment(booking, transaction, type, buyerId);
     if (["REFUNDED","FAILED_REFUND"].includes(booking.paymentStatus)) throw fail("Booking has already been reversed",409);
+    if (type === "EVENT_TICKET") {
+      // Serialize payment completion with cancellation on the event document.
+      const event = await Event.findOneAndUpdate({ _id: booking.eventId },
+        { $inc: { saleVersion: 1 } }, { new: true, session });
+      if (!event || event.status === "CANCELLED") {
+        const changed = booking.paymentStatus !== "COMPLETED";
+        booking.paymentStatus = "COMPLETED";
+        booking.status = "CANCELLED";
+        booking.paymentResolutionRequired = true;
+        booking.reservationExpiresAt = undefined;
+        await booking.save({ session });
+        if (event && booking.totalAmount > 0) {
+          const Refund = require("../models/client/eventRefund.schema");
+          if (await Refund.exists({ eventId: event._id, bookingId: booking._id, ticketId: null }).session(session)) {
+            throw fail("Existing cancellation refund needs migration or manual review before this payment can be reconciled.", 409);
+          }
+          const { allocateTicketRefunds } = require("./ticketRefundAllocation.service");
+          const { queueNotices, cancellationNotices } = require("./refundNotifications.service");
+          let tickets = await UserTicket.find({ bookingId: booking._id }).session(session);
+          if (!tickets.length) {
+            await require("../controllers/client/userEventTicket.controller").createTicketsForBooking(booking, session);
+            await UserTicket.updateMany({ bookingId: booking._id }, { $set: { status: "CANCELLED", invalidatedReason: "EVENT_CANCELLED", invalidatedAt: new Date() } }, { session });
+            tickets = await UserTicket.find({ bookingId: booking._id }).session(session);
+          }
+          const allocations = allocateTicketRefunds(booking, tickets, event, event.lifecycle?.refundDueAt || new Date(Date.now() + 7 * 86400000));
+          for (const allocation of allocations) await Refund.updateOne({ ticketId: allocation.ticketId }, { $setOnInsert: allocation }, { upsert: true, runValidators: true, session });
+          await queueNotices([...cancellationNotices(event, [booking.buyer]), {
+            key: `cancelled-payment:${booking._id}`, recipient: event.createdBy, sender: booking.buyer,
+            type: "SYSTEM", title: "Payment received for a cancelled event",
+            message: "A paid booking requires a cancellation refund. Review the buyer refund details.",
+            data: { eventId: String(event._id), screen: "OrganiserRefunds" },
+          }], session);
+        }
+        return { booking, type, conflict: true, changed };
+      }
+    }
     if (booking.status === "CANCELLED" || booking.paymentResolutionRequired) {
       if (booking.paymentStatus !== "COMPLETED") {
         booking.paymentStatus = "COMPLETED";

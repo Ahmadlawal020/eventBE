@@ -24,7 +24,7 @@ const FROM_EMAIL = process.env.EMAIL_FROM || "Munasaba <onboarding@resend.dev>";
  * @param {string} options.html - HTML body
  * @returns {Promise<Object>} Resend API response or null
  */
-async function sendEmail({ to, subject, html }) {
+async function sendEmail({ to, subject, html, idempotencyKey }) {
   if (process.env.NODE_ENV === "test") {
     return { id: "test-email-id", to, subject };
   }
@@ -40,7 +40,7 @@ async function sendEmail({ to, subject, html }) {
     to,
     subject,
     html,
-  });
+  }, idempotencyKey ? { idempotencyKey } : undefined);
 
   if (error) {
     throw new Error(`Resend email error: ${error.message}`);

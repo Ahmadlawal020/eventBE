@@ -81,9 +81,21 @@ exports.decide = async (req, res, next) => {
     }
     const item = await model.findOne({ $and: [{ _id: req.params.id }, eligible] }).lean();
     if (!item) return res.status(404).json({ success: false, message: "Submitted listing not found" });
+    if (req.params.type === "event" && item.status === "CANCELLED") {
+      return res.status(409).json({ success: false, message: "A cancelled event cannot be restored through moderation. Its buyer refund records must remain intact." });
+    }
     if (decision === "APPROVED" && (item.status === "COMPLETED" ||
         (req.params.type === "event" && item.schedule?.to && new Date(item.schedule.to) <= new Date()))) {
       return res.status(409).json({ success: false, message: "An ended event cannot be made live. Its schedule must be updated first." });
+    }
+    if (decision === "APPROVED" && req.params.type === "event") {
+      const { getEventSettings, validateEventPayload } = require("../../services/eventSettings.service");
+      const settings = await getEventSettings();
+      const errors = validateEventPayload({ ...item, status: "LISTED" }, settings, {
+        existing: true,
+        changes: { ticketGuide: item.ticketGuide },
+      });
+      if (errors.length) return res.status(400).json({ success: false, message: errors[0], errors });
     }
     const listingStatus = decision === "APPROVED" ? "LISTED" : "UNLISTED";
     const now = new Date();
