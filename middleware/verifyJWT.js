@@ -1,58 +1,24 @@
-// const jwt = require("jsonwebtoken");
-
-// const verifyJWT = (req, res, next) => {
-//   const authHeader = req.headers.authorization || req.headers.Authorization;
-
-//   if (!authHeader?.startsWith("Bearer ")) {
-//     return res.status(401).json({ success: false, message: "Unauthorized" });
-//   }
-
-//   const token = authHeader.split(" ")[1];
-
-//   jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
-//     if (err) {
-//       console.error("JWT verification error:", err);
-//       return res.status(403).json({ success: false, message: "Forbidden" });
-//     }
-
-//     req.user = decoded.UserInfo; // { id, email, roles }
-//     // req.userId = decoded.UserInfo.id;
-//     // req.roles = decoded.UserInfo.roles;
-
-//     next();
-//   });
-// };
-
-// module.exports = verifyJWT;
-// middleware/verifyJWT.js
 const jwt = require("jsonwebtoken");
-
-const verifyJWT = (req, res, next) => {
-  const authHeader = req.headers.authorization || req.headers.Authorization;
-
-  if (!authHeader?.startsWith("Bearer ")) {
-    return res.status(401).json({ success: false, message: "Unauthorized" });
-  }
-
-  const token = authHeader.split(" ")[1];
-
-  jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
-    if (err) {
-      if (err.name === "TokenExpiredError") {
-        console.warn("JWT verification error: Token expired");
-        return res
-          .status(401)
-          .json({ success: false, message: "Token expired" });
-      }
-
-      console.error("JWT verification error:", err);
-
-      return res.status(403).json({ success: false, message: "Forbidden" });
-    }
-
-    req.user = decoded.UserInfo;
+const User = require("../models/client/user.schema");
+const Staff = require("../models/management/staff.schema");
+module.exports = async (req, res, next) => {
+  const header = req.headers.authorization || req.headers.Authorization;
+  if (!header?.startsWith("Bearer ")) return res.status(401).json({ success: false, message: "Unauthorized" });
+  let decoded;
+  try { decoded = jwt.verify(header.slice(7), process.env.ACCESS_TOKEN_SECRET); }
+  catch { return res.status(401).json({ success: false, message: "Session expired. Please sign in again." }); }
+  if (!decoded.UserInfo?.id) return res.status(401).json({ success: false, message: "Invalid session" });
+  try {
+    // Management accounts are stored separately; never fall back between account types.
+    const management = /^\/api\/admin(?:\/|$)/.test(req.originalUrl || "");
+    const account = await (management ? Staff : User).findById(decoded.UserInfo.id)
+      .select("email roles isActive sessionVersion status accountStatus startDate accessExpiresAt").lean();
+    const active = management ? require("../services/management/geographicPolicy").activeStaff(account)
+      : account && account.isActive !== false;
+    if (!active) return res.status(403).json({ success: false, message: "Account is unavailable or suspended." });
+    if ((decoded.UserInfo.sessionVersion || 0) !== (account.sessionVersion || 0))
+      return res.status(401).json({ success: false, message: "Session revoked. Please sign in again." });
+    req.user = { id: String(account._id), email: account.email, roles: account.roles };
     next();
-  });
+  } catch (error) { next(error); }
 };
-
-module.exports = verifyJWT;

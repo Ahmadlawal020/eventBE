@@ -71,6 +71,8 @@ class OTPService {
    * Saves and Sends OTP
    */
   async requestOTP(identifier, type) {
+    if (typeof identifier !== "string" || !identifier.trim()) throw Error("Enter a valid account identifier.");
+    identifier = identifier.trim().toLowerCase();
     const code = this.generateOTP();
 
     // Delete any existing OTP for this identifier to avoid clutter
@@ -96,22 +98,25 @@ class OTPService {
   /**
    * Verifies an OTP
    */
-  async verifyOTP(identifier, code, type) {
-    const otpRecord = await OTP.findOne({ identifier, type });
-
-    if (!otpRecord) {
-      return { success: false, message: "OTP expired or not found" };
+  async verifyOTP(identifier, code, type, { consume = false, session = null } = {}) {
+    if (typeof identifier !== "string" || typeof code !== "string" || !/^\d{6}$/.test(code))
+      return { success: false, message: "Enter a valid verification code." };
+    identifier = identifier.trim().toLowerCase();
+    // Reserve one attempt atomically, before doing the expensive hash comparison.
+    const otpRecord = await OTP.findOneAndUpdate({
+      identifier, type, expiresAt: { $gt: new Date() },
+      $or: [{ attempts: { $lt: 5 } }, { attempts: { $exists: false } }],
+    }, { $inc: { attempts: 1 } }, { new: true, session });
+    if (!otpRecord || !await otpRecord.verifyCode(code))
+      return { success: false, message: "Code is invalid, expired, or has too many attempts. Request a new code." };
+    if (new Date(otpRecord.expiresAt).getTime() <= Date.now())
+      return { success: false, message: "Code expired. Request a new code." };
+    if (consume) {
+      const consumed = await OTP.deleteOne({ _id: otpRecord._id, code: otpRecord.code,
+        expiresAt: { $gt: new Date() } }, { session });
+      if (consumed.deletedCount !== 1)
+        return { success: false, message: "Code was already used or expired. Request a new code." };
     }
-
-    const isValid = await otpRecord.verifyCode(code);
-    if (!isValid) {
-      return { success: false, message: "Invalid verification code" };
-    }
-
-    // Note: Record is not deleted here because it may be used for a subsequent action 
-    // (e.g., verifying then updating password). It will expire via TTL index.
-    // await OTP.deleteOne({ _id: otpRecord._id });
-
     return { success: true };
   }
 }

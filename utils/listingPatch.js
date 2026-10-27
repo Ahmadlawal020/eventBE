@@ -3,7 +3,7 @@ const EVENT_FIELDS = new Set([
     "eventType", "ageRestriction", "schedule", "location", "capacity", "safety",
     "safetyConsiderations", "ticketGuide", "arrivalGuide", "performers", "entry",
     "cancellationRefundProcess", "cancellationRefundTimeline",
-    "status", "isDraft",
+    "status", "isDraft", "previousTicketPolicy",
 ]);
 const VENUE_FIELDS = new Set([
     "venueType", "venueName", "shortDescription", "description", "supportedEvents",
@@ -14,7 +14,7 @@ const VENUE_FIELDS = new Set([
     "neighborhoodDescription", "transitDescription", "otherDetailsDescription",
     "oneLiner", "theSpace", "yourProperty", "guestAccess", "interaction",
     "neighborhood", "transit", "otherDetails", "checkIn", "checkOut",
-    "loadingDockDetails", "handoverDetails", "status", "isDraft",
+    "loadingDockDetails", "handoverDetails", "status", "isDraft", "previousTicketPolicy",
 ]);
 function invalid(message) {
     const error = new Error(message);

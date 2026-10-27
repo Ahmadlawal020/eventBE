@@ -1,3 +1,8 @@
+const mongoose = require("mongoose");
+const { lockTicketEvent, validateOrderLimits } = require("../../services/ticketMutation.service");
+const { canViewListing } = require("../../services/listingVisibility");
+const { prepareListingPatch } = require("../../utils/listingPatch");
+const EDITABLE_TICKET_FIELDS = new Set(["name", "description", "additionalInstruction", "ticketType", "totalQuantity", "perTransactionLimit", "salesStartAt", "salesEndAt", "currency", "commission", "price", "donationRange", "groupName"]);
 const { salesWindowError, salesEndError } = require("../../services/ticketSalesWindow.service");
 const Ticket = require("../../models/client/eventTicketType.schema");
 const Event = require("../../models/client/event.schema");
@@ -47,6 +52,7 @@ const canManageEventTickets = async (event, userId) => {
 
     const coOrganiserInvite = await CoOrganiserInvitation.findOne({
         coOrganiser: userId,
+        host: event.createdBy,
         status: "ACCEPTED",
         "listings.listingId": event._id,
     }).lean();
@@ -204,7 +210,13 @@ const createTicket = async (req, res) => {
             groupName,
         });
 
-        const savedTicket = await newTicket.save();
+        newTicket.perTransactionLimit = validateOrderLimits(perTransactionLimit, settings.ticketing.maxTicketsPerOrder);
+        const savedTicket = await mongoose.connection.transaction(async session => {
+            await lockTicketEvent(event, session);
+            if (await Ticket.countDocuments({ eventId }).session(session) >= settings.ticketing.maxTicketTiers)
+                throw Object.assign(Error("The maximum number of ticket tiers has been reached."), { status: 409 });
+            return newTicket.save({ session });
+        });
 
         res.status(201).json({
             success: true,
@@ -213,9 +225,9 @@ const createTicket = async (req, res) => {
         });
     } catch (err) {
         console.error("[CREATE TICKET]", err);
-        res.status(500).json({
+        res.status(err.status || (["ValidationError", "CastError"].includes(err.name) ? 400 : 500)).json({
             success: false,
-            message: "Server error",
+            message: err.status || ["ValidationError", "CastError"].includes(err.name) ? err.message : "Server error",
         });
     }
 };
@@ -227,7 +239,14 @@ const getTickets = async (req, res) => {
     const { eventId } = req.query;
 
     try {
-        const filter = eventId ? { eventId } : {};
+        if (typeof eventId !== "string" || !mongoose.isValidObjectId(eventId)) {
+            return res.status(400).json({ success: false, message: "A valid eventId is required." });
+        }
+        const event = await Event.findById(eventId).select("status createdBy coOrganisers staff");
+        if (!event || !canViewListing(event, req.user)) {
+            return res.status(404).json({ success: false, message: "Listing is not available." });
+        }
+        const filter = { eventId };
 
         const tickets = await Ticket.find(filter).populate(
             "eventId",
@@ -241,9 +260,9 @@ const getTickets = async (req, res) => {
         });
     } catch (err) {
         console.error("[GET TICKETS]", err);
-        res.status(500).json({
+        res.status(err.status || (["ValidationError", "CastError"].includes(err.name) ? 400 : 500)).json({
             success: false,
-            message: "Server error",
+            message: err.status || ["ValidationError", "CastError"].includes(err.name) ? err.message : "Server error",
         });
     }
 };
@@ -255,12 +274,13 @@ const getTicketById = async (req, res) => {
     const { id } = req.params;
 
     try {
+        if (!mongoose.isValidObjectId(id)) return res.status(400).json({ success: false, message: "Invalid ticket ID." });
         const ticket = await Ticket.findById(id).populate(
             "eventId",
-            "title eventType schedule",
+            "title eventType schedule status createdBy coOrganisers staff",
         );
 
-        if (!ticket) {
+        if (!ticket || !ticket.eventId || !canViewListing(ticket.eventId, req.user)) {
             return res.status(404).json({
                 success: false,
                 message: "Ticket not found",
@@ -274,9 +294,9 @@ const getTicketById = async (req, res) => {
         });
     } catch (err) {
         console.error("[GET TICKET]", err);
-        res.status(500).json({
+        res.status(err.status || (["ValidationError", "CastError"].includes(err.name) ? 400 : 500)).json({
             success: false,
-            message: "Server error",
+            message: err.status || ["ValidationError", "CastError"].includes(err.name) ? err.message : "Server error",
         });
     }
 };
@@ -312,7 +332,8 @@ const updateTicket = async (req, res) => {
             });
         }
 
-        const updatePayload = { ...req.body };
+        if (["CANCELLED", "COMPLETED"].includes(event.status)) return res.status(409).json({ success: false, message: "Tickets cannot be edited after cancellation or completion." });
+        const updatePayload = prepareListingPatch(req.body, EDITABLE_TICKET_FIELDS, prevTicket.toObject());
         const settings = await getEventSettings(event.managementLocation);
         const nextTicketType = updatePayload.ticketType || prevTicket.ticketType;
 
@@ -415,11 +436,15 @@ const updateTicket = async (req, res) => {
             });
         }
 
-        const updatedTicket = await Ticket.findByIdAndUpdate(id, updatePayload, {
-            new: true,
-            runValidators: true,
+        updatePayload.perTransactionLimit = validateOrderLimits(updatePayload.perTransactionLimit || prevTicket.perTransactionLimit, settings.ticketing.maxTicketsPerOrder);
+        const updatedTicket = await mongoose.connection.transaction(async session => {
+            await lockTicketEvent(event, session);
+            return Ticket.findOneAndUpdate({ _id: id, soldQuantity: prevTicket.soldQuantity, updatedAt: prevTicket.updatedAt }, updatePayload, {
+                new: true, runValidators: true, session,
+            });
         });
 
+        if (!updatedTicket) return res.status(409).json({ success: false, message: "Ticket sales or settings changed while editing. Refresh before trying again." });
         res.json({
             success: true,
             message: "Ticket updated successfully",
@@ -427,9 +452,9 @@ const updateTicket = async (req, res) => {
         });
     } catch (err) {
         console.error("[UPDATE TICKET]", err);
-        res.status(500).json({
+        res.status(err.status || (["ValidationError", "CastError"].includes(err.name) ? 400 : 500)).json({
             success: false,
-            message: "Server error",
+            message: err.status || ["ValidationError", "CastError"].includes(err.name) ? err.message : "Server error",
         });
     }
 };
@@ -466,6 +491,8 @@ const deleteTicket = async (req, res) => {
             });
         }
 
+        if (event.status === "CANCELLED") return res.status(409).json({ success: false, message: "You can't update this field because the event has been cancelled." });
+
         // 🔒 Optional: block delete if sales exist
         if (ticket.soldQuantity > 0) {
             return res.status(400).json({
@@ -474,7 +501,11 @@ const deleteTicket = async (req, res) => {
             });
         }
 
-        await Ticket.findByIdAndDelete(id);
+        const removed = await mongoose.connection.transaction(async session => {
+            await lockTicketEvent(event, session);
+            return Ticket.findOneAndDelete({ _id: id, soldQuantity: { $in: [0, null] }, updatedAt: ticket.updatedAt }, { session });
+        });
+        if (!removed) return res.status(409).json({ success: false, message: "A sale reserved this ticket. Refresh before deleting it." });
 
         res.json({
             success: true,
@@ -482,9 +513,9 @@ const deleteTicket = async (req, res) => {
         });
     } catch (err) {
         console.error("[DELETE TICKET]", err);
-        res.status(500).json({
+        res.status(err.status || (["ValidationError", "CastError"].includes(err.name) ? 400 : 500)).json({
             success: false,
-            message: "Server error",
+            message: err.status || ["ValidationError", "CastError"].includes(err.name) ? err.message : "Server error",
         });
     }
 };
@@ -540,9 +571,9 @@ const purchaseTicket = async (req, res) => {
         });
     } catch (err) {
         console.error("[PURCHASE TICKET]", err);
-        res.status(500).json({
+        res.status(err.status || (["ValidationError", "CastError"].includes(err.name) ? 400 : 500)).json({
             success: false,
-            message: "Server error",
+            message: err.status || ["ValidationError", "CastError"].includes(err.name) ? err.message : "Server error",
         });
     }
 };

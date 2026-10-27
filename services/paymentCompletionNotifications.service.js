@@ -2,7 +2,7 @@ const {notifyTicketPurchased,notifyVenueBookingRequest,notifyVenueBookingInstant
 const Event=require("../models/client/event.schema");
 const Venue=require("../models/client/eventCenter.schema");
 async function notifyPaymentCompletion(result){
- if(!result.changed || result.conflict)return;
+ if(!result.changed || result.conflict || result.type === "EVENT_TICKET")return;
  try{
   const b=result.booking;
   if(result.type==="EVENT_TICKET"){

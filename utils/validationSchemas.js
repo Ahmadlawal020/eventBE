@@ -3,7 +3,7 @@ const Joi = require('joi');
 const signupSchema = Joi.object({
   firstName: Joi.string().min(2).max(50).required(),
   surname: Joi.string().min(2).max(50).required(),
-  email: Joi.string().email().required(),
+  email: Joi.string().trim().lowercase().email().required(),
   password: Joi.string().min(6).when('authProvider', { is: 'local', then: Joi.required(), otherwise: Joi.optional() }),
   dob: Joi.date().required(),
   authProvider: Joi.string().valid('local', 'google').default('local'),
@@ -15,12 +15,12 @@ const signupSchema = Joi.object({
 });
 
 const loginSchema = Joi.object({
-  email: Joi.string().email().required(),
+  email: Joi.string().trim().lowercase().email().required(),
   password: Joi.string().required()
 });
 
 const checkUserSchema = Joi.object({
-  email: Joi.string().email().required()
+  email: Joi.string().trim().lowercase().email().required()
 });
 
 const refreshTokenSchema = Joi.object({
@@ -46,11 +46,11 @@ const otpVerifySchema = Joi.object({
 });
 
 const passwordChangeRequestSchema = Joi.object({
-  email: Joi.string().email().required()
+  email: Joi.string().trim().lowercase().email().required()
 });
 
 const updatePasswordSchema = Joi.object({
-  email: Joi.string().email().required(),
+  email: Joi.string().trim().lowercase().email().required(),
   code: Joi.string().length(6).required(),
   newPassword: Joi.string().min(6).required()
 });

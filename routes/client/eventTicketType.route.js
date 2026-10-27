@@ -14,17 +14,18 @@ const {
   verifyBooking,
 } = require("../../controllers/client/eventBooking.controller");
 
+const optionalJWT = require("../../middleware/optionalJWT");
 const verifyJWT = require("../../middleware/verifyJWT");
 
 // --- BUYER ROUTES ---
 router.post("/purchase", verifyJWT, createBooking);
-router.get("/verify/:reference", verifyBooking);
+router.get("/verify/:reference", verifyJWT, verifyBooking);
 
 // --- ORGANISER ROUTES ---
 router.post("/", verifyJWT, createTicket);
 
-router.get("/", getTickets);
-router.get("/:id", getTicketById);
+router.get("/", optionalJWT, getTickets);
+router.get("/:id", optionalJWT, getTicketById);
 
 router.patch("/:id", verifyJWT, updateTicket);
 

@@ -7,6 +7,7 @@ const schema = new mongoose.Schema({
   title: { type: String, required: true },
   message: { type: String, required: true },
   data: mongoose.Schema.Types.Mixed,
+  receipt: mongoose.Schema.Types.Mixed,
   inAppSentAt: Date,
   emailSentAt: Date,
   completedAt: { type: Date, default: null },
@@ -15,6 +16,7 @@ const schema = new mongoose.Schema({
   lockedUntil: { type: Date, default: () => new Date(0) },
   lockToken: String,
   lastError: String,
+  failedAt: { type: Date, default: null },
 }, { timestamps: true });
 schema.index({ completedAt: 1, nextAttemptAt: 1, lockedUntil: 1 });
 module.exports = mongoose.model("NotificationOutbox", schema);

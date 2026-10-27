@@ -214,6 +214,8 @@ const userSchema = new mongoose.Schema(
   },
 );
 
+userSchema.add({ sessionVersion: { type: Number, default: 0 } });
+
 // Assign codes across every account creation path.
 userSchema.pre("validate", function () {
   if (!this.referralCode) this.referralCode = require("../../utils/referralCode").codeForUser(this._id);

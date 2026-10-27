@@ -3,15 +3,17 @@ const mongoose = require("mongoose");
 const EventRefund = require("../models/client/eventRefund.schema");
 const { queueNotices } = require("../services/refundNotifications.service");
 
-async function markOverdueEventRefunds() {
+async function markOverdueEventRefunds({ limit = 500 } = {}) {
+  let failedCount = 0;
   let modifiedCount = 0;
   const now = new Date();
   const due = { $or: [
     { status: { $in: ["AWAITING_BUYER_DETAILS", "DUE_FROM_ORGANISER"] }, dueAt: { $lt: now } },
     { status: "MARKED_PAID", confirmationDueAt: { $lt: now } },
   ] };
-  const candidates = await EventRefund.find(due).select("_id").limit(100).lean();
+  const candidates = await EventRefund.find(due).select("_id").sort({ dueAt: 1, _id: 1 }).limit(limit).lean();
   for (const candidate of candidates) {
+    try {
     const changed = await mongoose.connection.transaction(async session => {
       const refund = await EventRefund.findOneAndUpdate({ _id: candidate._id, ...due },
         { $set: { status: "OVERDUE" } }, { new: true, session });
@@ -27,10 +29,9 @@ async function markOverdueEventRefunds() {
       return true;
     });
     if (changed) modifiedCount++;
+    } catch (error) { failedCount++; console.error("[REFUND OVERDUE RECORD]", String(candidate._id), error.message); }
   }
-  return { modifiedCount };
+  return { modifiedCount, failedCount };
 }
-const isTest = process.env.NODE_ENV === "test" || process.env.NODE_TEST_CONTEXT;
-const job = new CronJob("0 * * * *", () => markOverdueEventRefunds().catch(error => console.error("[EVENT REFUND OVERDUE]", error)), null, !isTest, "UTC");
-job.markOverdueEventRefunds = markOverdueEventRefunds;
-module.exports = job;
+// Scheduled and monitored by refundOperations.job; exported for isolated testing.
+module.exports = { markOverdueEventRefunds };

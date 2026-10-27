@@ -9,7 +9,7 @@ const Staff = require("../../models/management/staff.schema");
 const { recordAdminAction } = require("../../services/management/adminAudit.service");
 const getRefunds = async (req, res) => {
   try {
-    const { search, type = "all", page = 1, limit = 20 } = req.query;
+    const { search, type = "all", page = 1, limit = 20, support } = req.query;
     if (
       !["all", "event", "event-center", "direct"].includes(type) ||
       (search !== undefined && typeof search !== "string")
@@ -24,7 +24,7 @@ const getRefunds = async (req, res) => {
       Math.max(1, Number.parseInt(limit, 10) || 20),
     );
     if (type === "direct") {
-      const directQuery = {};
+      const directQuery = support === "open" ? { "supportRequest.status": "OPEN" } : {};
       if (search) {
         const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
         directQuery.$or = [
@@ -240,6 +240,7 @@ const resolveDirectRefundCase = async (req, res) => {
     const previousValue = { caseStatus: refund.managementCase?.status, resolution: refund.managementCase?.resolution };
     refund.managementCase = refund.managementCase || { notes: [] };
     refund.managementCase.status = "RESOLVED";
+    if (refund.supportRequest?.status === "OPEN") refund.supportRequest.status = "RESOLVED";
     refund.managementCase.resolution = resolution;
     refund.managementCase.resolvedAt = new Date();
     refund.managementCase.resolvedBy = req.managementStaff?._id || req.user.id;

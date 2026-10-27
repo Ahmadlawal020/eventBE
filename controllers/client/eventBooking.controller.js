@@ -37,10 +37,19 @@ const quoteBooking = async (req, res) => {
         message: "Select at least one ticket to get a price quote.",
       });
     }
-    if (!await Event.exists({ _id: eventId, status: "LISTED" })) {
+    if (typeof eventId !== "string" || !/^[a-f0-9]{24}$/i.test(eventId))
+      return res.status(400).json({ success: false, message: "Invalid event ID." });
+    const validation = require("../../services/eventOrderValidation.service");
+    validation.validateEventOrderItems(items, 1000);
+    const event = await Event.findOne({ _id: eventId, status: "LISTED" }).lean();
+    if (!event) {
       return res.status(404).json({ success: false, message: "Event not found" });
     }
 
+    const settings = await getEventSettings(event.managementLocation);
+    const quantityRequested = validation.validateEventOrderItems(items, settings.ticketing.maxTicketsPerOrder);
+    require("../../services/eventEntry.service").assertEntryOpen(event);
+    await require("../../services/eventCapacity.service").assertEventCapacity(event, quantityRequested);
     let quoteCurrency = null;
     const pricedInputs = [];
     for (const item of items) {
@@ -58,6 +67,11 @@ const quoteBooking = async (req, res) => {
           message: "One of the selected tickets is not available for this event.",
         });
       }
+      validation.assertTierOrderLimit(ticket, quantity);
+      const now = Date.now();
+      if ((ticket.salesStartAt && new Date(ticket.salesStartAt).getTime() > now) ||
+          (ticket.salesEndAt && new Date(ticket.salesEndAt).getTime() <= now))
+        return res.status(409).json({ success: false, message: "Ticket sales are closed." });
       if (quantity > Math.max(0, ticket.totalQuantity - ticket.soldQuantity)) {
         return res.status(400).json({
           success: false,
@@ -79,6 +93,8 @@ const quoteBooking = async (req, res) => {
           message: `Donation for ${ticket.name} is outside the allowed range.`,
         });
       }
+      if (!Number.isSafeInteger(pricePerUnit) || pricePerUnit < 0 || !Number.isSafeInteger(pricePerUnit * quantity))
+        return res.status(400).json({ success: false, message: "Invalid ticket amount." });
       const currency = currencyForCheckout(ticket.currency?.code);
       if(quoteCurrency && quoteCurrency!==currency)return res.status(400).json({success:false,message:"Ticket currencies do not match"});
       quoteCurrency=currency;
@@ -114,8 +130,12 @@ const createBooking = async (req, res) => {
   const { eventId, items, paymentMethod, totalAmount } = req.body;
   const buyerId = req.user.id; // From verifyJWT middleware
   let checkoutCurrency = null;
-
+  let attempt;
   try {
+    const attempts = require("../../services/eventCheckoutAttempt.service");
+    attempt = attempts.identity(req.body);
+    const existing = await attempts.findAttempt(buyerId, attempt);
+    if (existing) return await attempts.respond(existing._id, res);
     // 1. Fetch User details for automated filling
     const user = await User.findById(buyerId);
     if (!user) {
@@ -158,7 +178,9 @@ const createBooking = async (req, res) => {
       });
     }
 
-    if (!["CARD", "TRANSFER", "FREE"].includes(paymentMethod)) return res.status(400).json({success:false,message:"Invalid payment method"});
+    if (!["CARD", "FREE"].includes(paymentMethod)) return res.status(400).json({success:false,message:"Invalid payment method"});
+    require("../../services/eventOrderValidation.service").validateEventOrderItems(items, settings.ticketing.maxTicketsPerOrder);
+    const quotedTicketVersions = [];
     const processedItems = [];
     for (const item of items) {
       if (!item.product || !Number.isSafeInteger(item.quantity) || item.quantity < 1) {
@@ -183,6 +205,8 @@ const createBooking = async (req, res) => {
         });
       }
 
+      require("../../services/eventOrderValidation.service").assertTierOrderLimit(ticketType, item.quantity);
+      quotedTicketVersions.push({ ticketId: String(ticketType._id), updatedAt: ticketType.updatedAt });
       // Validate Sales Window
       const now = new Date();
       if (ticketType.salesStartAt && now < new Date(ticketType.salesStartAt)) {
@@ -275,115 +299,59 @@ const createBooking = async (req, res) => {
       ? await User.findById(event.createdBy).select("vendorAccountCode") : null;
     if(paymentMethod === "CARD" && pricing.totalAmount > 0 && !organiser?.vendorAccountCode)return res.status(409).json({success:false,message:"The organiser must connect a payout account before accepting online payments."});
     const savedBooking = await reserveEventBooking({
-      eventId, buyer:buyerId, guestDetails:{fullName,phoneNumber,email},
+      ...attempt, checkoutPricing: pricing, checkoutSubaccount: organiser?.vendorAccountCode,
+      quotedTicketVersions, eventId, buyer:buyerId, guestDetails:{fullName,phoneNumber,email},
       items:pricedItems, ...bookingPricing, totalAmount:pricing.totalAmount,
       currency:checkoutCurrency, paymentMethod, paymentReference:reference,
       paymentStatus:pricing.totalAmount === 0 ? "COMPLETED" : "PENDING",
     });
 
-    // 4. Handle Payment Flow
-    if (paymentMethod === "CARD" && pricing.totalAmount > 0) {
-      // Get the event owner's subaccount details
-
-
-      // Initialize payment with full booking details in metadata
-      const paymentData = await gateway.initializePayment({
-        email: email,
-        amount: pricing.totalAmount / 100, // Service expects main currency unit
-        currency: checkoutCurrency,
-        reference: reference,
-        subaccount: organiser?.vendorAccountCode || undefined,
-        transactionCharge: pricing.platformFeeAmount,
-        metadata: {
-          eventId,
-          buyerId,
-          items: pricedItems.map((item) => ({
-            ticketId: item.ticketId.toString(),
-            name: item.name,
-            quantity: item.quantity,
-            pricePerUnit: item.pricePerUnit,
-            totalPrice: item.totalPrice,
-            subtotalAmount: item.subtotalAmount,
-            feeMode: item.feeMode,
-            feeAmount: item.feeAmount,
-            buyerFeeAmount: item.buyerFeeAmount,
-            organiserFeeAmount: item.organiserFeeAmount,
-          })),
-          ...bookingPricing,
-          totalAmount: pricing.totalAmount,
-          fullName,
-          phoneNumber,
-          type: "EVENT_TICKET",
-        },
-      });
-
-      await EventBooking.updateOne({_id:savedBooking._id}, {$set:{checkoutAccessCode:paymentData.access_code,checkoutUrl:paymentData.authorization_url}});
-      return res.json({
-        success: true,
-        data: {
-          booking: savedBooking,
-          payment: paymentData,
-          pricing,
-        },
-      });
-    }
-
-    // If Free booking, generate tickets immediately
-    if (savedBooking && savedBooking.paymentStatus === "COMPLETED") {
-      const tickets = await UserEventTicket.find({bookingId:savedBooking._id}).lean();
-
-      // Dispatch Notifications & Confirmation Email for Free Tickets
-      try {
-        const eventDoc = await Event.findById(eventId)
-          .select("title schedule location venueName createdBy")
-          .lean();
-        await notifyTicketPurchased({
-          booking: savedBooking,
-          event: eventDoc,
-          buyer: user,
-          reference: savedBooking.paymentReference,
-        });
-      } catch (notifErr) {
-        console.error(
-          "[EVENT BOOKING] Error dispatching free ticket notification:",
-          notifErr,
-        );
-      }
-
-      return res.json({
-        success: true,
-        message: "Booking successful and tickets generated",
-        data: { booking: savedBooking, tickets, pricing },
-      });
-    }
-
-    // If PENDING (e.g., Bank Transfer or other manual methods)
-    res.json({
-      success: true,
-      message: "Order initiated successfully. Awaiting payment confirmation.",
-      data: { booking: savedBooking, pricing },
-    });
+    return await require("../../services/eventCheckoutAttempt.service").respond(savedBooking._id, res);
   } catch (error) {
+    if (error.code === 11000 && attempt) {
+      try {
+        const existing = await require("../../services/eventCheckoutAttempt.service").findAttempt(buyerId, attempt);
+        if (existing) return await require("../../services/eventCheckoutAttempt.service").respond(existing._id, res);
+      } catch (retryError) { error = retryError; }
+    }
     // Reservations and booking creation roll back together on transaction failure.
     // After persistence, gateway uncertainty is reconciled by the expiry job.
     console.error("[CREATE BOOKING ERROR]", error);
     res
       .status(error.statusCode || 500)
-      .json({ success: false, message: error.statusCode ? error.message : "Server error during checkout" });
+      .json({ success: false, message: error.statusCode ? error.message : "Server error during checkout", terminal: error.terminal || false, paymentReference: error.paymentReference });
   }
 };
 
 /**
  * VERIFY BOOKING
  */
+const getBookingPaymentStatus = async (req, res) => {
+  try {
+    const booking = await EventBooking.findOne({ paymentReference: req.params.reference, buyer: req.user.id })
+      .select("paymentStatus paymentMethod totalAmount status paymentReference paymentResolutionRequired").lean();
+    if (!booking) return res.status(404).json({ success: false, message: "Booking not found." });
+    return res.json({ success: true, data: { booking } });
+  } catch { return res.status(500).json({ success: false, message: "Could not read booking status." }); }
+};
 const verifyBooking = async (req, res) => {
   try {
+    const existing = await EventBooking.findOne({ paymentReference: req.params.reference, buyer: req.user.id });
+    if (!existing) return res.status(404).json({ success: false, message: "Booking not found." });
+    if (existing.status === "CANCELLED" || existing.paymentResolutionRequired)
+      return res.status(409).json({ success: false, message: "This booking is closed or requires payment review.", data: { booking: existing } });
+    if (existing.paymentStatus === "COMPLETED") {
+      const tickets = await UserEventTicket.find({ bookingId: existing._id, owner: req.user.id }).lean();
+      return res.json({ success: true, message: "Tickets are ready.", data: { booking: existing, tickets } });
+    }
+    if (existing.totalAmount === 0 || existing.paymentMethod === "FREE")
+      return res.status(409).json({ success: false, message: "This free booking does not require payment verification." });
     const payment = await gateway.verifyPayment(req.params.reference);
     const result = await completePayment(req.params.reference, payment, {buyerId:req.user.id,kind:"EVENT_TICKET"});
     if (result.conflict) return res.status(409).json({success:false,message:"Payment received for a cancelled or expired booking. Please contact the organiser.",data:{booking:result.booking}});
     await recordBookingReferral(result.booking._id,"EVENT_TICKET");
     await notifyPaymentCompletion(result);
-    const tickets = await UserEventTicket.find({bookingId:result.booking._id}).lean();
+    const tickets = await UserEventTicket.find({bookingId:result.booking._id, owner: req.user.id}).lean();
     return res.json({success:true,message:"Payment verified and tickets generated",data:{booking:result.booking,tickets}});
   } catch(error) {
     return res.status(error.statusCode || 502).json({success:false,message:error.statusCode ? error.message : "Could not verify payment. Please try again."});
@@ -395,14 +363,16 @@ const getMyBookings = async (req, res) => {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
     const skip = (page - 1) * limit;
+    const filter = { buyer: req.user.id, ...(req.query.needsAttention === "true" ? { paymentResolutionRequired: true } : {}) };
 
     const [bookings, total] = await Promise.all([
-      EventBooking.find({ buyer: req.user.id })
-        .populate("eventId", "title images location startDate")
+      EventBooking.find(filter)
+        .select("eventId items totalAmount currency paymentMethod paymentStatus paymentReference status paymentResolutionRequired createdAt")
+        .populate("eventId", "title status images location schedule")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit),
-      EventBooking.countDocuments({ buyer: req.user.id }),
+      EventBooking.countDocuments(filter),
     ]);
 
     res.json({
@@ -419,6 +389,7 @@ const getMyBookings = async (req, res) => {
 };
 
 module.exports = {
+  getBookingPaymentStatus,
   quoteBooking,
   createBooking,
   verifyBooking,

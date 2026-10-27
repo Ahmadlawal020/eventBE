@@ -2,6 +2,13 @@ const mongoose = require("mongoose");
 const EventRefund = require("../../models/client/eventRefund.schema");
 const cloudinary = require("../../utils/cloudinary");
 const MAX_BYTES = 5 * 1024 * 1024;
+function settlementFilter(req) {
+  const id = req.headers?.["x-refund-settlement-id"] || req.body?.settlementId;
+  if (typeof id !== "string" || !id)
+    throw Object.assign(Error("Prepare refund settlement before uploading payment proof."), { status: 409 });
+  return { "settlement.id": id,
+    $expr: { $eq: ["$settlement.bankDetailsVersion", "$bankDetailsVersion"] } };
+}
 
 function decodeReceipt(value) {
   if (typeof value !== "string" || !value.length || value.length > Math.ceil(MAX_BYTES / 3) * 4 ||
@@ -24,6 +31,7 @@ async function uploadReceipt(req, res) {
     if (!mongoose.Types.ObjectId.isValid(req.params.refundId)) return res.status(400).json({ success: false, message: "Invalid refund ID." });
     // Receipts belong to the ticket holder assigned this refund.
     const filter = {
+      ...settlementFilter(req),
       _id: req.params.refundId, organiser: req.user.id, ticketId: { $exists: true },
       status: { $in: ["DUE_FROM_ORGANISER", "OVERDUE", "MARKED_PAID"] },
       "bankDetails.accountName": { $exists: true, $ne: "" },
@@ -41,7 +49,7 @@ async function uploadReceipt(req, res) {
       folder: "refund-receipts", type: "authenticated", resource_type: "image",
       allowed_formats: ["jpg", "jpeg", "png", "webp"],
     });
-    const receipt = { publicId: uploaded.public_id, format: uploaded.format, uploadedAt: new Date() };
+    const receipt = { publicId: uploaded.public_id, format: uploaded.format, uploadedAt: new Date(), settlementId: filter["settlement.id"] };
     const updated = await EventRefund.findOneAndUpdate({ ...filter, updatedAt: refund.updatedAt }, { $set: { receipt } }, { new: true, runValidators: true });
     if (!updated) throw Object.assign(new Error("Refund changed while uploading. Refresh and try again."), { status: 409 });
     persisted = true;
@@ -85,6 +93,7 @@ module.exports = { uploadReceipt, getReceipt, decodeReceipt };
 // The app uploads the file directly, like listing media. Only this server signs
 // private receipt uploads and verifies Cloudinary metadata before attaching them.
 const editableReceipt = req => ({
+  ...settlementFilter(req),
   _id: req.params.refundId, organiser: req.user.id, ticketId: { $exists: true },
   status: { $in: ["DUE_FROM_ORGANISER", "OVERDUE", "MARKED_PAID"] },
   "bankDetails.accountName": { $exists: true, $ne: "" },
@@ -98,8 +107,15 @@ async function prepareReceiptUpload(req, res) {
       message: "Private receipt uploads require Cloudinary credentials on the server. Contact support.",
     });
     const publicId = `refund-receipts/${req.params.refundId}/${require("crypto").randomUUID()}`;
-    const refund = await EventRefund.findOneAndUpdate(editableReceipt(req),
-      { $set: { pendingReceiptPublicId: publicId } }, { new: true });
+    const Attempts = require("../../models/client/refundUploadAttempt.schema");
+    const refund = await mongoose.connection.transaction(async session => {
+      const record = await EventRefund.findOneAndUpdate(editableReceipt(req),
+        { $set: { pendingReceiptPublicId: publicId } }, { new: true, session });
+      if (record) await Attempts.create([{ publicId, refundId: record._id, organiser: req.user.id,
+        settlementId: record.settlement.id,
+        expiresAt: new Date(Date.now() + 3600000), cleanupAfter: new Date(Date.now() + 86400000) }], { session });
+      return record;
+    });
     if (!refund) return res.status(409).json({ success: false, message: "This refund cannot accept a receipt. Refresh its payment status." });
     const parameters = { timestamp: Math.floor(Date.now() / 1000), public_id: publicId,
       type: "authenticated", overwrite: false, allowed_formats: "jpg,jpeg,png,webp" };
@@ -107,7 +123,7 @@ async function prepareReceiptUpload(req, res) {
     return res.json({ success: true, data: { cloudName: storage.cloud_name, apiKey: storage.api_key, parameters, signature } });
   } catch (error) {
     console.error("[PREPARE REFUND RECEIPT]", error.message);
-    return res.status(500).json({ success: false, message: "Could not prepare receipt upload." });
+    return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Could not prepare receipt upload." });
   }
 }
 async function completeReceiptUpload(req, res) {
@@ -115,8 +131,8 @@ async function completeReceiptUpload(req, res) {
     const publicId = req.body?.publicId;
     if (typeof publicId !== "string" || !publicId.startsWith(`refund-receipts/${req.params.refundId}/`)) return res.status(400).json({ success: false, message: "Invalid receipt upload." });
     // Repeating completion after a lost response is harmless.
-    const existing = await EventRefund.findOne({ _id: req.params.refundId, organiser: req.user.id }).select("+receipt.publicId");
-    if (existing?.receipt?.publicId === publicId) return res.json({ success: true, data: { uploadedAt: existing.receipt.uploadedAt } });
+    const existing = await EventRefund.findOne({ _id: req.params.refundId, organiser: req.user.id, ...settlementFilter(req) }).select("+receipt.publicId");
+    if (existing?.receipt?.publicId === publicId && existing.receipt.settlementId === existing.settlement?.id) return res.json({ success: true, data: { uploadedAt: existing.receipt.uploadedAt } });
     const filter = { ...editableReceipt(req), pendingReceiptPublicId: publicId };
     const refund = await EventRefund.findOne(filter).select("+receipt.publicId");
     if (!refund) return res.status(409).json({ success: false, message: "Receipt upload expired or refund changed. Refresh and select the image again." });
@@ -126,16 +142,27 @@ async function completeReceiptUpload(req, res) {
       await cloudinary.uploader.destroy(publicId, { type: "authenticated", resource_type: "image" });
       return res.status(422).json({ success: false, message: "Choose a JPEG, PNG or WebP receipt under 5 MB." });
     }
-    const receipt = { publicId, format: asset.format, uploadedAt: new Date() };
-    const updated = await EventRefund.findOneAndUpdate({ ...filter, updatedAt: refund.updatedAt },
-      { $set: { receipt }, $unset: { pendingReceiptPublicId: 1 } }, { new: true, runValidators: true });
+    const receipt = { publicId, format: asset.format, uploadedAt: new Date(), settlementId: filter["settlement.id"] };
+    const Attempts = require("../../models/client/refundUploadAttempt.schema");
+    const updated = await mongoose.connection.transaction(async session => {
+      const attempt = await Attempts.findOneAndUpdate({ publicId, organiser: req.user.id, settlementId: filter["settlement.id"], state: "PENDING", expiresAt: { $gt: new Date() } },
+        { $set: { state: "ATTACHED" } }, { new: true, session });
+      if (!attempt) throw Object.assign(new Error("Upload expired. Select the image again."), { status: 409 });
+      const record = await EventRefund.findOneAndUpdate({ ...filter, updatedAt: refund.updatedAt },
+        { $set: { receipt }, $unset: { pendingReceiptPublicId: 1 } }, { new: true, runValidators: true, session });
+      if (!record) throw Object.assign(new Error("Refund changed while uploading. Refresh before trying again."), { status: 409 });
+      // Track old assets too, including receipts uploaded by older app versions.
+      if (refund.receipt?.publicId) await Attempts.updateOne({ publicId: refund.receipt.publicId }, { $setOnInsert: {
+        refundId: refund._id, organiser: req.user.id, state: "PENDING", expiresAt: new Date(), cleanupAfter: new Date(Date.now() + 86400000),
+      } }, { upsert: true, session });
+      return record;
+    });
     if (!updated) return res.status(409).json({ success: false, message: "Refund changed while uploading. Refresh before trying again." });
-    if (refund.receipt?.publicId) await cloudinary.uploader.destroy(refund.receipt.publicId,
-      { type: "authenticated", resource_type: "image" }).catch(error => console.error("[REFUND RECEIPT CLEANUP]", error.message));
+
     return res.json({ success: true, data: { uploadedAt: receipt.uploadedAt } });
   } catch (error) {
     console.error("[COMPLETE REFUND RECEIPT]", error.message);
-    return res.status(502).json({ success: false, message: "Could not verify the uploaded receipt. Try uploading again." });
+    return res.status(error.status || 502).json({ success: false, message: error.status ? error.message : "Could not verify the uploaded receipt. Try uploading again." });
   }
 }
 module.exports.prepareReceiptUpload = prepareReceiptUpload;

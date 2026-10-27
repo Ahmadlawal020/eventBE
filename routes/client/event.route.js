@@ -18,7 +18,8 @@ const {
 } = require("../../controllers/client/event.controller");
 
 const verifyJWT = require("../../middleware/verifyJWT");
-const lifecycleController = require("../../controllers/client/eventLifecycle.controller");
+const cancellationController = require("../../controllers/client/eventCancellation.controller");
+const refundController = require("../../controllers/client/eventRefund.controller");
 const {
   getPublicEventSettings,
 } = require("../../controllers/management/eventSettings.controller");
@@ -26,6 +27,10 @@ const {
 // ====================
 // AUTHENTICATED ROUTES
 // ====================
+const media = require("../../controllers/client/eventMedia.controller");
+const mediaLimit = require("../../middleware/generateLimiter")({ windowMs: 15 * 60000, max: 60, message: "Too many image uploads. Please retry later." });
+router.post("/media/prepare", verifyJWT, mediaLimit, media.prepare);
+router.post("/media/complete", verifyJWT, mediaLimit, media.complete);
 router.post("/", verifyJWT, createEvent);
 
 router.get("/my-event-listings", verifyJWT, getPersonalEventListings);
@@ -34,11 +39,15 @@ router.get("/my-events", verifyJWT, getMyEvents);
 router.get(
   "/:id/cancellation-preview",
   verifyJWT,
-  lifecycleController.cancellationPreview,
+  cancellationController.cancellationPreview,
 );
-router.post("/:id/cancel", verifyJWT, lifecycleController.cancelEvent);
-router.get("/:id/refunds", verifyJWT, lifecycleController.organiserRefunds);
-router.get("/:id/buyers", verifyJWT, lifecycleController.organiserBuyers);
+router.post("/:id/cancel", verifyJWT, cancellationController.cancelEvent);
+const refundWorkspace = require("../../controllers/client/refundWorkspace.controller");
+router.get("/:id/refund-workspace", verifyJWT, refundWorkspace.summary);
+router.get("/:id/refund-holders", verifyJWT, refundWorkspace.holders);
+router.get("/:id/refund-holder-tickets", verifyJWT, refundWorkspace.holderTickets);
+router.get("/:id/refunds", verifyJWT, refundController.organiserRefunds);
+router.get("/:id/buyers", verifyJWT, refundController.organiserBuyers);
 
 router.patch("/:id/images/reorder", verifyJWT, reorderEventImages);
 router.patch("/:id/images/delete", verifyJWT, deleteEventImage);

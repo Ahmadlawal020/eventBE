@@ -63,7 +63,17 @@ const markCompletedEvents = async (options = {}) => {
     const singleDayCutoff = new Date(completionCutoff.getTime() - singleDayGraceMs);
 
     const query = buildCompletionFilter(completionCutoff, singleDayCutoff);
-    const result = await EventModel.updateMany(query, { $set: { status: "COMPLETED" } });
+    let result;
+    if (options.EventModel) {
+      result = await EventModel.updateMany(query, { $set: { status: "COMPLETED" } });
+    } else {
+      let modifiedCount = 0;
+      const cursor = Event.find(query).select("_id").lean().cursor();
+      for await (const event of cursor) {
+        if (await require("../services/eventOccurrence.service").completeOccurrence(event._id, query)) modifiedCount++;
+      }
+      result = { modifiedCount };
+    }
 
     if (result?.modifiedCount > 0) {
       console.log(
@@ -78,8 +88,8 @@ const markCompletedEvents = async (options = {}) => {
 };
 
 // Run every 15 minutes (avoid auto-starting during unit tests to allow process exit)
-const isTest = process.env.NODE_ENV === "test" || process.execArgv.includes("--test") || process.argv.includes("--test");
-const job = new CronJob("*/15 * * * *", markCompletedEvents, null, !isTest, "UTC");
+const isTest = process.env.NODE_ENV === "test" || process.env.NODE_TEST_CONTEXT || process.execArgv.includes("--test") || process.argv.includes("--test");
+const job = new CronJob("*/15 * * * *", () => require("../services/eventOperations.service").runWorker("event-completion", markCompletedEvents).catch(error => console.error("[COMPLETION WORKER]", error.message)), null, !isTest, "UTC");
 
 if (!isTest) {
   console.log("[Cron Job] Event Completion Job scheduled every 15 minutes.");

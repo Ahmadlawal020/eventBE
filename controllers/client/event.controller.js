@@ -16,6 +16,14 @@ const {
 const { realignTicketSalesWindows } = require("../../services/ticketSalesWindow.service");
 
 
+async function canManageEventListing(event, userId) {
+  if (String(event.createdBy) === String(userId)) return true;
+  return Boolean(await CoOrganiserInvitation.findOne({
+    coOrganiser: userId, host: event.createdBy, status: "ACCEPTED", "listings.listingId": event._id,
+    permissions: { $in: ["MANAGE_LISTING", "ALL_ACCESS"] },
+  }).lean());
+}
+
 // 📌 Create Event
 const createEvent = async (req, res) => {
   const {
@@ -115,7 +123,11 @@ const createEvent = async (req, res) => {
       entry,
     });
 
-    const savedEvent = await newEvent.save();
+    const savedEvent = await mongoose.connection.transaction(async session => {
+      if (images?.length || performers?.length) await require("../../services/eventMedia.service").attachMedia(
+        { images, performers }, {}, newEvent._id, req.user.id, session);
+      return newEvent.save({ session });
+    });
 
     res.status(201).json({
       success: true,
@@ -143,7 +155,7 @@ const getEvents = async (req, res) => {
 
     const [events, total] = await Promise.all([
       Event.find({ status: "LISTED" })
-        .populate("createdBy", "firstName surname email")
+        .populate("createdBy", "firstName surname")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
@@ -171,10 +183,10 @@ const getEventById = async (req, res) => {
     const event = await Event.findById(id)
       .populate(
         "createdBy",
-        "firstName surname email profilePicture isIdentityVerified isPhoneVerified",
+        "firstName surname profilePicture isIdentityVerified isPhoneVerified",
       )
-      .populate("coOrganisers", "firstName surname email profilePicture")
-      .populate("staff", "firstName surname email profilePicture");
+      .populate("coOrganisers", "firstName surname profilePicture")
+      .populate("staff", "firstName surname profilePicture");
     if (!event)
       return res
         .status(404)
@@ -199,7 +211,7 @@ const getMyDraftEvents = async (req, res) => {
     const drafts = await Event.find({
       status: "IN_PROGRESS",
       $or: [{ createdBy: req.user.id }, { coOrganisers: req.user.id }],
-    }).populate("createdBy", "firstName surname email");
+    }).populate("createdBy", "firstName surname");
 
     res.json({
       success: true,
@@ -215,7 +227,9 @@ const normalizeImagePositions = (images = []) => {
   return images
     .sort((a, b) => a.position - b.position)
     .map((img, index) => ({
-      ...img,
+      // Mongoose subdocument properties are getters, not spreadable own fields.
+      publicId: img.publicId,
+      url: img.url,
       position: index,
     }));
 };
@@ -246,6 +260,7 @@ const updateEvent = async (req, res) => {
     if (!isOwner) {
       const coOrganiserInvite = await CoOrganiserInvitation.findOne({
         coOrganiser: req.user.id,
+        host: prevEvent.createdBy,
         status: "ACCEPTED",
         "listings.listingId": id,
       }).lean();
@@ -258,13 +273,27 @@ const updateEvent = async (req, res) => {
       }
     }
 
+    if (prevEvent.status === "CANCELLED") {
+      return res.status(409).json({ success: false, message: "You can't update this field because the event has been cancelled." });
+    }
+
     const updatePayload = normalizeEventCancellationPolicy(
       prepareListingPatch(req.body, EVENT_FIELDS, prevEvent.toObject()),
       prevEvent.toObject(),
     );
+    delete updatePayload.previousTicketPolicy;
     if (prevEvent.status === "CANCELLED" &&
         (updatePayload.status !== undefined || updatePayload.isDraft !== undefined)) {
       return res.status(409).json({ success: false, message: "A cancelled event cannot be relisted. Create a new event instead." });
+    }
+    const { occurrenceEnded, changeSchedule } = require("../../services/eventOccurrence.service");
+    const ended = occurrenceEnded(prevEvent);
+    if (ended && !updatePayload.schedule && (updatePayload.status !== undefined || updatePayload.isDraft !== undefined))
+      return res.status(409).json({ success: false, message: "Choose new dates before reopening an ended event." });
+    if (prevEvent.status === "CANCELLED" && updatePayload.schedule)
+      return res.status(409).json({ success: false, message: "A cancelled event cannot be rescheduled." });
+    if (updatePayload.status === "IN_PROGRESS" && prevEvent.status !== "IN_PROGRESS") {
+      return res.status(409).json({ success: false, message: "Published events cannot return to draft. Unlist to stop sales, or use cancellation." });
     }
     const settings = await getEventSettings(prevEvent.managementLocation);
 
@@ -342,7 +371,7 @@ const updateEvent = async (req, res) => {
     const previousObject = prevEvent.toObject();
     const mergedPayload = { ...previousObject, ...updatePayload };
     const resubmittingCompletedEvent =
-      prevEvent.status === "COMPLETED" &&
+      ended &&
       updatePayload.schedule?.to &&
       new Date(updatePayload.schedule.to) > new Date();
     const validationErrors = validateEventPayload(mergedPayload, settings, {
@@ -383,7 +412,7 @@ const updateEvent = async (req, res) => {
         settings.publishing.autoPublishVerifiedOrganisers &&
         organiserMeetsPublishingRequirements(user, settings);
       updatePayload.status = canAutoPublish ? "LISTED" : "ACTION_REQUIRED";
-    } else if (prevEvent.status === "COMPLETED" && updatePayload.schedule?.to) {
+    } else if (ended && updatePayload.schedule?.to) {
       const newToDate = new Date(updatePayload.schedule.to);
       if (newToDate > new Date()) {
         const user = await User.findById(prevEvent.createdBy);
@@ -395,37 +424,38 @@ const updateEvent = async (req, res) => {
     }
 
     delete updatePayload.isDraft;
-    const updatedEvent = await Event.findOneAndUpdate({ _id: id, status: prevEvent.status }, updatePayload, {
-      new: true,
-      runValidators: true,
-    });
-
-    if (!updatedEvent) return res.status(409).json({ success: false, message: "This listing changed while you were editing. Refresh before trying again." });
-
-    // Check if event schedule was updated and clamp existing ticket tiers if salesEndAt exceeds new event end time
     let adjustedTicketCount = 0;
-    const newEventEnd = updatedEvent.schedule?.to || updatedEvent.schedule?.from;
-    if (updatePayload.schedule && newEventEnd) {
-      adjustedTicketCount = await realignTicketSalesWindows(id, newEventEnd);
-
-      if (adjustedTicketCount > 0) {
-        try {
-          const notificationService = require("../../services/notification");
-          const { NOTIFICATION_TYPES } = require("../../constants/notificationTypes");
-          await notificationService.dispatchNotification({
-            recipient: updatedEvent.createdBy,
-            type: NOTIFICATION_TYPES.SYSTEM,
-            title: "Ticket Sales Window Adjusted",
-            message: `Your event schedule was updated. ${adjustedTicketCount} ticket tier(s) had their sales end time automatically updated to match the new event wrap-up time.`,
-            referenceId: updatedEvent._id,
-            referenceType: "Event",
-            data: { eventId: updatedEvent._id, adjustedTicketCount },
-          });
-        } catch (notifErr) {
-          console.error("[EVENT RESCHEDULE NOTIFICATION ERROR]", notifErr);
+    const updatedEvent = await mongoose.connection.transaction(async session => {
+      const locked = await Event.findOneAndUpdate(
+        { _id: id, status: prevEvent.status, updatedAt: prevEvent.updatedAt },
+        { $inc: { saleVersion: 1 } }, { new: true, session });
+      if (!locked) throw Object.assign(Error("This event changed. Refresh before saving."), { status: 409 });
+      if (updatePayload.images || updatePayload.performers) await require("../../services/eventMedia.service").attachMedia(
+        updatePayload, locked, id, req.user.id, session);
+      if (updatePayload.schedule && await require("../../models/client/userEventTicket.schema").exists({ eventId: id, refundHold: true }).session(session))
+        throw Object.assign(Error("Resolve tickets held for refund settlement before changing dates."), { status: 409 });
+      const restarted = await changeSchedule(locked, updatePayload, req.body.previousTicketPolicy, session);
+      if (updatePayload.capacity !== undefined || restarted) await require("../../services/eventCapacity.service").assertEventCapacity(
+        { _id: locked._id, occurrence: updatePayload.occurrence ?? locked.occurrence, capacity: updatePayload.capacity ?? locked.capacity }, 0, session);
+      const result = await Event.findByIdAndUpdate(id, { $set: updatePayload }, { new: true, runValidators: true, session });
+      if (updatePayload.schedule) {
+        adjustedTicketCount = await realignTicketSalesWindows(id, result.schedule?.to || result.schedule?.from, null, session);
+        if (!restarted) {
+          const UserTicket = require("../../models/client/userEventTicket.schema");
+          const { occurrenceFilter } = require("../../services/eventOccurrence.service");
+          const filter = { eventId: id, ...occurrenceFilter(locked.occurrence || 0), status: "UNREDEEMED" };
+          const holders = await UserTicket.distinct("owner", filter).session(session);
+          await UserTicket.updateMany(filter, { $set: { validSchedule: result.schedule } }, { session });
+          await require("../../services/refundNotifications.service").queueNotices(holders.map(recipient => ({
+            key: "event-rescheduled:" + id + ":" + result.updatedAt.getTime() + ":" + recipient,
+            recipient, sender: result.createdBy, type: "SYSTEM", title: "Event dates changed",
+            message: '"' + result.title + '" has new dates: ' + new Date(result.schedule.from).toISOString() + '. Your ticket remains valid. Open Tickets for details.',
+            data: { eventId: id, screen: "Tickets" },
+          })), session);
         }
       }
-    }
+      return result;
+    });
 
     res.json({
       success: true,
@@ -438,6 +468,7 @@ const updateEvent = async (req, res) => {
 
   } catch (err) {
     console.error("[UPDATE EVENT]", err);
+    if (err.status === 409) return res.status(409).json({ success: false, message: err.message });
     if (err.status === 400 || err.name === "ValidationError" || err.name === "CastError") {
       return res.status(400).json({
         success: false,
@@ -465,6 +496,7 @@ const deleteEventImage = async (req, res) => {
   }
 
   try {
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ success: false, message: "Invalid event ID." });
     const event = await Event.findById(id);
     if (!event) {
       return res.status(404).json({
@@ -472,17 +504,19 @@ const deleteEventImage = async (req, res) => {
         message: "Event not found",
       });
     }
+    if (!await canManageEventListing(event, req.user.id)) return res.status(403).json({ success: false, message: "You do not have permission to manage this listing." });
+    if (event.status === "CANCELLED") return res.status(409).json({ success: false, message: "You can't update this field because the event has been cancelled." });
 
-    // 1️⃣ Delete from Cloudinary
-    try {
-      await cloudinary.uploader.destroy(publicId);
-    } catch (cloudinaryErr) {
-      console.error("[CLOUDINARY DELETE ERROR]", cloudinaryErr);
-      // Optional: continue even if Cloudinary fails, or abort?
-      // Usually, we want to at least log it.
-    }
 
+    if (!event.images?.some(image => image.publicId === publicId)) return res.status(404).json({ success: false, message: "Image not found in this event." });
+    // Legacy public uploads have no trusted server ownership record. Remove the
+    // reference only; private refund proof has its own verified cleanup pipeline.
     // 2️⃣ Remove from database
+    const settings = await getEventSettings(event.managementLocation);
+    const requiredImages = Math.max(settings.publishing.requireCoverImage ? 1 : 0,
+      settings.publishing.minimumImages || 0, settings.contentLimits.minImages || 0);
+    if (event.status === "LISTED" && event.images.filter(image => image.publicId !== publicId).length < requiredImages)
+      return res.status(409).json({ success: false, message: "Add a replacement image before removing this published event's required images." });
     event.images = event.images
       .filter((img) => img.publicId !== publicId)
       .sort((a, b) => a.position - b.position)
@@ -492,11 +526,12 @@ const deleteEventImage = async (req, res) => {
         position: index,
       }));
 
-    await event.save();
+    const saved = await Event.findOneAndUpdate({ _id: id, updatedAt: event.updatedAt }, { $set: { images: event.images } }, { new: true, runValidators: true });
+    if (!saved) return res.status(409).json({ success: false, message: "This event changed. Refresh before removing an image." });
 
     res.json({
       success: true,
-      message: "Image deleted successfully from database and Cloudinary",
+      message: "Image removed from the event",
       data: event.images,
     });
   } catch (err) {
@@ -512,7 +547,7 @@ const reorderEventImages = async (req, res) => {
   const { id } = req.params;
   const { publicId, toPosition } = req.body;
 
-  if (!publicId || typeof toPosition !== "number") {
+  if (typeof publicId !== "string" || !Number.isInteger(toPosition) || toPosition < 0) {
     return res.status(400).json({
       success: false,
       message: "publicId and toPosition are required",
@@ -520,6 +555,7 @@ const reorderEventImages = async (req, res) => {
   }
 
   try {
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ success: false, message: "Invalid event ID." });
     const event = await Event.findById(id);
     if (!event) {
       return res.status(404).json({
@@ -527,6 +563,9 @@ const reorderEventImages = async (req, res) => {
         message: "Event not found",
       });
     }
+    if (!await canManageEventListing(event, req.user.id)) return res.status(403).json({ success: false, message: "You do not have permission to manage this listing." });
+    if (event.status === "CANCELLED") return res.status(409).json({ success: false, message: "You can't update this field because the event has been cancelled." });
+
 
     // 1️⃣ Sort images by current position
     const images = [...event.images].sort((a, b) => a.position - b.position);
@@ -609,32 +648,8 @@ const deleteEvent = async (req, res) => {
       message: "Event deleted successfully",
     });
 
-    // 4️⃣ Clean up Cloudinary images in the background (fire-and-forget)
-    if (event.images && event.images.length > 0) {
-      const hasCloudinaryConfig =
-        process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET;
+    // Keep legacy storage assets until ownership is established by an upload registry.
 
-      if (hasCloudinaryConfig) {
-        Promise.all(
-          event.images.map((img) =>
-            cloudinary.uploader.destroy(img.publicId).catch((err) => {
-              console.error(
-                `[CLOUDINARY DELETE ERROR] for ${img.publicId}:`,
-                err,
-              );
-            }),
-          ),
-        )
-          .then(() =>
-            console.log(
-              `[DELETE EVENT] Cleaned up ${event.images.length} images from Cloudinary`,
-            ),
-          )
-          .catch((err) =>
-            console.error("[DELETE EVENT] Cloudinary cleanup error:", err),
-          );
-      }
-    }
   } catch (err) {
     console.error("[DELETE EVENT]", err);
     res.status(err.statusCode || 500).json({ success: false, message: err.statusCode ? err.message : "Server error" });
@@ -649,7 +664,7 @@ const getMyEvents = async (req, res) => {
     const events = await Event.find({
       status: { $in: ["LISTED", "ACTION_REQUIRED", "UNLISTED"] },
       $or: [{ createdBy: req.user.id }, { coOrganisers: req.user.id }],
-    }).populate("createdBy", "firstName surname email");
+    }).populate("createdBy", "firstName surname");
 
     res.json({
       success: true,
@@ -733,6 +748,7 @@ const deleteEventPerformer = async (req, res) => {
   }
 
   try {
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ success: false, message: "Invalid event ID." });
     const event = await Event.findById(id);
 
     if (!event) {
@@ -741,6 +757,9 @@ const deleteEventPerformer = async (req, res) => {
         message: "Event not found",
       });
     }
+    if (!await canManageEventListing(event, req.user.id)) return res.status(403).json({ success: false, message: "You do not have permission to manage this listing." });
+    if (event.status === "CANCELLED") return res.status(409).json({ success: false, message: "You can't update this field because the event has been cancelled." });
+
 
     const performer = event.performers.id(performerId);
 
@@ -749,22 +768,6 @@ const deleteEventPerformer = async (req, res) => {
         success: false,
         message: "Performer not found",
       });
-    }
-
-    // Clean up Cloudinary image if it exists
-    if (performer.image && !performer.image.startsWith("file://")) {
-      const parts = performer.image.split("/upload/");
-      if (parts.length >= 2) {
-        const withoutVersion = parts[1].replace(/^v\d+\//, "");
-        const publicId = withoutVersion.replace(/\.[^.]+$/, "");
-        if (publicId) {
-          try {
-            await cloudinary.uploader.destroy(publicId);
-          } catch (cloudinaryErr) {
-            console.error("[CLOUDINARY DELETE ERROR]", cloudinaryErr);
-          }
-        }
-      }
     }
 
     event.performers = event.performers.filter(
@@ -788,51 +791,7 @@ const deleteEventPerformer = async (req, res) => {
 };
 
 // ✏️ Update Performer in Event
-const updateEventPerformer = async (req, res) => {
-  const { id, performerId } = req.params;
-  const { name, role, bio, image, socialLinks } = req.body;
-
-  try {
-    const event = await Event.findById(id);
-
-    if (!event) {
-      return res.status(404).json({
-        success: false,
-        message: "Event not found",
-      });
-    }
-
-    const performer = event.performers.id(performerId);
-
-    if (!performer) {
-      return res.status(404).json({
-        success: false,
-        message: "Performer not found",
-      });
-    }
-
-    // Update fields safely
-    performer.name = name ?? performer.name;
-    performer.role = role ?? performer.role;
-    performer.bio = bio ?? performer.bio;
-    performer.image = image ?? performer.image;
-    performer.socialLinks = socialLinks ?? performer.socialLinks;
-
-    await event.save();
-
-    res.json({
-      success: true,
-      message: "Performer updated successfully",
-      data: performer,
-    });
-  } catch (err) {
-    console.error("[UPDATE EVENT PERFORMER]", err);
-    res.status(500).json({
-      success: false,
-      message: "Server error",
-    });
-  }
-};
+const updateEventPerformer = (req, res) => require("./eventPerformer.controller").save(req, res);
 
 // 🗑️ Delete Performer Image
 const deletePerformerImage = async (req, res) => {
@@ -847,6 +806,7 @@ const deletePerformerImage = async (req, res) => {
   }
 
   try {
+    if (!mongoose.Types.ObjectId.isValid(id)) return res.status(400).json({ success: false, message: "Invalid event ID." });
     const event = await Event.findById(id);
 
     if (!event) {
@@ -855,6 +815,9 @@ const deletePerformerImage = async (req, res) => {
         message: "Event not found",
       });
     }
+    if (!await canManageEventListing(event, req.user.id)) return res.status(403).json({ success: false, message: "You do not have permission to manage this listing." });
+    if (event.status === "CANCELLED") return res.status(409).json({ success: false, message: "You can't update this field because the event has been cancelled." });
+
 
     const performer = event.performers.id(performerId);
 
@@ -863,13 +826,6 @@ const deletePerformerImage = async (req, res) => {
         success: false,
         message: "Performer not found",
       });
-    }
-
-    // Delete from Cloudinary
-    try {
-      await cloudinary.uploader.destroy(publicId);
-    } catch (cloudinaryErr) {
-      console.error("[CLOUDINARY DELETE ERROR]", cloudinaryErr);
     }
 
     performer.image = null;
@@ -906,10 +862,14 @@ const syncUserEvents = async (userId, { throwOnError = false } = {}) => {
       meetsRequirements &&
       settings.publishing.autoPublishVerifiedOrganisers
     ) {
-      await Event.updateMany(
-        { createdBy: userId, status: "ACTION_REQUIRED" },
-        { status: "LISTED" },
-      );
+      const pending = await Event.find({ createdBy: userId, status: "ACTION_REQUIRED" }).lean();
+      for (const event of pending) {
+        const currentSettings = await getEventSettings(event.managementLocation);
+        if (!currentSettings.publishing.autoPublishVerifiedOrganisers || !organiserMeetsPublishingRequirements(user, currentSettings)) continue;
+        if (validateEventPayload(event, currentSettings, { publishing: true, requireComplete: true }).length) continue;
+        if (require("../../services/eventOccurrence.service").occurrenceEnded(event)) continue;
+        await Event.updateOne({ _id: event._id, status: "ACTION_REQUIRED", updatedAt: event.updatedAt }, { $set: { status: "LISTED" } });
+      }
     } else if (!meetsRequirements) {
       await Event.updateMany(
         { createdBy: userId, status: "LISTED" },

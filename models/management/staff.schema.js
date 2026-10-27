@@ -211,6 +211,7 @@ const staffSchema = new mongoose.Schema(
     },
 
     // Authentication
+    sessionVersion: { type: Number, default: 0 },
     refreshToken: {
       type: String,
       default: null,

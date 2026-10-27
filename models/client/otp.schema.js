@@ -17,10 +17,11 @@ const otpSchema = new mongoose.Schema(
       enum: ["email", "phone", "password_change", "email_change"],
       required: true,
     },
+    attempts: { type: Number, default: 0 },
     expiresAt: {
       type: Date,
       required: true,
-      index: { expires: "10m" }, // Automatically delete after 10 minutes
+      index: { expires: "10m" }, // Cleanup retention only; verification enforces expiresAt explicitly
     },
   },
   { timestamps: true }

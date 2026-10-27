@@ -36,10 +36,11 @@ const generateTicketPDF = async (req, res) => {
     let locationText = "";
     let holderName = "";
     let priceText = "";
+    let entryLabel = "SCAN FOR ENTRY";
 
     if (ticketCategory === "USER_EVENT") {
       ticket = await UserEventTicket.findOne({ _id: ticketId, owner: userId })
-        .populate("eventId", "title")
+        .populate("eventId", "title status occurrence schedule")
         .lean();
 
       if (!ticket) {
@@ -52,8 +53,15 @@ const generateTicketPDF = async (req, res) => {
       qrPayload = ticket.qrPayload || ticket.ticketNumber;
       holderName = userFullName || "Attendee";
 
-      if (ticket.eventSnapshot?.schedule?.startDate) {
-        const start = new Date(ticket.eventSnapshot.schedule.startDate);
+      const currentDate = ticket.validSchedule?.from || ticket.eventSnapshot?.schedule?.startDate;
+      const ticketEnd = ticket.validSchedule?.to || ticket.eventSnapshot?.schedule?.endDate;
+      const expired = ticket.status === "EXPIRED" || (ticketEnd && new Date(ticketEnd) <= new Date()) ||
+        (ticket.occurrence || 0) !== (ticket.eventId?.occurrence || 0);
+      if (ticket.refundHold) entryLabel = "REFUND REVIEW - ENTRY ON HOLD";
+      else if (ticket.status !== "UNREDEEMED") entryLabel = "NOT VALID FOR ENTRY - " + ticket.status;
+      else if (expired || require("../../services/eventEntry.service").isEntryClosed(ticket.eventId)) entryLabel = "NOT VALID FOR ENTRY - EXPIRED OR CLOSED";
+      if (currentDate) {
+        const start = new Date(currentDate);
         scheduleText = format(start, "EEE, MMM d, yyyy 'at' h:mm aa");
       }
 
@@ -147,7 +155,7 @@ const generateTicketPDF = async (req, res) => {
         .fontSize(10)
         .font("Helvetica")
         .fillColor("#666666")
-        .text("Your Entry Ticket", 50, 80, { align: "center" });
+        .text(entryLabel === "SCAN FOR ENTRY" ? "Your Entry Ticket" : "Ticket Record", 50, 80, { align: "center" });
 
       doc.moveDown(2);
 
@@ -226,13 +234,13 @@ const generateTicketPDF = async (req, res) => {
       const qrX = (doc.page.width - qrSize) / 2;
       const qrY = currentY + 30;
 
-      doc.image(qrBuffer, qrX, qrY, { width: qrSize, height: qrSize });
+      if (entryLabel === "SCAN FOR ENTRY") doc.image(qrBuffer, qrX, qrY, { width: qrSize, height: qrSize });
 
       doc
         .fontSize(9)
         .font("Helvetica-Bold")
         .fillColor("#999999")
-        .text("SCAN FOR ENTRY", 50, qrY + qrSize + 15, {
+        .text(entryLabel, 50, qrY + qrSize + 15, {
           align: "center",
           width: pageWidth,
         });

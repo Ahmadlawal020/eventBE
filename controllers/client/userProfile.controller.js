@@ -146,6 +146,8 @@ const updateUser = asyncHandler(async (req, res) => {
 
   if (password) {
     user.password = await bcrypt.hash(password, 10);
+    user.$inc("sessionVersion", 1);
+    user.refreshToken = "";
   }
 
   const updatedUser = await user.save();
@@ -271,7 +273,7 @@ const verifyChangeEmailOTP = asyncHandler(async (req, res) => {
   }
 
   // Verify OTP
-  const result = await otpService.verifyOTP(newEmail, code.trim(), "email_change");
+  const result = await otpService.verifyOTP(newEmail, code.trim(), "email_change", { consume: true });
   if (!result.success) {
     return res.status(400).json({
       success: false,
@@ -288,15 +290,16 @@ const verifyChangeEmailOTP = asyncHandler(async (req, res) => {
   user.authProvider = "local";
   user.googleId = undefined;
 
+  user.$inc("sessionVersion", 1);
   // Generate new tokens for the updated email
   const accessToken = jwt.sign(
-    { UserInfo: { id: user._id, email: user.email, roles: user.roles } },
+    { UserInfo: { id: user._id, email: user.email, roles: user.roles, sessionVersion: user.sessionVersion || 0 } },
     process.env.ACCESS_TOKEN_SECRET,
     { expiresIn: "15m" }
   );
 
   const refreshToken = jwt.sign(
-    { id: user._id, email: user.email },
+    { id: user._id, email: user.email, sessionVersion: user.sessionVersion || 0 },
     process.env.REFRESH_TOKEN_SECRET,
     { expiresIn: "7d" }
   );

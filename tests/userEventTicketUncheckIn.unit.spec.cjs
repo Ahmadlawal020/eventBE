@@ -10,7 +10,7 @@ const StaffInvitation = require("../models/client/staffInvitation.schema");
 
 test.beforeEach(t => {
   t.mock.method(require("mongoose").connection, "transaction", fn => fn({}));
-  t.mock.method(Event, "findOneAndUpdate", async () => ({ status: "LISTED" }));
+  t.mock.method(Event, "findOneAndUpdate", async () => ({ status: "LISTED", schedule: { to: new Date(Date.now() + 3600000) } }));
 });
 
 test("uncheckInTicket successfully reverts a REDEEMED ticket back to UNREDEEMED", async (t) => {
@@ -34,7 +34,7 @@ test("uncheckInTicket successfully reverts a REDEEMED ticket back to UNREDEEMED"
 
   t.mock.method(UserEventTicket, "findOne", () => ({
     select: () => ({
-      lean: async () => ({ eventId, status: "REDEEMED" }),
+      lean: async () => ({ eventId, status: "REDEEMED", validSchedule: { to: new Date(Date.now() + 3600000) } }),
     }),
   }));
 

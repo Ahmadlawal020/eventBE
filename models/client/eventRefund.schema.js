@@ -19,6 +19,15 @@ const eventRefundSchema = new mongoose.Schema({
     accountNumber: { type: String, trim: true, select: false },
     bankCode: { type: String, trim: true, select: false },
   },
+  bankDetailsVersion: { type: Number, default: 0, min: 0 },
+  // The bankDetails fields stay immutable while this settlement exists.
+  settlement: {
+    id: String,
+    bankDetailsVersion: Number,
+    preparedAt: Date,
+    preparedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+  },
+  paidSettlementId: String,
   status: {
     type: String,
     enum: ["AWAITING_BUYER_DETAILS", "DUE_FROM_ORGANISER", "MARKED_PAID", "CONFIRMED_BY_BUYER", "DISPUTED", "OVERDUE"],
@@ -29,10 +38,23 @@ const eventRefundSchema = new mongoose.Schema({
   organiserReference: { type: String, trim: true, maxlength: 200 },
   bankDetailsSubmittedAt: Date,
   receipt: {
+    settlementId: String,
     publicId: { type: String, select: false },
     format: { type: String, enum: ["jpg", "jpeg", "png", "webp"] },
     uploadedAt: Date,
   },
+  supportRequest: {
+    reason: { type: String, maxlength: 1000 },
+    requestedAt: Date,
+    status: { type: String, enum: ["OPEN", "RESOLVED"] },
+  },
+  recoveryHistory: { type: [new mongoose.Schema({
+    actor: { type: mongoose.Schema.Types.ObjectId, ref: "Staff" },
+    reason: String, recoveredAt: Date,
+    bankDetails: mongoose.Schema.Types.Mixed,
+    settlement: mongoose.Schema.Types.Mixed,
+    receipt: mongoose.Schema.Types.Mixed,
+  }, { _id: false })], select: false, default: undefined },
   pendingReceiptPublicId: { type: String, select: false },
   markedPaidAt: Date,
   confirmationDueAt: Date,

@@ -46,7 +46,7 @@ const getMyTickets = async (req, res) => {
 
   try {
     const tickets = await UserEventTicket.find({ owner: userId })
-      .populate("eventId", "title images schedule location")
+      .populate("eventId", "title status images schedule location")
       .populate("ticketTypeId", "name price")
       .sort({ createdAt: -1 })
       .lean(); // .lean() for read-only performance
@@ -72,7 +72,7 @@ const getTicketDetails = async (req, res) => {
     const ticket = await UserEventTicket.findOne({ _id: id, owner: userId })
       .populate("eventId")
       .populate("ticketTypeId")
-      .populate("bookingId");
+      .populate("bookingId", "_id buyer");
 
     if (!ticket) {
       return res.status(404).json({ success: false, message: "Ticket not found" });
@@ -80,7 +80,7 @@ const getTicketDetails = async (req, res) => {
 
     res.status(200).json({
       success: true,
-      data: ticket,
+      data: { ...ticket.toObject(), bookingId: ticket.bookingId?._id || ticket.bookingId },
     });
   } catch (error) {
     console.error("[GET TICKET DETAILS ERROR]", error);
@@ -174,6 +174,8 @@ const createTicketsForBooking = async (booking, session = null) => {
 
         userEventTickets.push({
           bookingId: booking._id,
+          occurrence: booking.occurrence || 0,
+          validSchedule: event.schedule,
           eventId: booking.eventId,
           ticketTypeId: item.ticketId,
           owner: booking.buyer,
@@ -252,26 +254,9 @@ const validateTicket = async (req, res) => {
       return res.status(400).json({ success: false, message: "This event has been cancelled. Entry is not permitted." });
     }
 
-    // Atomic update: find UNREDEEMED ticket and mark as REDEEMED in one operation.
-    // This prevents race conditions — only the first scanner wins.
-    const ticket = await UserEventTicket.findOneAndUpdate(
-      {
-        ticketNumber: lookupTicketNumber,
-        status: "UNREDEEMED",
-      },
-      {
-        $set: {
-          status: "REDEEMED",
-          redeemedAt: new Date(),
-          redeemedBy: staffId,
-          "checkIn.isCheckedIn": true,
-          "checkIn.checkedInAt": new Date(),
-          "checkIn.checkedInBy": staffId,
-          "checkIn.method": qrPayload ? "QR" : "MANUAL",
-        },
-      },
-      { new: true }
-    ).populate("owner", "firstName surname email");
+    const ticket = await require("../../services/eventEntry.service").checkInEventTicket({
+      eventId: existingTicket.eventId, ticketNumber: lookupTicketNumber, actor: staffId, method: qrPayload ? "QR" : "MANUAL",
+    });
 
     if (!ticket) {
       // Check why it failed — ticket doesn't exist, or already redeemed?
@@ -326,9 +311,9 @@ const validateTicket = async (req, res) => {
     });
   } catch (error) {
     console.error("[VALIDATE TICKET ERROR]", error);
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
-      message: "Server error during ticket validation.",
+      message: error.statusCode ? error.message : "Server error during ticket validation.",
     });
   }
 };
@@ -364,7 +349,7 @@ const uncheckInTicket = async (req, res) => {
     }
 
     const existingTicket = await UserEventTicket.findOne({ ticketNumber: lookupTicketNumber })
-      .select("eventId status")
+      .select("eventId status occurrence validSchedule eventSnapshot.schedule")
       .lean();
 
     if (!existingTicket) {
@@ -380,7 +365,7 @@ const uncheckInTicket = async (req, res) => {
     }
 
     const event = await Event.findById(existingTicket.eventId).select("status").lean();
-    if (!event || event.status === "CANCELLED") {
+    if (!event || ["CANCELLED", "COMPLETED"].includes(event.status)) {
       return res.status(400).json({ success: false, message: "Check-in cannot be changed for a cancelled or unavailable event." });
     }
 
@@ -394,9 +379,11 @@ const uncheckInTicket = async (req, res) => {
     // Atomic update from REDEEMED back to UNREDEEMED
     const ticket = await require("mongoose").connection.transaction(async session => {
       const activeEvent = await Event.findOneAndUpdate(
-        { _id: existingTicket.eventId, status: { $ne: "CANCELLED" } },
+        { _id: existingTicket.eventId, status: { $nin: ["CANCELLED", "COMPLETED"] } },
         { $inc: { saleVersion: 1 } }, { new: true, session });
-      if (!activeEvent) return null;
+      if (!activeEvent || (activeEvent.occurrence || 0) !== (existingTicket.occurrence || 0)) return null;
+      require("../../services/eventEntry.service").assertEntryOpen(activeEvent);
+      require("../../services/eventOccurrence.service").assertTicketOccurrence(existingTicket, activeEvent);
       return UserEventTicket.findOneAndUpdate(
       {
         ticketNumber: lookupTicketNumber,
@@ -440,6 +427,7 @@ const uncheckInTicket = async (req, res) => {
     });
   } catch (error) {
     console.error("[UNCHECK-IN TICKET ERROR]", error);
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, message: error.message });
     res.status(500).json({
       success: false,
       message: "Failed to revert check-in. Please try again.",
@@ -508,7 +496,7 @@ const verifyTicket = async (req, res) => {
 
     const ticket = await UserEventTicket.findOne({ ticketNumber: lookupTicketNumber })
       .populate("owner", "firstName surname email phoneNumber")
-      .populate("eventId", "title coverImage startDateTime venue location")
+      .populate("eventId", "title status schedule occurrence coverImage startDateTime venue location")
       .populate("ticketTypeId", "name price");
 
     if (!ticket) {
@@ -530,6 +518,9 @@ const verifyTicket = async (req, res) => {
         guestPhone: ticket.owner?.phoneNumber,
         eventTitle: ticket.eventSnapshot?.title || ticket.eventId?.title,
         status: ticket.status,
+        eventStatus: ticket.eventId?.status,
+        eventDate: ticket.eventId?.schedule?.from,
+        ...require("../../services/eventEntry.service").ticketEntryPreview(ticket, ticket.eventId),
         isCheckedIn: ticket.checkIn?.isCheckedIn,
         checkedInAt: ticket.checkIn?.checkedInAt,
         price: ticket.ticketSnapshot?.price || ticket.ticketTypeId?.price,

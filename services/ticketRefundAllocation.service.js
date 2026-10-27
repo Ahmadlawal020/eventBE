@@ -26,4 +26,12 @@ function allocateTicketRefunds(booking, tickets, event, dueAt) {
   }
   return result;
 }
-module.exports = { allocateTicketRefunds };
+function cancellationRefunds(bookings, tickets, event, dueAt) {
+  const eligible = new Set(tickets.filter(ticket => ticket.status === "UNREDEEMED" && !ticket.refundHold &&
+    (ticket.occurrence || 0) === (event.occurrence || 0)).map(ticket => String(ticket._id)));
+  const eligibleBookings = new Set(tickets.filter(ticket => eligible.has(String(ticket._id))).map(ticket => String(ticket.bookingId)));
+  return bookings.filter(booking => booking.paymentStatus === "COMPLETED" && Number(booking.totalAmount) > 0 && eligibleBookings.has(String(booking._id)))
+    .flatMap(booking => allocateTicketRefunds(booking, tickets, event, dueAt))
+    .filter(refund => eligible.has(String(refund.ticketId)));
+}
+module.exports = { allocateTicketRefunds, cancellationRefunds };

@@ -29,7 +29,7 @@ function cancellationNotices(event, recipients) {
 async function deliverNotice(notice, token) {
   const filter = { _id: notice._id, lockToken: token };
   const user = await User.findById(notice.recipient).select("firstName email").lean();
-  if (!user) throw new Error("Notification recipient no longer exists");
+  if (!user) throw Object.assign(new Error("Notification recipient no longer exists"), { permanent: true });
   if (!notice.inAppSentAt) {
     await Notification.updateOne({ _id: notice._id }, { $setOnInsert: {
       recipient: notice.recipient, sender: notice.sender, type: notice.type,
@@ -40,10 +40,15 @@ async function deliverNotice(notice, token) {
     await Outbox.updateOne(filter, { $set: { inAppSentAt: new Date() } });
   }
   if (!notice.emailSentAt) {
-    if (!user.email) throw new Error("Notification recipient has no email address");
+    if (!user.email) throw Object.assign(new Error("Notification recipient has no email address"), { permanent: true });
     const result = await sendEmail({
       to: user.email, subject: notice.title,
-      html: generalNotificationTemplate({ recipientName: user.firstName, title: notice.title, message: notice.message }),
+      html: notice.receipt
+        ? generalNotificationTemplate({ recipientName: user.firstName, title: notice.title,
+            message: notice.message + " Date: " + (notice.receipt.eventDate ? new Date(notice.receipt.eventDate).toISOString() : "See ticket") +
+              ". Total: " + notice.receipt.currency + " " + (notice.receipt.totalAmount / 100).toFixed(2) +
+              ". Venue: " + (notice.receipt.venueName || "See ticket") })
+        : generalNotificationTemplate({ recipientName: user.firstName, title: notice.title, message: notice.message }),
       idempotencyKey: `refund-notice/${notice._id}`,
     });
     if (!result?.id) throw new Error("Email provider is not configured or did not accept the email");
@@ -58,13 +63,14 @@ async function processRefundNotices({ limit = 25, delayMs = 600 } = {}) {
     const now = new Date();
     const token = randomUUID();
     const notice = await Outbox.findOneAndUpdate({
-      completedAt: null, nextAttemptAt: { $lte: now }, lockedUntil: { $lte: now },
+      completedAt: null, failedAt: null, nextAttemptAt: { $lte: now }, lockedUntil: { $lte: now },
     }, { $set: { lockToken: token, lockedUntil: new Date(Date.now() + 5 * 60000) }, $inc: { attempts: 1 } },
     { new: true, sort: { nextAttemptAt: 1 } });
     if (!notice) break;
     try { await deliverNotice(notice, token); }
     catch (error) {
       await Outbox.updateOne({ _id: notice._id, lockToken: token }, { $set: {
+        failedAt: error.permanent || notice.attempts >= 12 ? new Date() : null,
         lastError: String(error.message).slice(0, 500), lockedUntil: new Date(0),
         nextAttemptAt: new Date(Date.now() + Math.min(86400000, 60000 * 2 ** Math.min(notice.attempts, 10))),
       } });

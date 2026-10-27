@@ -21,12 +21,12 @@ const TicketSchema = new Schema(
     },
 
     // INVENTORY
-    totalQuantity: { type: Number, required: true },
-    soldQuantity: { type: Number, default: 0 },
+    totalQuantity: { type: Number, required: true, min: 1, validate: Number.isSafeInteger },
+    soldQuantity: { type: Number, default: 0, min: 0, validate: Number.isSafeInteger },
 
     perTransactionLimit: {
-      min: { type: Number, default: 1 },
-      max: { type: Number, default: 50 },
+      min: { type: Number, default: 1, min: 1, validate: Number.isSafeInteger },
+      max: { type: Number, default: 50, min: 1, validate: Number.isSafeInteger },
     },
 
     // SALES WINDOW
@@ -50,13 +50,13 @@ const TicketSchema = new Schema(
 
     // PAID TICKET PRICING (stored in cents)
     price: {
-      amountCents: { type: Number },
+      amountCents: { type: Number, min: 0, validate: { validator: value => value == null || Number.isSafeInteger(value), message: "Ticket prices must use whole minor currency units." } },
     },
 
     // DONATION PRICING (stored in cents)
     donationRange: {
-      minCents: { type: Number },
-      maxCents: { type: Number },
+      minCents: { type: Number, min: 0, validate: { validator: value => value == null || Number.isSafeInteger(value) } },
+      maxCents: { type: Number, min: 0, validate: { validator: value => value == null || Number.isSafeInteger(value) } },
     },
 
     // GROUPING

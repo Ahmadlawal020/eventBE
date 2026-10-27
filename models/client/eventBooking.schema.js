@@ -2,6 +2,7 @@ const { Schema, model } = require("mongoose");
 
 const eventBookingSchema = new Schema(
   {
+    occurrence: { type: Number, default: 0, min: 0 },
     eventId: {
       type: Schema.Types.ObjectId,
       ref: "Event",
@@ -66,10 +67,27 @@ const eventBookingSchema = new Schema(
       enum: ["CARD", "TRANSFER", "FREE", "PAYSTACK"], // PAYSTACK kept for migration
       required: true,
     },
+    checkoutKey: String,
+    checkoutFingerprint: String,
+    checkoutPricing: Schema.Types.Mixed,
+    checkoutSubaccount: { type: String, select: false },
+    initializationLockedUntil: Date,
+    initializationToken: { type: String, select: false },
     checkoutAccessCode: {type:String, select:false},
     checkoutUrl: {type:String, select:false},
     paymentResolutionRequired: {type:Boolean, default:false},
+    paymentResolution: {
+      owner: { type: Schema.Types.ObjectId, ref: "Staff" },
+      claimedAt: Date, resolvedAt: Date, resolvedBy: { type: Schema.Types.ObjectId, ref: "Staff" },
+      settlementReference: String, notes: String,
+    },
     reservationExpiresAt: {type:Date, index:true},
+    reservationReconciliation: {
+      attempts: { type: Number, default: 0 },
+      lastCheckedAt: Date,
+      nextAttemptAt: Date,
+      lastError: { type: String, select: false },
+    },
     inventoryReserved: {type:Boolean, default:false},
     paymentReference: {
       type: String,
@@ -90,6 +108,7 @@ const eventBookingSchema = new Schema(
   { timestamps: true }
 );
 
+eventBookingSchema.index({ buyer: 1, checkoutKey: 1 }, { unique: true, partialFilterExpression: { checkoutKey: { $type: "string" } } });
 eventBookingSchema.pre("save", function () {
   if (!this.referralQualifiedAt && this.paymentStatus === "COMPLETED" &&
       (this.isNew || this.isModified("paymentStatus"))) this.referralQualifiedAt = this.referralPaymentAt || new Date();

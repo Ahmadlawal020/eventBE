@@ -1,5 +1,7 @@
 const express = require("express");
 const router = express.Router();
+const limits = require("../../middleware/eventSecurityLimits");
+router.use(limits.auth);
 const validateRequest = require("../../middleware/validateRequest");
 const {
   signupSchema,
@@ -30,10 +32,10 @@ const {
 router.post("/check", validateRequest(checkUserSchema), handleCheckUser);
 
 // 📝 Signup
-router.post("/signup", validateRequest(signupSchema), handleSignup);
+router.post("/signup", limits.login, validateRequest(signupSchema), handleSignup);
 
 // 🔑 Login
-router.post("/login", validateRequest(loginSchema), handleLogin);
+router.post("/login", limits.login, validateRequest(loginSchema), handleLogin);
 
 // 🚪 Logout
 router.post("/logout", handleLogout);
@@ -42,16 +44,16 @@ router.post("/logout", handleLogout);
 router.post("/refresh", validateRequest(refreshTokenSchema), handleRefreshToken);
 
 // 🌐 Google Auth
-router.post("/google", validateRequest(googleAuthSchema), handleGoogleAuth);
+router.post("/google", limits.login, validateRequest(googleAuthSchema), handleGoogleAuth);
 
 // 📧 Request OTP
-router.post("/otp/request", validateRequest(otpRequestSchema), handleRequestOTP);
+router.post("/otp/request", limits.otpSend, validateRequest(otpRequestSchema), handleRequestOTP);
 
 // ✅ Verify OTP
-router.post("/otp/verify", validateRequest(otpVerifySchema), handleVerifyOTP);
+router.post("/otp/verify", limits.otpVerify, validateRequest(otpVerifySchema), handleVerifyOTP);
 
 // 🏠 Password Management
-router.post("/password/request", validateRequest(passwordChangeRequestSchema), handleRequestPasswordOTP);
-router.post("/password/update", validateRequest(updatePasswordSchema), handleUpdatePassword);
+router.post("/password/request", limits.otpSend, validateRequest(passwordChangeRequestSchema), handleRequestPasswordOTP);
+router.post("/password/update", limits.otpVerify, validateRequest(updatePasswordSchema), handleUpdatePassword);
 
 module.exports = router;

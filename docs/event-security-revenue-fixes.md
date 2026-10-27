@@ -1,0 +1,11 @@
+# Event ticket privacy, finance access, transfer dates and revenue
+
+Implemented locally; no deployment or real payment occurred.
+
+- Booking verification and checkout recovery return entry credentials only for tickets still held by the purchaser. Transfer history and request detail responses omit the active number for former participants. Historical invalidated numbers remain audit records.
+- Finance dashboard queries first restrict events to the owner or a current accepted co-organiser invitation with VIEW_FINANCES/ALL_ACCESS, bound to the current host and specific Event listing. This applies to totals, trends and customer transactions. Revoked/declined/mismatched invitations do not grant access. Ticket dashboard permission checks also bind invitations to the current host.
+- Event pending transfers use current status/end, occurrence and validSchedule. They remain transferable during an active event as permitted by acceptance. Viewing event transfers does not cancel requests. Lifecycle workers and explicit actions retain terminal changes, so stale list reads cannot overwrite acceptance or rescheduling. Venue list expiry retains its existing behavior with a pending-state condition.
+- Aggregate and individual ticket dashboards use completed, non-cancelled saved bookings without unresolved payment exceptions. Gross is the saved ticket-price subtotal; net is the saved organiser payout before separately tracked cancellation refunds. Donations are included. Pending/failed/refunded/exception payments are excluded. Current tier prices/commission cannot change historical revenue. Saved line fees and proportionally allocated order-level residuals preserve minor-unit totals, including fixed/capped fees. Legacy lines fall back to their saved totalPrice or pricePerUnit times quantity.
+- Inventory counts retain reservation semantics, separate from revenue. Average ticket price uses completed-order quantities.
+
+No database migration or new index is required. Deploy the API consistently across instances. Clients must tolerate missing active ticket numbers on historical transfer responses; the mobile review screen does not depend on them. Validate provider/device behavior and expected dashboard-query load in staging before production rollout.

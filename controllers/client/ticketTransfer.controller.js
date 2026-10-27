@@ -1,3 +1,4 @@
+const mongoose = require("mongoose");
 const UserEventTicket = require("../../models/client/userEventTicket.schema");
 const EventCenterBooking = require("../../models/client/eventCenterBooking.schema");
 const TicketTransferRequest = require("../../models/client/ticketTransferRequest.schema");
@@ -27,7 +28,7 @@ async function validateTicketForTransfer(ticketId, ticketCategory, senderId) {
       _id: ticketId,
       owner: senderId,
       status: "UNREDEEMED",
-    }).populate("eventId", "title").lean();
+    }).populate("eventId", "title status schedule").lean();
 
     if (!ticket) {
       const exists = await Model.findById(ticketId).select("owner status").lean();
@@ -36,6 +37,8 @@ async function validateTicketForTransfer(ticketId, ticketCategory, senderId) {
       return { error: { status: 400, message: `Cannot transfer a ticket with status "${exists.status}".` } };
     }
 
+    try { require("../../services/eventEntry.service").assertEntryOpen(ticket.eventId); }
+    catch (error) { return { error: { status: 409, message: "Tickets cannot be transferred after this event has ended or closed." } }; }
     const eventTitle = ticket.eventSnapshot?.title || ticket.eventId?.title || "an event";
     return { ticket, eventTitle };
   } else {
@@ -124,40 +127,25 @@ const initiateTransfer = async (req, res) => {
       });
     }
 
-    // 5. Create transfer request
-    const transferRequest = await TicketTransferRequest.create({
-      sender: senderId,
-      recipient: recipient._id,
-      ticketId,
-      ticketCategory,
-      status: "PENDING",
+    const transferRequest = await mongoose.connection.transaction(async session => {
+      if (ticketCategory === "USER_EVENT") {
+        const event = await require("../../models/client/event.schema").findOneAndUpdate({ _id: ticket.eventId?._id || ticket.eventId, status: { $in: ["LISTED", "UNLISTED"] } },
+          { $inc: { saleVersion: 1 } }, { new: true, session });
+        require("../../services/eventEntry.service").assertEntryOpen(event);
+        require("../../services/eventOccurrence.service").assertTicketOccurrence(ticket, event);
+        const current = await UserEventTicket.exists({ _id: ticketId, owner: senderId, status: "UNREDEEMED", refundHold: { $ne: true }, ticketNumber: ticket.ticketNumber }).session(session);
+        if (!current) throw Object.assign(new Error("Ticket changed. Refresh before requesting a transfer."), { statusCode: 409 });
+      }
+      const [request] = await TicketTransferRequest.create([{ sender: senderId, recipient: recipient._id, ticketId, ticketCategory }], { session });
+      await require("../../services/refundNotifications.service").queueNotices([{
+        key: `ticket-transfer-request:${request._id}`, recipient: recipient._id, sender: senderId,
+        type: NOTIFICATION_TYPES.TICKET_TRANSFER_REQUEST, title: "Ticket transfer request",
+        message: `${senderName} wants to transfer a ticket for ${eventTitle} to you. Open your transfers to accept or decline.`,
+        data: { screen: "TransferReview", requestId: String(request._id) },
+      }], session);
+      return request;
     });
-
-    // 6. Notify recipient via Notification Engine
-    const recipientName = `${recipient.firstName || ""} ${recipient.surname || ""}`.trim();
-    await dispatchNotification({
-      recipient: recipient._id,
-      sender: senderId,
-      type: NOTIFICATION_TYPES.TICKET_TRANSFER_REQUEST,
-      title: "Ticket Transfer Request 🎟️",
-      message: `${senderName} wants to transfer a ticket for ${eventTitle} to you. Tap to review.`,
-      referenceId: transferRequest._id,
-      referenceType: "TicketTransferRequest",
-      data: {
-        screen: "TransferReview",
-        requestId: String(transferRequest._id),
-      },
-      email: {
-        subject: `Ticket Transfer from ${senderName} - Munasaba`,
-        html: emailTemplates.ticketTransferTemplate({
-          recipientName,
-          title: "Ticket Transfer Request",
-          message: `${senderName} wants to transfer a ticket for ${eventTitle} to you.`,
-          senderName,
-          eventTitle,
-        }),
-      },
-    });
+    const recipientName = `${recipient.firstName || ""} ${recipient.surname || ""}`.trim() || recipient.email;
 
     res.status(201).json({
       success: true,
@@ -169,7 +157,7 @@ const initiateTransfer = async (req, res) => {
     });
   } catch (error) {
     console.error("[INITIATE TRANSFER ERROR]", error);
-    res.status(500).json({ success: false, message: "Server error initiating transfer." });
+    res.status(error.statusCode || (error.code === 11000 ? 409 : 500)).json({ success: false, message: error.statusCode ? error.message : error.code === 11000 ? "A transfer request is already pending for this ticket." : "Server error initiating transfer." });
   }
 };
 
@@ -182,108 +170,39 @@ const acceptTransfer = async (req, res) => {
   const { requestId } = req.params;
 
   try {
-    // 1. Find and atomically lock the request
-    const request = await TicketTransferRequest.findOneAndUpdate(
-      { _id: requestId, recipient: userId, status: "PENDING" },
-      { status: "ACCEPTED" },
-      { new: true }
-    );
-
-    if (!request) {
-      const exists = await TicketTransferRequest.findById(requestId)
-        .select("recipient status")
-        .lean();
-      if (!exists) return res.status(404).json({ success: false, message: "Transfer request not found." });
-      if (String(exists.recipient) !== userId) return res.status(403).json({ success: false, message: "This request is not for you." });
-      return res.status(400).json({ success: false, message: `Request is no longer pending (status: ${exists.status}).` });
-    }
-
-    // 2. Validate ticket still transferable
-    const { Model, ownerField, prefix, qrType } = getModelInfo(request.ticketCategory);
-    const statusFilter = request.ticketCategory === "USER_EVENT"
-      ? { status: "UNREDEEMED" }
-      : { status: { $in: ["ACTIVE", "CONFIRMED"] } };
-
-    const ticket = await Model.findOne({
-      _id: request.ticketId,
-      [ownerField]: request.sender.toString(),
-      ...statusFilter,
-    }).lean();
-
-    if (!ticket) {
-      // Ticket no longer valid — revert request
-      await TicketTransferRequest.findByIdAndUpdate(requestId, { status: "CANCELLED" });
-      return res.status(400).json({
-        success: false,
-        message: "Ticket is no longer available for transfer. It may have been redeemed or cancelled.",
-      });
-    }
-
-    // 3. Generate new ticket number and QR
-    const newTicketNumber = generateTicketNumber(prefix);
-    const entityId = request.ticketCategory === "USER_EVENT"
-      ? ticket.eventId
-      : ticket.eventCenter;
-    const newQrPayload = generateQRPayload(newTicketNumber, entityId, qrType);
-
-    // 4. Build update fields
-    const updateFields = {
-      [ownerField]: userId,
-      ticketNumber: newTicketNumber,
-      qrPayload: newQrPayload,
-      $push: {
-        transferHistory: {
-          fromUser: request.sender,
-          toUser: userId,
-          transferredAt: new Date(),
-          previousTicketNumber: ticket.ticketNumber,
-        },
-      },
-    };
-
-    // Update guestDetails for venue bookings
-    if (request.ticketCategory !== "USER_EVENT") {
-      const recipient = await User.findById(userId).select("firstName surname email phoneNumber").lean();
-      if (recipient) {
-        updateFields["guestDetails.fullName"] = `${recipient.firstName} ${recipient.surname}`.trim();
-        updateFields["guestDetails.email"] = recipient.email;
-        if (recipient.phoneNumber) {
-          updateFields["guestDetails.phoneNumber"] = recipient.phoneNumber;
-        }
+    const outcome = await mongoose.connection.transaction(async session => {
+      const request = await TicketTransferRequest.findOneAndUpdate({ _id: requestId, recipient: userId, status: "PENDING" },
+        { $set: { status: "ACCEPTED" } }, { new: true, session });
+      if (!request) throw Object.assign(new Error("Transfer is unavailable or no longer pending."), { statusCode: 409 });
+      const { Model, ownerField, prefix, qrType } = getModelInfo(request.ticketCategory);
+      const statusFilter = request.ticketCategory === "USER_EVENT" ? { status: "UNREDEEMED", refundHold: { $ne: true } } : { status: { $in: ["ACTIVE", "CONFIRMED"] } };
+      const ticket = await Model.findOne({ _id: request.ticketId, [ownerField]: request.sender, ...statusFilter }).session(session).lean();
+      if (!ticket) throw Object.assign(new Error("Ticket was used, cancelled or transferred. Refresh your transfers."), { statusCode: 409 });
+      const entityId = request.ticketCategory === "USER_EVENT" ? ticket.eventId : ticket.eventCenter;
+      if (request.ticketCategory === "USER_EVENT") {
+        const event = await require("../../models/client/event.schema").findOneAndUpdate({ _id: entityId, status: { $in: ["LISTED", "UNLISTED"] } },
+          { $inc: { saleVersion: 1 } }, { new: true, session });
+        require("../../services/eventEntry.service").assertEntryOpen(event);
+        require("../../services/eventOccurrence.service").assertTicketOccurrence(ticket, event);
       }
-    }
-
-    // 5. Atomic ticket update
-    const updatedTicket = await Model.findOneAndUpdate(
-      { _id: request.ticketId, [ownerField]: request.sender.toString(), ...statusFilter },
-      updateFields,
-      { new: true }
-    );
-
-    if (!updatedTicket) {
-      await TicketTransferRequest.findByIdAndUpdate(requestId, { status: "CANCELLED" });
-      return res.status(409).json({
-        success: false,
-        message: "Ticket state changed during acceptance. Please try again.",
-      });
-    }
-
-    // 6. Notify sender
-    const recipient = await User.findById(userId).select("firstName surname").lean();
-    const recipientName = `${recipient?.firstName || ""} ${recipient?.surname || ""}`.trim();
-    await dispatchNotification({
-      recipient: request.sender,
-      sender: userId,
-      type: NOTIFICATION_TYPES.TICKET_TRANSFER_ACCEPTED,
-      title: "Transfer Accepted ✅",
-      message: `${recipientName} accepted your ticket transfer. The ticket has been transferred.`,
-      referenceId: request._id,
-      referenceType: "TicketTransferRequest",
-      data: {
-        screen: "TransferDetails",
-        requestId: String(request._id),
-      },
+      const newTicketNumber = generateTicketNumber(prefix);
+      const changes = { [ownerField]: userId, ticketNumber: newTicketNumber, qrPayload: generateQRPayload(newTicketNumber, entityId, qrType) };
+      if (request.ticketCategory !== "USER_EVENT") {
+        const recipient = await User.findById(userId).select("firstName surname email phoneNumber").session(session).lean();
+        if (recipient) Object.assign(changes, { "guestDetails.fullName": `${recipient.firstName} ${recipient.surname}`.trim(), "guestDetails.email": recipient.email, ...(recipient.phoneNumber ? { "guestDetails.phoneNumber": recipient.phoneNumber } : {}) });
+      }
+      const updatedTicket = await Model.findOneAndUpdate({ _id: request.ticketId, ticketNumber: ticket.ticketNumber, [ownerField]: request.sender, ...statusFilter },
+        { $set: changes, $push: { transferHistory: { fromUser: request.sender, toUser: userId, transferredAt: new Date(), previousTicketNumber: ticket.ticketNumber } } }, { new: true, session });
+      if (!updatedTicket) throw Object.assign(new Error("Ticket changed. Refresh before accepting again."), { statusCode: 409 });
+      await require("../../services/refundNotifications.service").queueNotices([{
+        key: `ticket-transfer-accepted:${request._id}`, recipient: request.sender, sender: userId,
+        type: NOTIFICATION_TYPES.TICKET_TRANSFER_ACCEPTED, title: "Ticket transfer accepted",
+        message: "The recipient accepted your ticket transfer. Ownership and the ticket code have been updated.",
+        data: { screen: "TransferDetails", requestId: String(request._id) },
+      }], session);
+      return { request, newTicketNumber, updatedTicket };
     });
+    const { request, newTicketNumber, updatedTicket } = outcome;
 
     res.status(200).json({
       success: true,
@@ -295,7 +214,7 @@ const acceptTransfer = async (req, res) => {
     });
   } catch (error) {
     console.error("[ACCEPT TRANSFER ERROR]", error);
-    res.status(500).json({ success: false, message: "Server error accepting transfer." });
+    res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : "Server error accepting transfer." });
   }
 };
 
@@ -416,11 +335,23 @@ const getPendingTransfers = async (req, res) => {
 
       if (request.ticketCategory === "USER_EVENT") {
         ticket = await UserEventTicket.findById(request.ticketId)
-          .select("eventSnapshot ticketSnapshot ticketName status")
+          .select("eventSnapshot ticketSnapshot ticketName status eventId occurrence validSchedule owner refundHold")
+          .populate("eventId", "status schedule occurrence")
           .lean();
         eventTitle = ticket?.eventSnapshot?.title || "Event";
         ticketName = ticket?.ticketSnapshot?.name || ticket?.ticketName || "Ticket";
-        schedule = ticket?.eventSnapshot?.schedule;
+        // A list read must not cancel a request using a stale snapshot. Admission
+        // and transfer acceptance share the current occurrence/end-time rules.
+        if (!ticket || ticket.status !== "UNREDEEMED" || ticket.refundHold ||
+            String(ticket.owner) !== String(request.sender?._id || request.sender)) continue;
+        try {
+          require("../../services/eventEntry.service").assertEntryOpen(ticket.eventId);
+          require("../../services/eventOccurrence.service").assertTicketOccurrence(ticket, ticket.eventId);
+        } catch { continue; }
+        schedule = {
+          startDate: ticket.validSchedule?.from || ticket.eventId?.schedule?.from || ticket.eventSnapshot?.schedule?.startDate,
+          endDate: ticket.validSchedule?.to || ticket.eventId?.schedule?.to || ticket.eventSnapshot?.schedule?.endDate,
+        };
       } else {
         ticket = await EventCenterBooking.findById(request.ticketId)
           .select("eventCenter selectedDates status")
@@ -434,7 +365,7 @@ const getPendingTransfers = async (req, res) => {
       }
 
       // Check if event has started — treat as expired
-      if (schedule?.startDate && new Date(schedule.startDate) < new Date()) {
+      if (request.ticketCategory !== "USER_EVENT" && schedule?.startDate && new Date(schedule.startDate) < new Date()) {
         expiredIds.push(request._id);
         continue;
       }
@@ -456,7 +387,7 @@ const getPendingTransfers = async (req, res) => {
     // Mark expired requests
     if (expiredIds.length > 0) {
       await TicketTransferRequest.updateMany(
-        { _id: { $in: expiredIds } },
+        { _id: { $in: expiredIds }, status: "PENDING" },
         { status: "CANCELLED" }
       );
     }
@@ -548,7 +479,7 @@ const getTransferHistory = async (req, res) => {
         { "transferHistory.toUser": userId },
       ],
     })
-      .select("transferHistory ticketNumber")
+      .select("transferHistory ticketNumber " + ownerField)
       .populate("transferHistory.fromUser", "firstName surname email")
       .populate("transferHistory.toUser", "firstName surname email")
       .lean();
@@ -560,7 +491,7 @@ const getTransferHistory = async (req, res) => {
     res.status(200).json({
       success: true,
       data: {
-        currentTicketNumber: ticket.ticketNumber,
+        ...(String(ticket[ownerField]) === String(userId) ? { currentTicketNumber: ticket.ticketNumber } : {}),
         transfers: ticket.transferHistory || [],
       },
     });
@@ -599,21 +530,24 @@ const getTransferRequestDetails = async (req, res) => {
 
     if (request.ticketCategory === "USER_EVENT") {
       ticket = await UserEventTicket.findById(request.ticketId)
-        .select("eventSnapshot ticketSnapshot ticketName ticketNumber status")
+        .select("eventSnapshot ticketSnapshot ticketName ticketNumber status owner validSchedule")
         .lean();
       eventTitle = ticket?.eventSnapshot?.title || "Event";
       ticketName = ticket?.ticketSnapshot?.name || ticket?.ticketName || "Ticket";
       ticketDetails = {
-        schedule: ticket?.eventSnapshot?.schedule,
+        schedule: {
+          startDate: ticket?.validSchedule?.from || ticket?.eventSnapshot?.schedule?.startDate,
+          endDate: ticket?.validSchedule?.to || ticket?.eventSnapshot?.schedule?.endDate,
+        },
         location: ticket?.eventSnapshot?.location,
         coverImage: ticket?.eventSnapshot?.coverImage,
         price: ticket?.ticketSnapshot?.price,
-        ticketNumber: ticket?.ticketNumber,
+        ...(String(ticket?.owner) === String(userId) ? { ticketNumber: ticket.ticketNumber } : {}),
         status: ticket?.status,
       };
     } else {
       ticket = await EventCenterBooking.findById(request.ticketId)
-        .select("eventCenter selectedDates ticketNumber status totalPrice")
+        .select("eventCenter selectedDates ticketNumber status totalPrice buyer")
         .populate("eventCenter", "venueName images location")
         .lean();
       eventTitle = ticket?.eventCenter?.venueName || "Venue";
@@ -625,7 +559,7 @@ const getTransferRequestDetails = async (req, res) => {
         location: ticket?.eventCenter?.location,
         coverImage: ticket?.eventCenter?.images?.[0]?.url,
         price: ticket?.totalPrice,
-        ticketNumber: ticket?.ticketNumber,
+        ...(String(ticket?.buyer) === String(userId) ? { ticketNumber: ticket.ticketNumber } : {}),
         status: ticket?.status,
       };
     }

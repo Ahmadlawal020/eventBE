@@ -324,30 +324,18 @@ exports.staffTicketCheckIn = async (req, res) => {
       return res.status(access.status).json({ success: false, message: access.error });
     }
 
-    if (ticket.status === "CANCELLED") {
-      return res.status(400).json({ success: false, message: "Cannot check in a cancelled ticket." });
+    if (!access.invitation.permissions?.some(permission => ["SCAN_TICKET", "ALL_ACCESS"].includes(permission))) {
+      return res.status(403).json({ success: false, message: "Scan permission is required to check in tickets." });
     }
-
-    if (ticket.status === "REDEEMED") {
-      return res.status(400).json({ success: false, message: "Ticket is already checked in." });
-    }
-
-    ticket.status = "REDEEMED";
-    ticket.redeemedAt = new Date();
-    ticket.redeemedBy = staffId;
-    ticket.checkIn = {
-      isCheckedIn: true,
-      checkedInAt: new Date(),
-      checkedInBy: staffId,
-      method: "MANUAL",
-    };
-
-    await ticket.save();
+    const checkedIn = await require("../../services/eventEntry.service").checkInEventTicket({
+      eventId: ticket.eventId, ticketId: ticket._id, ticketNumber: ticket.ticketNumber, actor: staffId,
+    });
+    if (!checkedIn) return res.status(409).json({ success: false, message: "This ticket was already checked in, cancelled or transferred. Refresh before trying again." });
 
     res.status(200).json({
       success: true,
       message: "Guest successfully checked in.",
-      data: ticket,
+      data: checkedIn,
     });
 
     // Log activity (fire-and-forget)
@@ -364,7 +352,7 @@ exports.staffTicketCheckIn = async (req, res) => {
     }
   } catch (error) {
     console.error("[STAFF TICKET CHECK-IN ERROR]", error);
-    res.status(500).json({ success: false, message: "Server error." });
+    res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : "Server error." });
   }
 };
 
@@ -394,6 +382,7 @@ exports.staffCancelTicket = async (req, res) => {
       return res.status(access.status).json({ success: false, message: access.error });
     }
 
+    if (!access.invitation.permissions?.includes("ALL_ACCESS")) return res.status(403).json({ success: false, message: "Full ticket-management access is required to cancel an issued ticket." });
     if (ticket.status === "CANCELLED") {
       return res.status(400).json({ success: false, message: "Ticket is already cancelled." });
     }
@@ -402,14 +391,13 @@ exports.staffCancelTicket = async (req, res) => {
       return res.status(400).json({ success: false, message: "Cannot cancel a ticket that has been checked in." });
     }
 
-    ticket.status = "CANCELLED";
-    await ticket.save();
-
-    res.status(200).json({
-      success: true,
-      message: "Ticket successfully cancelled.",
-      data: ticket,
+    const outcome = await require("../../services/ticketVoidReview.service").requestVoid(ticket._id, staffId);
+    res.status(outcome.reviewRequired ? 202 : 200).json({
+      success: true, reviewRequired: outcome.reviewRequired,
+      message: outcome.reviewRequired ? "Refund review requested. The paid ticket remains valid until finance approves the void." : "Ticket successfully cancelled.",
+      data: outcome.ticket,
     });
+    if (outcome.reviewRequired) return;
 
     // Log activity (fire-and-forget)
     const cancelEventDoc = await Event.findById(ticket.eventId).select("createdBy").lean();
@@ -425,6 +413,7 @@ exports.staffCancelTicket = async (req, res) => {
     }
   } catch (error) {
     console.error("[STAFF CANCEL TICKET ERROR]", error);
+    if (error.statusCode) return res.status(error.statusCode).json({ success: false, message: error.message });
     res.status(500).json({ success: false, message: "Server error." });
   }
 };

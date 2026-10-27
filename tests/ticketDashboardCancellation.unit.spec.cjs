@@ -18,7 +18,7 @@ for (const owner of [true, false]) {
     await getEventAttendees({ params: { eventId: "event" }, query: { status: "BOUGHT", tier: "VIP" }, user: { id: owner ? "owner" : "staff" } }, res);
     assert.equal(res.code, 200);
     assert.equal(filter.ticketName, "VIP");
-    assert.deepEqual(filter.status.$in, ["UNREDEEMED", "REDEEMED", "CANCELLED"]);
+    assert.deepEqual(filter.status.$in, ["UNREDEEMED", "REDEEMED", "CANCELLED", "EXPIRED"]);
     assert.equal(res.body.event.status, "CANCELLED");
     assert.equal(res.body.event.canManageRefunds, owner);
     if (owner) {

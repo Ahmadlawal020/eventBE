@@ -14,13 +14,14 @@ mongoose.connection.once("open", () => {
   require("./jobs/notificationTrigger.job");
   require("./jobs/reviewBookingExpiry.job");
   require("./jobs/eventCompletion.job");
+  require("./jobs/eventMediaCleanup.job");
+  require("./jobs/eventAlerts.job");
   require("./jobs/paymentReservationExpiry.job");
   require("./jobs/venuePayout.job");
   require("./jobs/venueHoldExpiry.job");
   require("./jobs/venueReminder.job");
   require("./jobs/referralReconciliation.job");
-  require("./jobs/eventRefundOverdue.job");
-  require("./jobs/refundNotifications.job");
+  require("./jobs/refundOperations.job");
   server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });

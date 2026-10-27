@@ -529,6 +529,7 @@ const updateUserStatus = async (req, res) => {
 
     const previousValue = { isActive: user.isActive };
     user.isActive = isActive;
+    if (!isActive) { user.refreshToken = ""; user.$inc("sessionVersion", 1); }
     await user.save();
 
     await recordAdminAction({

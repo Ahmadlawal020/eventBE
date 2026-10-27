@@ -2,6 +2,7 @@ const { Schema, model } = require("mongoose");
 
 const userEventTicketSchema = new Schema(
   {
+    occurrence: { type: Number, default: 0, min: 0 },
     bookingId: {
       type: Schema.Types.ObjectId,
       ref: "EventBooking",
@@ -34,11 +35,14 @@ const userEventTicketSchema = new Schema(
     qrPayload: { type: String },
     status: {
       type: String,
-      enum: ["UNREDEEMED", "REDEEMED", "CANCELLED"],
+      enum: ["UNREDEEMED", "REDEEMED", "CANCELLED", "EXPIRED"],
       default: "UNREDEEMED",
     },
-    invalidatedReason: { type: String, enum: ["EVENT_CANCELLED", null], default: null },
+    invalidatedReason: { type: String, enum: ["EVENT_CANCELLED", "EVENT_COMPLETED", "STAFF_CANCELLED", null], default: null },
     invalidatedAt: Date,
+    refundHold: { type: Boolean, default: false },
+    validSchedule: { from: Date, to: Date },
+    occurrenceHistory: [{ occurrence: Number, schedule: { from: Date, to: Date }, carriedAt: Date }],
     redeemedAt: { type: Date },
     redeemedBy: { type: Schema.Types.ObjectId, ref: "User" },
     // CHECK-IN TRACKING
@@ -131,5 +135,6 @@ userEventTicketSchema.index({ owner: 1, eventId: 1 });
 
 // Index for booking-scoped queries (find all tickets from a booking)
 userEventTicketSchema.index({ bookingId: 1 });
+userEventTicketSchema.index({ eventId: 1, ticketTypeId: 1, owner: 1, _id: 1 });
 
 module.exports = model("UserEventTicket", userEventTicketSchema);

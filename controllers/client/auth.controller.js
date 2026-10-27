@@ -10,13 +10,13 @@ const generateTokens = (user) => {
   const { _id: id, email, roles } = user;
 
   const accessToken = jwt.sign(
-    { UserInfo: { id, email, roles } },
+    { UserInfo: { id, email, roles, sessionVersion: user.sessionVersion || 0 } },
     process.env.ACCESS_TOKEN_SECRET,
     { expiresIn: "15m" }
   );
 
   const refreshToken = jwt.sign(
-    { id, email },
+    { id, email, sessionVersion: user.sessionVersion || 0 },
     process.env.REFRESH_TOKEN_SECRET,
     { expiresIn: "7d" }
   );
@@ -170,6 +170,8 @@ const handleLogin = asyncHandler(async (req, res) => {
       .json({ success: false, message: "Invalid email or password" });
   }
 
+  if (foundUser.isActive === false) return res.status(403).json({ success: false, message: "Account is suspended." });
+
   // Handle Google users who try to login via password
   if (foundUser.authProvider === 'google' && !foundUser.password) {
     return res
@@ -241,14 +243,14 @@ const handleRefreshToken = asyncHandler(async (req, res) => {
   // Validation handled by middleware
 
   const foundUser = await User.findOne({ refreshToken }).exec();
-  if (!foundUser)
+  if (!foundUser || foundUser.isActive === false)
     return res.status(403).json({ success: false, message: "Forbidden" });
 
   jwt.verify(
     refreshToken,
     process.env.REFRESH_TOKEN_SECRET,
     async (err, decoded) => {
-      if (err || foundUser.email !== decoded.email)
+      if (err || foundUser.email !== decoded.email || (decoded.sessionVersion || 0) !== (foundUser.sessionVersion || 0))
         return res.status(403).json({ success: false, message: "Forbidden" });
 
       const { accessToken, refreshToken: newRefresh } =
@@ -350,6 +352,7 @@ const handleGoogleAuth = asyncHandler(async (req, res) => {
   }).exec();
 
   if (user) {
+    if (user.isActive === false) return res.status(403).json({ success: false, message: "Account is suspended." });
     // ✅ EXISTING USER: Generate tokens and log them in
 
     // Update googleId if missing/changed (merging accounts if email matches)
@@ -437,7 +440,7 @@ const handleRequestOTP = asyncHandler(async (req, res) => {
 const handleVerifyOTP = asyncHandler(async (req, res) => {
   const { identifier, code, type } = req.body;
 
-  const result = await otpService.verifyOTP(identifier, code, type);
+  const result = await otpService.verifyOTP(identifier, code, type, { consume: ["email", "phone"].includes(type) });
 
   if (!result.success) {
     return res.status(400).json({
@@ -472,7 +475,7 @@ const handleVerifyOTP = asyncHandler(async (req, res) => {
   res.json({
     success: true,
     message: "Verification successful",
-    user: updatedUser,
+    user: updatedUser ? { id: updatedUser._id, isEmailVerified: updatedUser.isEmailVerified, isPhoneVerified: updatedUser.isPhoneVerified } : null,
   });
 });
 
@@ -495,22 +498,16 @@ const handleUpdatePassword = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: "All fields required" });
   }
 
-  const result = await otpService.verifyOTP(email, code, "password_change");
-  if (!result.success) {
-    return res.status(400).json({ success: false, message: result.message });
-  }
-
   const hashedPassword = await bcrypt.hash(newPassword, 10);
-
-  const user = await User.findOneAndUpdate(
-    { email },
-    { password: hashedPassword },
-    { new: true }
-  ).exec();
-
-  if (!user) {
-    return res.status(404).json({ success: false, message: "User not found" });
-  }
+  const outcome = await require("mongoose").connection.transaction(async session => {
+    const result = await otpService.verifyOTP(email, code, "password_change", { consume: true, session });
+    if (!result.success) return result;
+    const user = await User.findOneAndUpdate({ email }, {
+      $set: { password: hashedPassword, refreshToken: "" }, $inc: { sessionVersion: 1 },
+    }, { new: true, session });
+    return user ? { success: true } : { success: false, message: "Could not reset this account." };
+  });
+  if (!outcome.success) return res.status(400).json(outcome);
 
   res.json({
     success: true,

@@ -83,7 +83,7 @@ const verifyTicketStaff = async (req, res) => {
     if (listingType === "event") {
       const ticket = await UserEventTicket.findOne({ ticketNumber: lookupTicketNumber })
         .populate("owner", "firstName surname email phoneNumber")
-        .populate("eventId", "title");
+        .populate("eventId", "title status schedule occurrence");
 
       if (!ticket) {
         return res.status(404).json({ success: false, message: "Ticket not found." });
@@ -104,8 +104,10 @@ const verifyTicketStaff = async (req, res) => {
           guestPhone: ticket.owner?.phoneNumber,
           eventTitle: ticket.eventSnapshot?.title || ticket.eventId?.title,
           price: ticket.ticketSnapshot?.price,
-          eventDate: ticket.eventSnapshot?.schedule?.from,
+          eventDate: ticket.validSchedule?.from || ticket.eventSnapshot?.schedule?.startDate,
           status: ticket.status,
+          eventStatus: ticket.eventId?.status,
+          ...require("../../services/eventEntry.service").ticketEntryPreview(ticket, ticket.eventId),
           isCheckedIn: ticket.checkIn?.isCheckedIn,
           checkedInAt: ticket.checkIn?.checkedInAt,
           type: "EVENT"
@@ -192,25 +194,9 @@ const validateTicketStaff = async (req, res) => {
     }
 
     if (listingType === "event") {
-      const ticket = await UserEventTicket.findOneAndUpdate(
-        {
-          ticketNumber: lookupTicketNumber,
-          eventId: listingId,
-          status: "UNREDEEMED",
-        },
-        {
-          $set: {
-            status: "REDEEMED",
-            redeemedAt: new Date(),
-            redeemedBy: staffId,
-            "checkIn.isCheckedIn": true,
-            "checkIn.checkedInAt": new Date(),
-            "checkIn.checkedInBy": staffId,
-            "checkIn.method": qrPayload ? "QR" : "MANUAL",
-          },
-        },
-        { new: true }
-      ).populate("owner", "firstName surname email");
+      const ticket = await require("../../services/eventEntry.service").checkInEventTicket({
+        eventId: listingId, ticketNumber: lookupTicketNumber, actor: staffId, method: qrPayload ? "QR" : "MANUAL",
+      });
 
       if (!ticket) {
         const existingTicket = await UserEventTicket.findOne({
@@ -252,7 +238,7 @@ const validateTicketStaff = async (req, res) => {
           ownerName: ticket.owner ? `${ticket.owner.firstName} ${ticket.owner.surname}` : "Guest",
           eventTitle: ticket.eventSnapshot?.title,
           price: ticket.ticketSnapshot?.price,
-          eventDate: ticket.eventSnapshot?.schedule?.from,
+          eventDate: ticket.validSchedule?.from || ticket.eventSnapshot?.schedule?.startDate,
           isCheckedIn: true,
           checkedInAt: ticket.checkIn?.checkedInAt,
         },

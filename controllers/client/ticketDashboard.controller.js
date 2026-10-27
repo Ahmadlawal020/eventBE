@@ -39,8 +39,8 @@ const getOrganiserTicketStats = async (req, res) => {
     coOrganiserInvites.forEach(invite => {
       if (invite.listings) {
         invite.listings.forEach(item => {
-          if (item.listingType === "Event" && item.listingId) {
-            permissionsMap[item.listingId.toString()] = invite.permissions || [];
+          if (item.listingType === "Event" && item.listingId && eventsRaw.some(event => String(event._id) === String(item.listingId) && String(event.createdBy) === String(invite.host))) {
+            permissionsMap[item.listingId.toString()] = [...(permissionsMap[item.listingId.toString()] || []), ...(invite.permissions || [])];
           }
         });
       }
@@ -48,8 +48,8 @@ const getOrganiserTicketStats = async (req, res) => {
     staffInvites.forEach(invite => {
       if (invite.listings) {
         invite.listings.forEach(item => {
-          if (item.listingType === "Event" && item.listingId) {
-            permissionsMap[item.listingId.toString()] = invite.permissions || [];
+          if (item.listingType === "Event" && item.listingId && eventsRaw.some(event => String(event._id) === String(item.listingId) && String(event.createdBy) === String(invite.organiser))) {
+            permissionsMap[item.listingId.toString()] = [...(permissionsMap[item.listingId.toString()] || []), ...(invite.permissions || [])];
           }
         });
       }
@@ -100,54 +100,21 @@ const getOrganiserTicketStats = async (req, res) => {
     // 2. Aggregate Inventory, Gross Revenue, and Net Revenue
     const inventoryStats = await Ticket.aggregate([
       { $match: { eventId: { $in: eventIds } } },
-      {
-        $group: {
-          _id: "$eventId",
-          totalQuantity: { $sum: "$totalQuantity" },
-          soldQuantity: { $sum: "$soldQuantity" },
-          grossRevenueCents: {
-            $sum: {
-              $cond: [
-                { $eq: ["$ticketType", "PAID"] },
-                { $multiply: ["$soldQuantity", { $ifNull: ["$price.amountCents", 0] }] },
-                0,
-              ],
-            },
-          },
-          netRevenueCents: {
-            $sum: {
-              $cond: [
-                { $eq: ["$ticketType", "PAID"] },
-                {
-                  $let: {
-                    vars: {
-                      gross: { $multiply: ["$soldQuantity", { $ifNull: ["$price.amountCents", 0] }] },
-                      commPerc: { $divide: [{ $ifNull: ["$commission.percentage", 0] }, 100] },
-                    },
-                    in: {
-                      $cond: [
-                        { $eq: ["$commission.type", "DEDUCT_FROM_PRICE"] },
-                        { $subtract: ["$$gross", { $multiply: ["$$gross", "$$commPerc"] }] },
-                        "$$gross", // For ADD_ON, organiser gets the full price
-                      ],
-                    },
-                  },
-                },
-                0,
-              ],
-            },
-          },
-        },
-      },
+      { $group: { _id: "$eventId", totalQuantity: { $sum: "$totalQuantity" }, soldQuantity: { $sum: "$soldQuantity" } } },
     ]);
 
+    const revenueByEvent = await require("../../services/eventRevenue.service").getEventRevenue(financeEventIds);
     const inventoryMap = {};
     let aggTotalCapacity = 0;
     let aggTotalSold = 0;
     let aggGrossRevenueCents = 0;
     let aggNetRevenueCents = 0;
+    let paidQuantity = 0;
 
     inventoryStats.forEach((stat) => {
+      const revenue = revenueByEvent.get(String(stat._id));
+      stat.grossRevenueCents = revenue?.grossRevenueCents || 0;
+      stat.netRevenueCents = revenue?.netRevenueCents || 0;
       inventoryMap[stat._id.toString()] = stat;
       
       const eventWithPerm = events.find(e => e._id.toString() === stat._id.toString());
@@ -157,6 +124,7 @@ const getOrganiserTicketStats = async (req, res) => {
       aggTotalSold += stat.soldQuantity;
       
       if (hasFinance) {
+        paidQuantity += revenue?.paidQuantity || 0;
         aggGrossRevenueCents += stat.grossRevenueCents;
         aggNetRevenueCents += stat.netRevenueCents;
       } else {
@@ -309,7 +277,7 @@ const getOrganiserTicketStats = async (req, res) => {
     });
 
     // 9. Final Response
-    const avgTicketPrice = financeEventIds.length > 0 && aggTotalSold > 0 ? (aggGrossRevenueCents / aggTotalSold / 100).toFixed(2) : 0;
+    const avgTicketPrice = financeEventIds.length > 0 && paidQuantity > 0 ? (aggGrossRevenueCents / paidQuantity / 100).toFixed(2) : 0;
     const turnOutRate = aggTotalSold > 0 ? ((aggRedeemed / aggTotalSold) * 100).toFixed(1) + "%" : "0%";
 
     res.status(200).json({
@@ -370,8 +338,8 @@ const getSingleEventTicketStats = async (req, res) => {
     let hasFinancePerm = true;
     if (event.createdBy && event.createdBy.toString() !== organiserId.toString()) {
       const [coOrganiserInvite, staffInvite] = await Promise.all([
-        CoOrganiserInvitation.findOne({ coOrganiser: organiserId, status: "ACCEPTED", "listings.listingId": eventId }).lean(),
-        StaffInvitation.findOne({ staff: organiserId, status: "ACCEPTED", "listings.listingId": eventId }).lean(),
+        CoOrganiserInvitation.findOne({ coOrganiser: organiserId, host: event.createdBy, status: "ACCEPTED", listings: { $elemMatch: { listingId: eventId, listingType: "Event" } } }).lean(),
+        StaffInvitation.findOne({ staff: organiserId, organiser: event.createdBy, status: "ACCEPTED", listings: { $elemMatch: { listingId: eventId, listingType: "Event" } } }).lean(),
       ]);
 
       const userPerms = (coOrganiserInvite?.permissions || []).concat(staffInvite?.permissions || []);
@@ -381,48 +349,13 @@ const getSingleEventTicketStats = async (req, res) => {
     // 2. Aggregate Inventory and Revenue for this event
     const inventoryStats = await Ticket.aggregate([
       { $match: { eventId: event._id } },
-      {
-        $group: {
-          _id: "$eventId",
-          totalQuantity: { $sum: "$totalQuantity" },
-          soldQuantity: { $sum: "$soldQuantity" },
-          grossRevenueCents: {
-            $sum: {
-              $cond: [
-                { $eq: ["$ticketType", "PAID"] },
-                { $multiply: ["$soldQuantity", { $ifNull: ["$price.amountCents", 0] }] },
-                0,
-              ],
-            },
-          },
-          netRevenueCents: {
-            $sum: {
-              $cond: [
-                { $eq: ["$ticketType", "PAID"] },
-                {
-                  $let: {
-                    vars: {
-                      gross: { $multiply: ["$soldQuantity", { $ifNull: ["$price.amountCents", 0] }] },
-                      commPerc: { $divide: [{ $ifNull: ["$commission.percentage", 0] }, 100] },
-                    },
-                    in: {
-                      $cond: [
-                        { $eq: ["$commission.type", "DEDUCT_FROM_PRICE"] },
-                        { $subtract: ["$$gross", { $multiply: ["$$gross", "$$commPerc"] }] },
-                        "$$gross",
-                      ],
-                    },
-                  },
-                },
-                0,
-              ],
-            },
-          },
-        },
-      },
+      { $group: { _id: "$eventId", totalQuantity: { $sum: "$totalQuantity" }, soldQuantity: { $sum: "$soldQuantity" } } },
     ]);
 
-    const inv = inventoryStats[0] || { totalQuantity: 0, soldQuantity: 0, grossRevenueCents: 0, netRevenueCents: 0 };
+    const revenues = await require("../../services/eventRevenue.service").getEventRevenue(hasFinancePerm ? [event._id] : []);
+    const revenue = revenues.get(String(event._id));
+    const inv = { ...(inventoryStats[0] || { totalQuantity: 0, soldQuantity: 0 }),
+      grossRevenueCents: revenue?.grossRevenueCents || 0, netRevenueCents: revenue?.netRevenueCents || 0 };
 
     // 3. Aggregate Redemption, Refunds, Expirations
     const now = new Date();
@@ -478,16 +411,9 @@ const getSingleEventTicketStats = async (req, res) => {
     const formattedDistribution = distribution.map(t => {
       const red = redemptionMap[t._id.toString()] || { redeemed: 0, cancelled: 0 };
       const price = (t.price?.amountCents || 0) / 100;
-      const grossRevenue = t.ticketType === 'PAID' ? (t.soldQuantity * price) : 0;
-      
-      // Calculate net revenue for this tier
-      let netRevenue = grossRevenue;
-      if (t.ticketType === 'PAID' && t.commission) {
-        const commPerc = (t.commission.percentage || 0) / 100;
-        if (t.commission.type === 'DEDUCT_FROM_PRICE') {
-          netRevenue = grossRevenue * (1 - commPerc);
-        }
-      }
+      const tierRevenue = revenue?.tiers.get(String(t._id));
+      const grossRevenue = (tierRevenue?.grossRevenueCents || 0) / 100;
+      const netRevenue = (tierRevenue?.netRevenueCents || 0) / 100;
 
       return {
         id: t._id,
@@ -529,7 +455,7 @@ const getSingleEventTicketStats = async (req, res) => {
     delete salesVelocity._id;
 
     // 6. Response
-    const avgTicketPrice = inv.soldQuantity > 0 ? (inv.grossRevenueCents / inv.soldQuantity / 100).toFixed(2) : 0;
+    const avgTicketPrice = (revenue?.paidQuantity || 0) > 0 ? (inv.grossRevenueCents / revenue.paidQuantity / 100).toFixed(2) : 0;
     const turnOutRate = inv.soldQuantity > 0 ? ((tStats.redeemed / inv.soldQuantity) * 100).toFixed(1) + "%" : "0%";
 
     res.status(200).json({
@@ -599,7 +525,7 @@ const getEventAttendees = async (req, res) => {
     if (status === 'SCANNED') {
       query.status = 'REDEEMED';
     } else if (status === 'BOUGHT') {
-      query.status = { $in: ['UNREDEEMED', 'REDEEMED', 'CANCELLED'] };
+      query.status = { $in: ['UNREDEEMED', 'REDEEMED', 'CANCELLED', 'EXPIRED'] };
     } else if (status === 'CANCELLED') {
       query.status = 'CANCELLED';
     }
@@ -679,7 +605,7 @@ const exportEventAttendeesCSV = async (req, res) => {
     if (status === "SCANNED") {
       query.status = "REDEEMED";
     } else if (status === "BOUGHT") {
-      query.status = { $in: ["UNREDEEMED", "REDEEMED", "CANCELLED"] };
+      query.status = { $in: ["UNREDEEMED", "REDEEMED", "CANCELLED", "EXPIRED"] };
     } else if (status === "CANCELLED") {
       query.status = "CANCELLED";
     }

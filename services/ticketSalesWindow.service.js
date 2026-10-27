@@ -46,18 +46,19 @@ function salesEndError(event, salesEndAt, cutoffMinutes = 0) {
  * Also clamps salesStartAt if it happens to exceed the new event end time.
  * Returns the count of affected tickets.
  */
-async function realignTicketSalesWindows(eventId, newEventEnd, TicketModel = null) {
+async function realignTicketSalesWindows(eventId, newEventEnd, TicketModel = null, session = null) {
   if (!eventId || !newEventEnd) return 0;
   const newEndDate = new Date(newEventEnd);
   if (!Number.isFinite(newEndDate.getTime())) return 0;
 
   const Ticket = TicketModel || require("../models/client/eventTicketType.schema");
 
-  const excessTickets = await Ticket.find({
+  const excessQuery = Ticket.find({
     eventId,
     salesEndAt: { $gt: newEndDate },
   });
 
+  const excessTickets = await (session ? excessQuery.session(session) : excessQuery);
   if (!excessTickets || excessTickets.length === 0) {
     return 0;
   }
@@ -70,7 +71,7 @@ async function realignTicketSalesWindows(eventId, newEventEnd, TicketModel = nul
     },
     {
       $set: { salesEndAt: newEndDate },
-    }
+    }, { session }
   );
 
   // Clamp salesStartAt if it exceeds the new end time
@@ -80,8 +81,8 @@ async function realignTicketSalesWindows(eventId, newEventEnd, TicketModel = nul
       salesStartAt: { $gt: newEndDate },
     },
     {
-      $set: { salesStartAt: newEndDate },
-    }
+      $set: { salesStartAt: new Date(newEndDate.getTime() - 1) },
+    }, { session }
   );
 
   return excessTickets.length;

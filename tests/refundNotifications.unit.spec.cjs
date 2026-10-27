@@ -8,7 +8,7 @@ function harness(){
  const dependencies={
   crypto:require("crypto"),
   "../models/client/notificationOutbox.schema":{
-   findOneAndUpdate:async(filter,update)=>{if(record.completedAt || record.nextAttemptAt>Date.now())return null;Object.assign(record,update.$set);record.attempts++;return {...record};},
+   findOneAndUpdate:async(filter,update)=>{if(record.completedAt || record.failedAt || record.nextAttemptAt>Date.now())return null;Object.assign(record,update.$set);record.attempts++;return {...record};},
    updateOne:async(filter,update)=>{assert.equal(filter.lockToken,record.lockToken);Object.assign(record,update.$set);},
   },
   "../models/client/notification.schema":{updateOne:async(filter,update)=>{if(!notices.has(filter._id))notices.set(filter._id,update.$setOnInsert);}},
@@ -32,4 +32,9 @@ test("legacy checkout totals preserve ticket-only refunds and reject corrupt tot
  assert.equal(ticketPriceMinor({totalAmount:1100,items:[{subtotalAmount:1000,totalPrice:1100}]}),1000);
  assert.equal(ticketPriceMinor({totalAmount:1000,items:[{pricePerUnit:500,quantity:2}]}),1000);
  for(const subtotalAmount of [-1,1.5,1200])assert.throws(()=>ticketPriceMinor({subtotalAmount,totalAmount:1100}),/invalid/);
+});
+
+test("twelve failed deliveries leave the retry queue for manual attention",async()=>{
+ const f=harness();f.record.attempts=11;await f.run();assert.ok(f.record.failedAt);assert.equal(f.record.completedAt,undefined);
+ f.record.nextAttemptAt=new Date(0);await f.run();assert.equal(f.emailCalls,1);assert.equal(f.notices.size,1);
 });

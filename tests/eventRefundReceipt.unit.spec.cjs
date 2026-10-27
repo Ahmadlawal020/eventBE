@@ -40,7 +40,7 @@ function receiptHarness({ found = true, race = false, configured = true, provide
     throw new Error(name);
   });
   return { controller, calls, async upload(body = png) {
-    const res = response(); await controller.uploadReceipt({ params: { refundId }, user: { id: "organiser" }, body }, res); return res;
+    const res = response(); await controller.uploadReceipt({ params: { refundId }, user: { id: "organiser" }, headers: { "x-refund-settlement-id": "test-settlement" }, body }, res); return res;
   }, async read() {
     const res = response(); await controller.getReceipt({ params: { refundId }, user: { id: "viewer" } }, res); return res;
   } };
@@ -51,6 +51,7 @@ test("receipt uploads are organiser-scoped, private, and replace old storage onl
   assert.equal(f.calls.filters[0].organiser, "organiser");
   assert.equal(f.calls.uploaded[0].options.type, "authenticated");
   assert.equal(f.calls.update.$set.receipt.publicId, "new-proof");
+  assert.equal(f.calls.update.$set.receipt.settlementId, "test-settlement");
   assert.equal(f.calls.destroyed[0].id, "old-proof");
   assert.equal(res.body.data.publicId, undefined);
 });
@@ -88,9 +89,9 @@ test("receipt storage IDs and bank account numbers remain hidden in ordinary que
   assert.equal(Refund.schema.path("receipt.publicId").options.select, false);
   assert.equal(Refund.schema.path("bankDetails.accountNumber").options.select, false);
 });
-function lifecycleHarness({ owner = true, updated = true } = {}) {
+function refundHarness({ owner = true, updated = true } = {}) {
   const calls = {};
-  const controller = load("../controllers/client/eventLifecycle.controller", name => {
+  const controller = load("../controllers/client/eventRefund.controller", name => {
     if (name === "mongoose") return { ...mongoose, connection: { transaction: fn => fn({}) } };
     if (name.endsWith("/event.schema")) return { findById: () => query({ _id: "event", createdBy: owner ? "organiser" : "other" }) };
     if (name.endsWith("/userEventTicket.schema")) return { find(filter) { calls.tickets = filter; return query([{ _id: "ticket", owner: {firstName:"Holder"}, ticketName:"VIP", ticketNumber:"TKT-TEST", ticketTypeId:"tier", ticketSnapshot:{ticketType:"PAID",price:{amount:100}}, transferHistory:[{}] }]); } };
@@ -109,34 +110,37 @@ function lifecycleHarness({ owner = true, updated = true } = {}) {
     };
     return {};
   });
-  return { calls, async call(method, body = { organiserReference: " TX123 " }) {
+  return { calls, async call(method, body = { organiserReference: " TX123 ", settlementId: "test-settlement" }) {
     const res = response();
     await controller[method]({ params: { id: refundId, refundId }, user: { id: "organiser" }, body }, res);
     return res;
   } };
 }
 test("mark-paid requires a receipt, submitted details, owner access and an unpaid refund atomically", async () => {
-  const f = lifecycleHarness(); const res = await f.call("markRefundPaid");
+  const f = refundHarness(); const res = await f.call("markRefundPaid");
   assert.equal(res.code, 200);
   assert.equal(f.calls.filter.organiser, "organiser");
-  assert.equal(f.calls.filter["receipt.uploadedAt"].$exists, true);
-  assert.equal(f.calls.filter.markedPaidAt.$exists, false);
-  assert.equal(f.calls.filter["bankDetails.accountName"].$ne, "");
+  assert.equal(f.calls.filter["receipt.uploadedAt"].$type, "date");
+  assert.equal(f.calls.filter.markedPaidAt, null);
+  assert.equal(f.calls.filter["settlement.id"], "test-settlement");
+  assert.equal(f.calls.filter["receipt.settlementId"], "test-settlement");
+  assert.equal(f.calls.update.$set.paidSettlementId, "test-settlement");
+  assert.ok(f.calls.filter["bankDetails.accountName"].$regex.test("Holder"));
   assert.equal(f.calls.update.$set.organiserReference, "TX123");
   assert.match(f.calls.notification.message, /receipt/);
-  const missing = lifecycleHarness({ updated: false });
+  const missing = refundHarness({ updated: false });
   assert.equal((await missing.call("markRefundPaid")).code, 409);
   assert.equal(missing.calls.notification, undefined);
 });
 test("holder lists contain individual tickets and are restricted to the original organiser", async () => {
-  const f = lifecycleHarness();
+  const f = refundHarness();
   assert.equal((await f.call("organiserBuyers")).code, 200);
   assert.equal(f.calls.tickets.eventId, "event");
   const result = await f.call("organiserBuyers");
   assert.equal(result.body.data[0].ticketNumber, "TKT-TEST");
   assert.equal(result.body.data[0].ticketKind, "PAID");
   assert.equal(result.body.data[0].transferred, true);
-  const denied = lifecycleHarness({ owner: false });
+  const denied = refundHarness({ owner: false });
   assert.equal((await denied.call("organiserBuyers")).code, 404);
   assert.equal(denied.calls.bookings, undefined);
 });
@@ -150,9 +154,10 @@ test("invalid storage credentials are distinguishable from invalid images",async
 });
 
 function directHarness({bytes=1000,found=true}={}) {
- const calls={};const saved={updatedAt:new Date(),receipt:{publicId:"old-proof"}};
+ const calls={};const saved={settlement:{id:"test-settlement"},updatedAt:new Date(),receipt:{publicId:"old-proof"}};
  const controller=load("../controllers/client/eventRefundReceipt.controller",name=>{
-  if(name==="mongoose")return mongoose;
+  if(name==="mongoose")return { ...mongoose, connection: { transaction: fn => fn({}) } };
+  if(name.endsWith("/refundUploadAttempt.schema"))return { create: async () => {}, findOneAndUpdate: async () => ({}), updateOne: async (filter) => {calls.retired=filter.publicId;} };
   if(name==="crypto")return {randomUUID:()=>"unique-upload"};
   if(name.endsWith("/eventRefund.schema"))return {
    findOne:filter=>{calls.filter=filter;return query(found?saved:null);},
@@ -167,14 +172,14 @@ function directHarness({bytes=1000,found=true}={}) {
   throw Error(name);
  });
  return {calls,async call(method,publicId=`refund-receipts/${refundId}/unique-upload`){
-  const res=response();await controller[method]({params:{refundId},user:{id:"organiser"},body:{publicId}},res);return res;
+  const res=response();await controller[method]({params:{refundId},user:{id:"organiser"},body:{publicId,settlementId:"test-settlement"}},res);return res;
  }};
 }
 test("direct receipt upload signs private parameters without exposing the secret",async()=>{
  const f=directHarness();const res=await f.call("prepareReceiptUpload");assert.equal(res.code,200);assert.equal(f.calls.signed.type,"authenticated");assert.equal(f.calls.signed.overwrite,false);assert.equal(res.body.data.signature,"signed");assert.ok(!JSON.stringify(res.body).includes("private-secret"));
 });
 test("direct upload completion verifies storage metadata and attaches the reserved asset",async()=>{
- const f=directHarness();const res=await f.call("completeReceiptUpload");assert.equal(res.code,200);assert.equal(f.calls.filter.organiser,"organiser");assert.equal(f.calls.resource.options.type,"authenticated");assert.equal(f.calls.update.$set.receipt.publicId,`refund-receipts/${refundId}/unique-upload`);assert.equal(f.calls.destroyed,"old-proof");
+ const f=directHarness();const res=await f.call("completeReceiptUpload");assert.equal(res.code,200);assert.equal(f.calls.filter.organiser,"organiser");assert.equal(f.calls.resource.options.type,"authenticated");assert.equal(f.calls.update.$set.receipt.publicId,`refund-receipts/${refundId}/unique-upload`);assert.equal(f.calls.retired,"old-proof");
 });
 test("direct upload rejects foreign assets, unavailable refunds and oversized images",async()=>{
  assert.equal((await directHarness().call("completeReceiptUpload","other-refund/image")).code,400);

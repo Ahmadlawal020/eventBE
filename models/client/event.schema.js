@@ -60,6 +60,7 @@ const eventSchema = new mongoose.Schema(
   {
     /* ===== BASIC INFO ===== */
 
+    occurrence: { type: Number, default: 0, min: 0 },
     title: {
       type: String,
       trim: true,
@@ -280,6 +281,7 @@ const eventSchema = new mongoose.Schema(
     capacity: {
       type: Number,
       min: 0,
+      validate: { validator: value => value == null || Number.isSafeInteger(value), message: "Capacity must be a whole number" },
     },
     /* ===== SAFETY & SECURITY ===== */
 

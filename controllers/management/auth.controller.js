@@ -25,13 +25,13 @@ const generateTokens = (user) => {
   const { _id: id, email, roles } = user;
 
   const accessToken = jwt.sign(
-    { UserInfo: { id, email, roles } },
+    { UserInfo: { id, email, roles, sessionVersion: user.sessionVersion || 0 } },
     process.env.ACCESS_TOKEN_SECRET,
     { expiresIn: "15m" },
   );
 
   const refreshToken = jwt.sign(
-    { id, email },
+    { id, email, sessionVersion: user.sessionVersion || 0 },
     process.env.REFRESH_TOKEN_SECRET,
     { expiresIn: "7d" },
   );
@@ -153,7 +153,7 @@ const handleAdminRefreshToken = asyncHandler(async (req, res) => {
   }
 
   jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET, async (err, decoded) => {
-    if (err || foundAdmin.email !== decoded.email) {
+    if (err || foundAdmin.email !== decoded.email || (decoded.sessionVersion || 0) !== (foundAdmin.sessionVersion || 0)) {
       return res.status(403).json({ success: false, message: "Forbidden" });
     }
 
@@ -390,7 +390,7 @@ const updatePassword = asyncHandler(async (req, res) => {
 
   email = email.trim().toLowerCase();
 
-  const otpResult = await OTPService.verifyOTP(email, code, "password_change");
+  const otpResult = await OTPService.verifyOTP(email, code, "password_change", { consume: true });
   if (!otpResult.success) {
     return res.status(400).json({ success: false, message: otpResult.message });
   }
@@ -401,6 +401,8 @@ const updatePassword = asyncHandler(async (req, res) => {
   }
 
   foundAdmin.password = newPassword;
+  foundAdmin.refreshToken = "";
+  foundAdmin.$inc("sessionVersion", 1);
   foundAdmin.failedLoginAttempts = 0;
   await foundAdmin.save();
 

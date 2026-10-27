@@ -110,7 +110,7 @@ const validateEventPayload = (
     );
   }
 
-  if (publishing && payload.images?.length > limits.maxImages) {
+  if (shouldValidate("images") && payload.images?.length > limits.maxImages) {
     errors.push(`An event can have at most ${limits.maxImages} images`);
   }
 
@@ -282,7 +282,7 @@ const validateEventPayload = (
     }
   }
 
-  if (publishing) {
+  if (publishing || (payload.status === "LISTED" && shouldValidate("images"))) {
     const requiredImages = Math.max(
       settings.publishing.requireCoverImage ? 1 : 0,
       settings.publishing.minimumImages ?? 0,
@@ -295,7 +295,7 @@ const validateEventPayload = (
           : `At least ${requiredImages} images are required before publishing`,
       );
     }
-    if (startsAt) {
+    if (publishing && startsAt) {
       const minimumStart =
         Date.now() + settings.publishing.minLeadTimeHours * 3600000;
       if (startsAt.getTime() < minimumStart) {

@@ -440,15 +440,22 @@ const getMyTickets = async (req, res) => {
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
     const skip = (page - 1) * limit;
 
+    const filter = {
+      buyer: req.user.id,
+      ...(req.query.needsAttention === "true" ? {
+        $or: [{ paymentResolutionRequired: true }, { paymentStatus: "FAILED_REFUND" }],
+      } : {}),
+    };
+
     const [tickets, total] = await Promise.all([
-      EventCenterBooking.find({ buyer: req.user.id })
+      EventCenterBooking.find(filter)
         .populate("eventCenter", "venueName images location")
-        .select("buyer guestDetails eventCenter selectedDates bookingUnit duration totalPrice paymentStatus status paymentReference ticketNumber bookingMode reviewDeadline createdAt")
+        .select("buyer guestDetails eventCenter selectedDates bookingUnit duration totalPrice paymentStatus status paymentReference paymentResolutionRequired ticketNumber bookingMode reviewDeadline createdAt")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
-      EventCenterBooking.countDocuments({ buyer: req.user.id }),
+      EventCenterBooking.countDocuments(filter),
     ]);
 
     res.json({

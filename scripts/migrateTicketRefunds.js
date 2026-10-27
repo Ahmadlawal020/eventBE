@@ -6,7 +6,7 @@ const Refund = require("../models/client/eventRefund.schema");
 const { planLegacyRefund, migrateLegacyRefund } = require("../services/migrateTicketRefunds.service");
 async function main() {
   if (!process.env.DATABASE_URI) throw new Error("DATABASE_URI is not configured");
-  await mongoose.connect(process.env.DATABASE_URI, { autoIndex: false, serverSelectionTimeoutMS: 10000 });
+  await mongoose.connect(process.env.DATABASE_URI, { autoIndex: false, autoCreate: false, serverSelectionTimeoutMS: 10000 });
   const apply = process.argv.includes("--apply");
   if (apply) {
     // Replace only the obsolete one-per-order uniqueness constraint.
@@ -20,7 +20,7 @@ async function main() {
     try {
       const rows = apply ? await migrateLegacyRefund(refund._id) : (await planLegacyRefund(refund._id, null))?.length || 0;
       console.log(JSON.stringify({ refundId: String(refund._id), action: apply ? "migrated" : "ready", tickets: rows }));
-    } catch (error) { console.log(JSON.stringify({ refundId: String(refund._id), action: "manual_review", reason: error.message })); }
+    } catch (error) { process.exitCode = 1; console.log(JSON.stringify({ refundId: String(refund._id), action: "manual_review", reason: error.message })); }
   }
 }
 main().catch(error => { console.error(error.message); process.exitCode = 1; }).finally(() => mongoose.disconnect());

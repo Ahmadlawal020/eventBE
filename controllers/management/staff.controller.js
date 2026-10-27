@@ -351,6 +351,8 @@ const updateStaffPassword = asyncHandler(async (req, res) => {
   }
 
   staff.password = newPassword;
+  staff.refreshToken = "";
+  staff.$inc("sessionVersion", 1);
   staff.passwordChangedAt = new Date();
   staff.failedLoginAttempts = 0;
   await staff.save();

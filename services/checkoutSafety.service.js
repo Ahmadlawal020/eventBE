@@ -68,6 +68,13 @@ const venueQuote = (venue, input) => {
 
 async function reserveEventBooking(data) {
   return mongoose.connection.transaction(async session => {
+    if (data.checkoutKey) {
+      const existing = await EventBooking.findOne({ buyer: data.buyer, checkoutKey: data.checkoutKey }).session(session);
+      if (existing) {
+        if (existing.checkoutFingerprint !== data.checkoutFingerprint) throw fail("Checkout attempt does not match this order.", 409);
+        return existing;
+      }
+    }
     // Re-check sale eligibility inside the reservation transaction. The earlier
     // controller check is not sufficient if an organiser cancels concurrently.
     // This is a write, not merely a read: it creates a transaction conflict
@@ -76,19 +83,28 @@ async function reserveEventBooking(data) {
       { _id: data.eventId, status: "LISTED" },
       { $inc: { saleVersion: 1 } },
       { new: true, session },
-    ).select("_id");
+    ).select("_id schedule occurrence capacity");
     if (!event) throw fail("This event is not accepting new bookings.", 409);
+    const end = require("./eventEntry.service").eventEnd(event);
+    if (end != null && end <= Date.now()) throw fail("This event has ended and is not accepting bookings.", 409);
+    await require("./eventCapacity.service").assertEventCapacity(event, data.items.reduce((sum, item) => sum + item.quantity, 0), session);
+    const { quotedTicketVersions = [], ...bookingData } = data;
     for (const item of data.items) {
-      const updated = await Ticket.findOneAndUpdate({_id:item.ticketId,
+      const quote = quotedTicketVersions.find(version => version.ticketId === String(item.ticketId));
+      const updated = await Ticket.findOneAndUpdate({_id:item.ticketId, eventId: data.eventId, ...(quote?.updatedAt ? { updatedAt: quote.updatedAt } : {}),
         $expr:{$gte:[{$subtract:["$totalQuantity",{$ifNull:["$soldQuantity",0]}]}, item.quantity]}},
         {$inc:{soldQuantity:item.quantity}}, {new:true, session});
-      if (!updated) throw fail(`Not enough tickets available for ${item.name}`,409);
+      if (updated && ((updated.salesStartAt && new Date(updated.salesStartAt).getTime() > Date.now()) ||
+          (updated.salesEndAt && new Date(updated.salesEndAt).getTime() <= Date.now())))
+        throw fail("Ticket sales are closed. Refresh and try again.", 409);
+      if (!updated) throw fail(`Ticket availability or pricing changed for ${item.name}. Refresh and try again.`,409);
     }
-    const booking = new EventBooking({...data, reservationExpiresAt:data.paymentStatus === "PENDING" && data.paymentMethod === "CARD" ? new Date(Date.now()+30*60*1000) : undefined, inventoryReserved:true});
+    const booking = new EventBooking({...bookingData, occurrence: event.occurrence || 0, reservationExpiresAt:data.paymentStatus === "PENDING" ? new Date(Date.now()+30*60*1000) : undefined, inventoryReserved:true});
     await booking.save({session});
     if (booking.paymentStatus === "COMPLETED") {
       const {createTicketsForBooking}=require("../controllers/client/userEventTicket.controller");
       await createTicketsForBooking(booking,session);
+      await require("./eventPurchaseNotices.service").queueEventPurchase(booking, session);
     }
     return booking;
   });
@@ -117,8 +133,24 @@ async function completePayment(reference, transaction, {buyerId, kind} = {}) {
       // Serialize payment completion with cancellation on the event document.
       const event = await Event.findOneAndUpdate({ _id: booking.eventId },
         { $inc: { saleVersion: 1 } }, { new: true, session });
+      const end = require("./eventEntry.service").eventEnd(event);
+      if (event && (event.occurrence || 0) !== (booking.occurrence || 0)) {
+        if (booking.paymentStatus !== "COMPLETED") {
+          booking.paymentStatus = "COMPLETED"; booking.status = "CANCELLED"; booking.paymentResolutionRequired = true;
+          booking.reservationExpiresAt = undefined; await booking.save({ session });
+        }
+        return { booking, type, conflict: true, changed: false };
+      }
+      if (event && event.status !== "CANCELLED" && (event.status === "COMPLETED" || (end != null && end <= Date.now())) && booking.paymentStatus !== "COMPLETED") {
+        booking.paymentStatus = "COMPLETED"; booking.status = "CANCELLED"; booking.paymentResolutionRequired = true;
+        booking.reservationExpiresAt = undefined; await booking.save({ session });
+        return { booking, type, conflict: true, changed: true };
+      }
       if (!event || event.status === "CANCELLED") {
         const changed = booking.paymentStatus !== "COMPLETED";
+        // Cancellation already decided eligibility for issued, paid tickets.
+        // A provider/client replay must not add obligations for used or voided tickets.
+        if (!changed) return { booking, type, conflict: true, changed: false };
         booking.paymentStatus = "COMPLETED";
         booking.status = "CANCELLED";
         booking.paymentResolutionRequired = true;
@@ -201,6 +233,7 @@ async function completePayment(reference, transaction, {buyerId, kind} = {}) {
         await createTicketsForBooking(booking, session);
       }
     }
+    if (type === "EVENT_TICKET" && changed) await require("./eventPurchaseNotices.service").queueEventPurchase(booking, session);
     return {booking,type,conflict:false,changed};
   });
 }

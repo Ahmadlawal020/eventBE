@@ -15,7 +15,7 @@ const verifyJWT = require("../../middleware/verifyJWT");
 router.use(verifyJWT);
 
 // Transfer request lifecycle
-router.post("/", initiateTransfer);
+router.post("/", require("../../middleware/eventSecurityLimits").transfer, initiateTransfer);
 router.post("/:requestId/accept", acceptTransfer);
 router.post("/:requestId/decline", declineTransfer);
 router.delete("/:requestId", cancelTransfer);

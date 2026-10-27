@@ -1,7 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const verifyJWT = require("../../middleware/verifyJWT");
-const controller = require("../../controllers/client/eventLifecycle.controller");
+const controller = require("../../controllers/client/eventRefund.controller");
 
 router.use(verifyJWT);
 router.param("refundId", (req, res, next, value) => {
@@ -14,6 +14,10 @@ const safe = handler => (req, res, next) => Promise.resolve(handler(req, res, ne
   res.status(status).json({ success: false, message: status === 400 ? "Invalid refund details." : "Could not update refund. Please try again." });
 });
 router.get("/mine", safe(controller.getMyRefunds));
+const { rateLimit } = require("express-rate-limit");
+const receiptLimit = rateLimit({ windowMs: 60000, limit: 10, keyGenerator: req => String(req.user.id), standardHeaders: true, legacyHeaders: false,
+  message: { message: "Too many receipt uploads. Wait a minute before trying again." } });
+router.use("/:refundId/receipt", (req, res, next) => req.method === "POST" ? receiptLimit(req, res, next) : next());
 const receiptController = require("../../controllers/client/eventRefundReceipt.controller");
 router.get("/:refundId/receipt", receiptController.getReceipt);
 router.post("/:refundId/receipt/prepare", receiptController.prepareReceiptUpload);
@@ -26,6 +30,8 @@ router.post("/:refundId/receipt", (req, res, next) => {
     next();
   });
 }, receiptController.uploadReceipt);
+router.post("/:refundId/support", safe(require("../../controllers/client/refundSupport.controller").requestSupport));
+router.post("/:refundId/settlement/prepare", safe(require("../../controllers/client/refundSettlement.controller").prepare));
 router.post("/:refundId/bank-details", safe(controller.submitBankDetails));
 router.post("/:refundId/confirm", safe(controller.confirmRefund));
 router.post("/:refundId/dispute", safe(controller.disputeRefund));

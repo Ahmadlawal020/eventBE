@@ -8,6 +8,7 @@ const gateway = getPaymentGateway();
 
 const EventBooking = require("../../models/client/eventBooking.schema");
 const Event = require("../../models/client/event.schema");
+const { revenueBookingFilter } = require("../../services/eventRevenue.service");
 
 /**
  * @desc    Get finance stats, balance, weekly trends, and recent transactions
@@ -21,10 +22,8 @@ const getFinanceStats = async (req, res) => {
   try {
     const user = await User.findById(userId).select("bankDetails vendorAccountCode");
 
-    // 1. Get all event IDs created or co-organised by the user
-    const userEvents = await Event.find({
-      $or: [{ createdBy: userObjectId }, { coOrganisers: userObjectId }],
-    }).select("_id title").lean();
+    // Apply current finance permissions before every aggregate and transaction read.
+    const userEvents = await require("../../services/eventFinanceAccess.service").financialEvents(userObjectId);
     const eventIds = userEvents.map((e) => e._id);
     const eventMap = new Map(userEvents.map((e) => [e._id.toString(), e.title]));
 
@@ -128,7 +127,7 @@ const getFinanceStats = async (req, res) => {
 
     if (eventIds.length > 0) {
       ticketStats = await EventBooking.aggregate([
-        { $match: { eventId: { $in: eventIds } } },
+        { $match: revenueBookingFilter(eventIds, { paymentStatus: { $in: ["COMPLETED", "PENDING"] } }) },
         {
           $group: {
             _id: null,
@@ -247,8 +246,7 @@ const getFinanceStats = async (req, res) => {
     // Query this week's ticket bookings
     const thisWeekTicketBookings = eventIds.length > 0
       ? await EventBooking.find({
-          eventId: { $in: eventIds },
-          paymentStatus: "COMPLETED",
+          ...revenueBookingFilter(eventIds),
           createdAt: { $gte: startOfWeek },
         }).select("totalAmount subtotalAmount organiserPayoutAmount createdAt").lean()
       : [];
@@ -329,7 +327,7 @@ const getFinanceStats = async (req, res) => {
         date: t.createdAt,
         amount: (t.organiserPayoutAmount ?? t.subtotalAmount ?? t.totalAmount ?? 0) / 100,
         type: "in",
-        status: t.paymentStatus || "COMPLETED",
+        status: t.paymentResolutionRequired ? "UNDER_REVIEW" : t.status === "CANCELLED" && t.paymentStatus === "COMPLETED" ? "CANCELLED" : t.paymentStatus || "COMPLETED",
         reference: t.paymentReference || t.paystackReference || `TCK_${t._id.toString().slice(-6)}`,
         customerName: t.guestDetails?.fullName || t.buyer?.fullName || "Ticket Buyer",
         customerEmail: t.guestDetails?.email || t.buyer?.email || "",

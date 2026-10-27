@@ -22,24 +22,27 @@ function harness({ owner = true, permissions = [], missing = false, status = "IN
   const context = { module: { exports: {} }, console, require(name) {
     if (name.endsWith("/event.schema")) return {
       findById: async () => missing ? null : { ...saved, toObject: () => saved },
-      findOneAndUpdate: async (_filter, update, options) => {
+      findOneAndUpdate: async (_filter) => {
         assert.equal(_filter.status, status);
-        if (concurrentChange) return null;
+        return concurrentChange ? null : saved;
+      },
+      findByIdAndUpdate: async (_id, { $set: update }, options) => {
         assert.equal(options.runValidators, true);
         const doc = new Event({ ticketGuide: update.ticketGuide });
         const error = doc.validateSync();
-        // Validate the actual nested schema without requiring unrelated listing fields.
-        const policyErrors = Object.entries(error?.errors || {}).filter(([key]) => key.startsWith("ticketGuide."));
-        assert.deepEqual(policyErrors, []);
+        assert.deepEqual(Object.entries(error?.errors || {}).filter(([key]) => key.startsWith("ticketGuide.")), []);
         writes++;
-        return { ...saved, ...update, ticketGuide: doc.toObject().ticketGuide };
+        return { ...saved, ...update, updatedAt: new Date(), ticketGuide: doc.toObject().ticketGuide };
       },
     };
     if (name.endsWith("/listingPatch")) return require("../utils/listingPatch");
     if (name.endsWith("/eventSettings.service")) return { ...service, getEffectiveEventSettings: async () => new Settings().toObject() };
     if (name.endsWith("/ticketSalesWindow.service")) return { realignTicketSalesWindows: async () => { realignments++; return 0; } };
     if (name.endsWith("/coOrganiserInvitation.schema")) return { findOne: () => ({ lean: async () => ({ permissions }) }) };
-    if (name === "mongoose") return mongoose;
+    if (name.endsWith("/eventOccurrence.service")) return { occurrenceEnded: () => status === "COMPLETED", changeSchedule: async () => false, occurrenceFilter: () => ({}) };
+    if (name.endsWith("/userEventTicket.schema")) return { exists: () => ({ session: async () => null }), distinct: () => ({ session: async () => [] }), updateMany: async () => ({}) };
+    if (name.endsWith("/refundNotifications.service")) return { queueNotices: async () => {} };
+    if (name === "mongoose") return { ...mongoose, connection: { transaction: fn => fn({}) } };
     return {};
   } };
   vm.runInNewContext(fs.readFileSync(require.resolve("../controllers/client/event.controller"), "utf8"), context);
@@ -144,4 +147,12 @@ test("cancelled listings cannot be republished or changed by a stale editor",asy
  assert.equal((await harness({status:"CANCELLED"}).update({status:"UNLISTED"})).code,409);
  assert.equal((await harness({status:"CANCELLED"}).update({isDraft:false})).code,409);
  assert.equal((await harness({concurrentChange:true}).update({title:"New title"})).code,409);
+});
+
+test("cancelled event information cannot be edited by its organiser", async () => {
+  for (const patch of [{ title: "New title" }, { description: "New description" }, { images: [] }, { schedule: { from: "2030-01-01" } }]) {
+    const result = await harness({ status: "CANCELLED" }).update(patch);
+    assert.equal(result.code, 409);
+    assert.match(result.body.message, /event has been cancelled/);
+  }
 });

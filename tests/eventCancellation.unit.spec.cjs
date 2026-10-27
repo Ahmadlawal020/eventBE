@@ -22,20 +22,21 @@ function lifecycle({ failDelivery = false, owner = "host" } = {}) {
     { _id: "free", buyer: "free-buyer", paymentStatus: "COMPLETED", totalAmount: 0 },
     { _id: "refunded", buyer: "refunded-buyer", paymentStatus: "REFUNDED", totalAmount: 1000 },
   ];
-  const controller = load("../controllers/client/eventLifecycle.controller", {
+  const controller = load("../controllers/client/eventCancellation.controller", {
     mongoose: { Types: { ObjectId: { isValid: () => true } }, connection: { transaction: (fn) => fn({}) } },
     "../../models/client/event.schema": { findById: () => query(event) },
     "../../models/client/eventBooking.schema": { find: (filter) => query(
       typeof filter.paymentStatus === "string" ? bookings.filter(b => b.paymentStatus === filter.paymentStatus) : bookings) },
     "../../models/client/userEventTicket.schema": {
       countDocuments: async (filter) => { countFilter = filter; return 2; },
-      updateMany: async () => ({}), find: () => query([{ _id: "ticket", bookingId: "paid", ticketTypeId: "type", owner: "holder" }]),
+      updateMany: async () => ({}), find: () => query([{ _id: "ticket", bookingId: "paid", ticketTypeId: "type", owner: "holder", status: "UNREDEEMED" }]),
       distinct: () => query(["holder", "buyer"]),
     },
     "../../models/client/ticketTransferRequest.schema": { updateMany: async () => ({}) },
     "../../models/client/eventRefund.schema": { insertMany: async (docs) => { refunds = docs; } },
     "../../constants/notificationTypes": constants,
     "../../services/ticketRefundAllocation.service": require("../services/ticketRefundAllocation.service"),
+    "../../services/eventOccurrence.service": { occurrenceFilter: () => ({}) },
     "../../services/eventRefundAmount.service": require("../services/eventRefundAmount.service"),
     "../../services/refundNotifications.service": {
       cancellationNotices: (event, recipients) => ({ recipients, message: `${event.title} ${event.lifecycle.cancellationMessage}` }),
@@ -53,7 +54,7 @@ test("preview reports ticket-price liability and excludes redeemed/cancelled tic
   const f = lifecycle(); const res = await f.call("cancellationPreview");
   assert.equal(res.body.data.paidOrders, 1);
   assert.equal(res.body.data.refundLiabilityMinorByCurrency.NGN, 1000);
-  assert.deepEqual(Array.from(f.countFilter.status.$nin), ["CANCELLED", "REDEEMED"]);
+  assert.equal(res.body.data.ticketCount, 1);
 });
 test("cancellation notifies every buyer and holder once, refunds only completed paid bookings", async () => {
   const f = lifecycle(); const res = await f.call("cancelEvent");

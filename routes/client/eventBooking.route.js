@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const {
+  getBookingPaymentStatus,
   createBooking,
   quoteBooking,
   verifyBooking,
@@ -8,9 +9,11 @@ const {
 } = require("../../controllers/client/eventBooking.controller");
 const verifyJWT = require("../../middleware/verifyJWT");
 
-router.post("/quote", quoteBooking);
-router.post("/", verifyJWT, createBooking);
+const limits = require("../../middleware/eventSecurityLimits");
+router.post("/quote", limits.quote, quoteBooking);
+router.post("/", verifyJWT, limits.checkout, createBooking);
 router.get("/my-bookings", verifyJWT, getMyBookings);
+router.get("/status/:reference", verifyJWT, getBookingPaymentStatus);
 router.get("/verify/:reference", verifyJWT, verifyBooking);
 
 module.exports = router;
