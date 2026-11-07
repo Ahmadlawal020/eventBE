@@ -85,6 +85,8 @@ const eventCenterSchema = new mongoose.Schema(
   {
     /* ===== BASIC ===== */
 
+    bookingVersion: { type: Number, default: 0 },
+    archivedAt: { type: Date, default: null },
     venueType: {
       type: String,
       enum: VENUE_TYPES,
@@ -184,6 +186,10 @@ const eventCenterSchema = new mongoose.Schema(
     /* ===== LOCATION ===== */
 
     location: {
+      countryCode: { type: String, uppercase: true, trim: true, enum: ["", ...Object.keys(require("../../data/address/countries.json").countries)] },
+      building: { type: String, trim: true, maxlength: 200 },
+      locality: { type: String, trim: true, maxlength: 200 },
+      district: { type: String, trim: true, maxlength: 200 },
       addressString: String,
       street: String,
       flat: String,
@@ -193,14 +199,10 @@ const eventCenterSchema = new mongoose.Schema(
       country: String,
 
       coordinates: {
-        latitude: Number,
-        longitude: Number,
+        latitude: { type: Number, min: -90, max: 90, validate: value => value == null || Number.isFinite(value) },
+        longitude: { type: Number, min: -180, max: 180, validate: value => value == null || Number.isFinite(value) },
       },
 
-      isSpecificLocation: {
-        type: Boolean,
-        default: false,
-      },
     },
 
     /* ===== SUPPORTED EVENTS ===== */
@@ -255,8 +257,10 @@ const eventCenterSchema = new mongoose.Schema(
             default: "BLOCKED",
           },
           bookingId: { type: String },
-          holdId: String,
-          holdExpiresAt: Date,
+          bookingUnit: { type: String, enum: ["hour", "day"] },
+          currency: String,
+          pendingCheckout: Boolean,
+          holdId: String, // Read-only legacy marker: retired holds are ignored.
           clientName: {
             type: String,
             validate: {
@@ -297,8 +301,10 @@ const eventCenterSchema = new mongoose.Schema(
             default: "BLOCKED",
           },
           bookingId: { type: String },
-          holdId: String,
-          holdExpiresAt: Date,
+          bookingUnit: { type: String, enum: ["hour", "day"] },
+          currency: String,
+          pendingCheckout: Boolean,
+          holdId: String, // Read-only legacy marker: retired holds are ignored.
           clientName: {
             type: String,
             validate: {
@@ -335,7 +341,7 @@ const eventCenterSchema = new mongoose.Schema(
         },
       ],
       advanceNotice: {
-        days: { type: Number, enum: [0, 1, 2, 3, 4, 5, 6, 7], default: 0 },
+        days: { type: Number, min: 0, max: 365, validate: Number.isInteger, default: 0 },
         sameDayCutoffTime: { type: String },
       },
       preparationTime: { type: Number, enum: [0, 1, 2, 3], default: 0 },
@@ -358,6 +364,7 @@ const eventCenterSchema = new mongoose.Schema(
 
     /* ===== BOOKING ===== */
 
+    cancellationPolicy: { type: require("./venueCancellationPolicy.schema"), default: () => ({}) },
     bookingSettings: {
       type: String,
       enum: ["REVIEW", "INSTANT"],
@@ -518,6 +525,14 @@ const eventCenterSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
+eventCenterSchema.pre("validate", function () {
+  if (this.archivedAt && this.status !== "UNLISTED") this.invalidate("status", "Archived venues cannot be republished.");
+});
+eventCenterSchema.pre(["findOneAndUpdate", "updateOne", "updateMany"], function () {
+  const change = this.getUpdate() || {};
+  const status = change.status || change.$set?.status;
+  if (status && status !== "UNLISTED") this.where({ archivedAt: null });
+});
 /* ===================== EXPORT ===================== */
 
 eventCenterSchema.add({ managementLocation: { type: mongoose.Schema.Types.ObjectId, ref: "GeographicLocation", default: null, index: true } });

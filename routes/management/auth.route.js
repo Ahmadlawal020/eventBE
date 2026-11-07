@@ -28,7 +28,7 @@ const passwordResetLimiter = generateLimiter({
 router.post("/login", adminLoginLimiter, handleAdminLogin);
 router.post("/refresh", handleAdminRefreshToken);
 router.post("/logout", handleAdminLogout);
-router.post("/register", registerAdmin);
+router.post("/register", require("../../middleware/management/verifyAdmin"), registerAdmin);
 router.get("/invite/verify", verifyInviteToken);
 router.post("/invite/accept", acceptInvite);
 router.post("/password/request", passwordResetLimiter, requestPasswordReset);

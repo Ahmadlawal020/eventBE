@@ -64,6 +64,7 @@ const getOrganiserListings = async (req, res) => {
 
     // 2️⃣ Fetch Organiser's Event Centers (Created or Co-organised, but NOT where user is staff)
     const eventCenters = await EventCenter.find({
+      archivedAt: null,
       $or: [{ createdBy: userId }, { coOrganisers: userId }],
       staff: { $ne: userId },
     })

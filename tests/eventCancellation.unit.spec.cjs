@@ -113,3 +113,21 @@ test("cancellation email escapes organiser text", () => {
   assert.ok(html.includes("&lt;img&gt;"));
   assert.ok(!html.includes("<script>"));
 });
+
+test("cancellation preview and obligations use saved calendar days, ignoring client overrides", async () => {
+  const f = lifecycle(); f.event.cancellationRefundDays = 14;
+  assert.equal((await f.call("cancellationPreview")).body.data.refundDueDays, 14);
+  const before = Date.now();
+  const result = await f.call("cancelEvent", { message: "Venue unavailable", confirm: true, refundDueDays: 30 });
+  assert.equal(result.code, 200);
+  const due = +new Date(result.body.data.refundDueAt);
+  assert.ok(due >= before + 14 * 86400000 && due <= Date.now() + 14 * 86400000);
+  assert.equal(+new Date(f.refunds[0].dueAt), due);
+});
+test("legacy cancellation retains the seven-day tracking deadline", async () => {
+  const f = lifecycle();
+  assert.equal((await f.call("cancellationPreview")).body.data.refundDueDays, 7);
+  const before = Date.now();
+  const result = await f.call("cancelEvent");
+  assert.ok(+new Date(result.body.data.refundDueAt) >= before + 7 * 86400000);
+});

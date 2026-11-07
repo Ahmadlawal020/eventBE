@@ -10,18 +10,7 @@ let server;
 
 mongoose.connection.once("open", () => {
   console.log("connected to MongoDB");
-  // Initialize cron jobs
-  require("./jobs/notificationTrigger.job");
-  require("./jobs/reviewBookingExpiry.job");
-  require("./jobs/eventCompletion.job");
-  require("./jobs/eventMediaCleanup.job");
-  require("./jobs/eventAlerts.job");
-  require("./jobs/paymentReservationExpiry.job");
-  require("./jobs/venuePayout.job");
-  require("./jobs/venueHoldExpiry.job");
-  require("./jobs/venueReminder.job");
-  require("./jobs/referralReconciliation.job");
-  require("./jobs/refundOperations.job");
+  // Background work runs separately via npm run worker.
   server = app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });

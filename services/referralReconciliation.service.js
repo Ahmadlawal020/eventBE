@@ -5,24 +5,26 @@ const { ensureUserReferralCode, processReferralCommission } = require("./referra
 
 // Bounded round-robin scans recover missed commissions, reflect refunds and backfill old users.
 // Checkpoints only optimize scans; restarting or running multiple workers is safe.
-const checkpoints = {};
 const reconcileReferrals = async (limit = 100) => {
+  let failed = 0;
   const users = await User.find({ $or: [{ referralCode: { $exists: false } }, { referralCode: null }, { referralCode: "" }] })
     .select("_id").limit(limit).lean();
   for (const user of users) await ensureUserReferralCode(user._id);
   for (const [sourceType, Model] of [["EVENT_TICKET", EventBooking], ["EVENT_CENTER_BOOKING", EventCenterBooking]]) {
-    const query = checkpoints[sourceType] ? { _id: { $gt: checkpoints[sourceType] } } : {};
+    const checkpoints = require("mongoose").connection.collection("worker_scan_checkpoints");
+    const cursor = (await checkpoints.findOne({ _id: "referral:" + sourceType }))?.cursor;
+    const query = cursor ? { _id: { $gt: cursor } } : {};
     const bookings = await Model.find(query).select("_id").sort({ _id: 1 }).limit(limit).lean();
     for (const booking of bookings) {
       try {
         await processReferralCommission({ sourceType, bookingId: booking._id, notify: false });
       } catch (error) {
         // Failed bookings are retried on the next full scan without blocking other bookings.
-        console.error("[REFERRAL RECONCILIATION]", sourceType, String(booking._id), error.message);
+        failed++; console.error("[REFERRAL RECONCILIATION]", sourceType, String(booking._id), error.message);
       }
-      checkpoints[sourceType] = booking._id;
     }
-    if (bookings.length < limit) checkpoints[sourceType] = null;
+    await checkpoints.updateOne({ _id: "referral:" + sourceType }, { $set: { cursor: bookings.length === limit ? bookings[bookings.length - 1]._id : null } }, { upsert: true });
   }
+  return { failed };
 };
 module.exports = { reconcileReferrals };

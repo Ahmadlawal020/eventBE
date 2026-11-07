@@ -506,114 +506,54 @@ const getBookingDetail = async (req, res) => {
 };
 
 const getVenueCalendar = async (req, res) => {
-  const { venueId, yearMonth } = req.query;
-
   try {
-    const bookingQuery = {};
-    if (venueId && mongoose.Types.ObjectId.isValid(venueId)) {
-      bookingQuery.eventCenter = venueId;
-    }
-
-    let dateStart;
-    let dateEnd;
-    if (yearMonth && /^\d{4}-\d{2}$/.test(yearMonth)) {
-      const [y, m] = yearMonth.split("-").map(Number);
-      dateStart = new Date(Date.UTC(y, m - 1, 1));
-      dateEnd = new Date(Date.UTC(y, m, 1));
-    }
-
-    if (dateStart && dateEnd) {
-      bookingQuery["selectedDates.date"] = { $gte: dateStart, $lt: dateEnd };
-    }
-
-    const [bookings, venues] = await Promise.all([
-      EventCenterBooking.find(bookingQuery)
-        .populate("eventCenter", "venueName capacity")
-        .lean(),
-      EventCenter.find(
-        venueId && mongoose.Types.ObjectId.isValid(venueId)
-          ? { _id: venueId }
-          : { "availability.unavailableDates.0": { $exists: true } },
-      )
-        .select("venueName availability")
-        .lean(),
+    const { venueId } = req.query;
+    const yearMonth = req.query.yearMonth || new Date().toISOString().slice(0, 7);
+    if ((venueId && !mongoose.isValidObjectId(venueId)) || !/^\d{4}-(0[1-9]|1[0-2])$/.test(yearMonth))
+      return res.status(400).json({ success: false, message: "Choose a valid venue and month." });
+    const start = new Date(`${yearMonth}-01T00:00:00Z`), end = new Date(start);
+    end.setUTCMonth(end.getUTCMonth() + 1);
+    const [bookings, venues, choices] = await Promise.all([
+      EventCenterBooking.find({ ...(venueId ? { eventCenter: venueId } : {}),
+        status: { $in: ["ACTIVE", "CONFIRMED", "PENDING_REVIEW", "COMPLETED"] },
+        "selectedDates.date": { $gte: start, $lt: end },
+        $or: [{ paymentStatus: "COMPLETED" }, { paymentStatus: "PENDING", inventoryReserved: true }],
+      }).populate("eventCenter", "venueName").lean(),
+      EventCenter.find(venueId ? { _id: venueId } : { $or: [
+        { "availability.unavailableDates.date": { $gte: `${yearMonth}-01`, $lt: end.toISOString().slice(0, 10) } },
+        { "availability.unavailableSlots.date": { $gte: `${yearMonth}-01`, $lt: end.toISOString().slice(0, 10) } },
+      ] }).select("venueName availability").lean(),
+      EventCenter.find({ archivedAt: null }).select("venueName").sort({ venueName: 1 }).lean(),
     ]);
-
     const events = [];
-
-    // 1. Platform Bookings
-    for (const b of bookings) {
-      const vName = b.eventCenter?.venueName || "Event Center";
-      const vId = b.eventCenter?._id ? String(b.eventCenter._id) : String(b.eventCenter || "");
-      const isConfirmed = ["ACTIVE", "CONFIRMED", "COMPLETED"].includes(b.status);
-
-      for (let i = 0; i < (b.selectedDates || []).length; i++) {
-        const item = b.selectedDates[i];
-        const dateStr = item.date ? new Date(item.date).toISOString().split("T")[0] : "";
-        if (!dateStr) continue;
-        if (yearMonth && !dateStr.startsWith(yearMonth)) continue;
-
-        events.push({
-          id: `${b._id}-${i}`,
-          venueId: vId,
-          venueName: vName,
-          title: `${b.guestDetails?.fullName || "Guest"} - ${vName}`,
-          clientName: b.guestDetails?.fullName || "Guest",
-          clientEmail: b.guestDetails?.email || "",
-          date: dateStr,
-          startTime: item.startTime || "00:00",
-          endTime: item.endTime || "24:00",
-          type: isConfirmed ? "BOOKING_CONFIRMED" : "BOOKING_PENDING",
-          guestCount: b.eventCenter?.capacity?.max || 1,
-          bookingReference: b.ticketNumber || String(b._id).slice(-8).toUpperCase(),
-        });
+    for (const b of bookings) for (const [i, item] of (b.selectedDates || []).entries()) {
+      const date = new Date(item.date).toISOString().slice(0, 10);
+      if (!date.startsWith(yearMonth)) continue;
+      events.push({ id: `${b._id}-${i}`, venueId: String(b.eventCenter?._id || b.eventCenter),
+        venueName: b.eventCenter?.venueName || "Venue", title: b.guestDetails?.fullName || "Online booking",
+        clientName: b.guestDetails?.fullName || "Guest", clientEmail: b.guestDetails?.email || "", date,
+        startTime: item.startTime || "00:00", endTime: item.endTime || "24:00",
+        type: b.paymentStatus === "COMPLETED" && b.status !== "PENDING_REVIEW" ? "BOOKING_CONFIRMED" : "BOOKING_PENDING",
+        bookingReference: b.ticketNumber || String(b._id) });
+    }
+    for (const v of venues) for (const field of ["unavailableDates", "unavailableSlots"]) {
+      for (const [i, u] of (v.availability?.[field] || []).entries()) {
+        if (u.type === "BOOKED" || u.holdId) continue;
+        const date = new Date(u.date || u).toISOString().slice(0, 10);
+        if (!date.startsWith(yearMonth)) continue;
+        const manual = u.type === "MANUAL";
+        events.push({ id: `${v._id}-${field}-${i}`, venueId: String(v._id), venueName: v.venueName,
+          title: manual ? `Manual: ${u.clientName || "Guest"}` : "Maintenance / Blackout",
+          clientName: u.clientName || "", clientEmail: u.clientEmail || "", date,
+          startTime: u.startTime || "00:00", endTime: u.endTime || "24:00",
+          type: manual ? "BOOKING_CONFIRMED" : "MAINTENANCE_BLACKOUT",
+          bookingReference: u.bookingId });
       }
     }
-
-    // 2. Venue Blocked Dates and Manual Bookings
-    for (const v of venues) {
-      const vId = String(v._id);
-      const vName = v.venueName || "Event Center";
-
-      const unavail = v.availability?.unavailableDates || [];
-      for (let i = 0; i < unavail.length; i++) {
-        const u = unavail[i];
-        const rawDate = typeof u === "string" ? u : u?.date;
-        if (!rawDate) continue;
-        const dateStr = new Date(rawDate).toISOString().split("T")[0];
-        if (yearMonth && !dateStr.startsWith(yearMonth)) continue;
-
-        const isManual = typeof u === "object" && u.type === "MANUAL";
-        events.push({
-          id: `block-${vId}-${i}`,
-          venueId: vId,
-          venueName: vName,
-          title: isManual
-            ? (u.clientName ? `Manual: ${u.clientName}` : "Manual Booking")
-            : "Maintenance / Blackout",
-          clientName: isManual ? (u.clientName || "Direct Client") : "Facility Hold",
-          clientEmail: isManual ? (u.clientEmail || "") : "",
-          date: dateStr,
-          startTime: "00:00",
-          endTime: "24:00",
-          type: isManual ? "BOOKING_CONFIRMED" : "MAINTENANCE_BLACKOUT",
-          bookingReference: isManual ? (u.bookingId || "MANUAL") : undefined,
-        });
-      }
-    }
-
-    res.status(200).json({
-      success: true,
-      data: {
-        events,
-      },
-    });
+    return res.json({ success: true, data: { events, venues: choices.map(v => ({ id: String(v._id), name: v.venueName })) } });
   } catch (error) {
-    console.error("[ADMIN GET VENUE CALENDAR ERROR]", error);
-    res.status(500).json({
-      success: false,
-      message: "Server error fetching venue calendar",
-    });
+    console.error("[ADMIN VENUE CALENDAR]", error);
+    return res.status(500).json({ success: false, message: "Could not load venue calendar." });
   }
 };
 

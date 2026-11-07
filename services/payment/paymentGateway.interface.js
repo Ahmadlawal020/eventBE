@@ -54,6 +54,9 @@ class PaymentGateway {
    * @param {string} reference - Transaction reference to refund
    * @returns {Promise<{status: string, refundId: string}>}
    */
+  async verifyRefund(id) { throw new Error("verifyRefund() not implemented"); }
+  async listRefunds(transactionId) { throw new Error("listRefunds() not implemented"); }
+
   async refundPayment(reference) {
     throw new Error("refundPayment() not implemented");
   }

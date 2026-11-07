@@ -1,0 +1,77 @@
+{
+  "date": "2026-11-01",
+  "command": "npm audit --omit=dev --json",
+  "note": "Dependency-chain advisories are not equivalent to demonstrated runtime exploits. Frontend dependency trees include build tooling.",
+  "results": [
+    {
+      "name": "server",
+      "counts": {
+        "info": 0,
+        "low": 0,
+        "moderate": 0,
+        "high": 0,
+        "critical": 0,
+        "total": 0
+      },
+      "findings": []
+    },
+    {
+      "name": "munasaba",
+      "counts": {
+        "info": 0,
+        "low": 1,
+        "moderate": 36,
+        "high": 0,
+        "critical": 0,
+        "total": 37
+      },
+      "findings": [
+        {
+          "name": "deepmerge",
+          "severity": "low",
+          "range": ">=4.2.0",
+          "advisories": [
+            {
+              "title": "deepmerge mergeObject() allows prototype poisoning of returned objects",
+              "url": "https://github.com/advisories/GHSA-gcqx-w48m-w2h4"
+            }
+          ]
+        },
+        {
+          "name": "glob",
+          "severity": "moderate",
+          "range": "3.0.0 - 14.0.1",
+          "advisories": [
+            {
+              "title": "Glob: AbortSignal cancellation bypass allows post-timeout filesystem traversal",
+              "url": "https://github.com/advisories/GHSA-3g3m-2fjr-6pw4"
+            }
+          ]
+        },
+        {
+          "name": "minimatch",
+          "severity": "moderate",
+          "range": "<11.0.1",
+          "advisories": [
+            {
+              "title": "minimatch has potential denial of service via globparts amplification",
+              "url": "https://github.com/advisories/GHSA-g3hv-75wg-m249"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "eventmdb",
+      "counts": {
+        "info": 0,
+        "low": 0,
+        "moderate": 0,
+        "high": 0,
+        "critical": 0,
+        "total": 0
+      },
+      "findings": []
+    }
+  ]
+}

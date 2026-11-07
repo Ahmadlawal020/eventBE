@@ -27,12 +27,20 @@ const getListings = async (req, res) => {
       limit = 20,
     } = req.query;
 
-    const pageNum = Math.max(1, parseInt(page));
-    const limitNum = Math.min(50, Math.max(1, parseInt(limit)));
+    const availability = require("../../services/venueSearchAvailability.service");
+    const selection = availability.requestedDates(req.query);
+    if (selection) {
+      const settings = await require("../../services/eventCenterSettings.service").getEventCenterSettings();
+      const rules = require("../../services/venueBookingRules.service");
+      const horizon = settings.booking.maximumBookingDate || rules.lastBookableDay(require("../../services/bookingAttendance.service").dayOf(new Date()), settings.booking.maximumBookingWindowMonths || 12);
+      if (selection.selectedDates.some(d => d.date > horizon)) return res.status(400).json({ message: "Dates exceed the platform booking window." });
+    }
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const limitNum = Math.min(50, Math.max(1, parseInt(limit) || 20));
     const skip = (pageNum - 1) * limitNum;
 
-    const showEvents = !listingType || listingType === "event";
-    const showCenters = !listingType || listingType === "eventCenter";
+    const showEvents = !selection && (!listingType || listingType === "event");
+    const showCenters = !!selection || !listingType || listingType === "eventCenter";
 
     let enrichedEvents = [];
     let enrichedEventCenters = [];
@@ -148,7 +156,7 @@ const getListings = async (req, res) => {
 
       const eventCenters = await EventCenter.find(centerQuery).lean();
 
-      enrichedEventCenters = eventCenters.map((center) => {
+      enrichedEventCenters = eventCenters.filter(center => availability.available(center, selection)).map((center) => {
         const prices = [];
         if (center.basePrice?.amount !== undefined) prices.push(center.basePrice.amount);
         if (center.weekendPrice?.amount !== undefined) prices.push(center.weekendPrice.amount);
@@ -197,6 +205,7 @@ const getListings = async (req, res) => {
       },
     });
   } catch (err) {
+    if (err.status || err.statusCode) return res.status(err.status || err.statusCode).json({ message: err.message });
     console.error("[GET LISTINGS] ERROR:", err);
     res.status(500).json({
       success: false,

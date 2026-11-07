@@ -212,7 +212,8 @@ const createTicket = async (req, res) => {
 
         newTicket.perTransactionLimit = validateOrderLimits(perTransactionLimit, settings.ticketing.maxTicketsPerOrder);
         const savedTicket = await mongoose.connection.transaction(async session => {
-            await lockTicketEvent(event, session);
+            const locked = await lockTicketEvent(event, session);
+            await require("../../services/eventPublishing.service").keepUnreadyEventPending(locked, session);
             if (await Ticket.countDocuments({ eventId }).session(session) >= settings.ticketing.maxTicketTiers)
                 throw Object.assign(Error("The maximum number of ticket tiers has been reached."), { status: 409 });
             return newTicket.save({ session });
@@ -438,7 +439,8 @@ const updateTicket = async (req, res) => {
 
         updatePayload.perTransactionLimit = validateOrderLimits(updatePayload.perTransactionLimit || prevTicket.perTransactionLimit, settings.ticketing.maxTicketsPerOrder);
         const updatedTicket = await mongoose.connection.transaction(async session => {
-            await lockTicketEvent(event, session);
+            const locked = await lockTicketEvent(event, session);
+            await require("../../services/eventPublishing.service").keepUnreadyEventPending(locked, session);
             return Ticket.findOneAndUpdate({ _id: id, soldQuantity: prevTicket.soldQuantity, updatedAt: prevTicket.updatedAt }, updatePayload, {
                 new: true, runValidators: true, session,
             });

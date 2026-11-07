@@ -93,13 +93,26 @@ class PaystackAdapter extends PaymentGateway {
     return response.data.data;
   }
 
+  async verifyRefund(id) {
+    this._ensureKey();
+    const response = await axios.get(`${this.baseUrl}/refund/${encodeURIComponent(id)}`, { headers: this._headers(), timeout: 30000 });
+    if (!response.data.status) throw new Error("Refund verification failed");
+    return response.data.data;
+  }
+  async listRefunds(transactionId) {
+    this._ensureKey();
+    if (!transactionId) throw new Error("Transaction ID required for refund reconciliation");
+    const response = await axios.get(`${this.baseUrl}/refund`, { params: { transaction: transactionId, perPage: 100 }, headers: this._headers(), timeout: 30000 });
+    if (!response.data.status || !Array.isArray(response.data.data)) throw new Error("Refund lookup failed");
+    return response.data.data;
+  }
   async refundPayment(reference) {
     this._ensureKey();
 
     const response = await axios.post(
       `${this.baseUrl}/refund`,
       { transaction: reference },
-      { headers: this._headers() }
+      { headers: this._headers(), timeout: 30000 }
     );
 
     if (!response.data.status) {

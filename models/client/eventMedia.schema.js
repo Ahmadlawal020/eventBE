@@ -3,6 +3,7 @@ const schema = new Schema({
   publicId: { type: String, required: true, unique: true },
   owner: { type: Schema.Types.ObjectId, ref: "User", required: true },
   eventId: { type: Schema.Types.ObjectId, ref: "Event" },
+  eventCenterId: { type: Schema.Types.ObjectId, ref: "EventCenter" },
   url: String,
   state: { type: String, enum: ["PENDING", "READY", "ATTACHED", "CLEANING", "DELETED"], default: "PENDING" },
   expiresAt: Date, cleanupAfter: Date, lastError: String,

@@ -1,3 +1,5 @@
+const { validateAddress } = require("./addressRules");
+const { isValidCoordinates } = require("./locationCoordinates");
 const EventCenterSettings = require("../models/management/eventCenterSettings.schema");
 
 const getEventCenterSettings = () => EventCenterSettings.getSingleton();
@@ -9,6 +11,28 @@ const validateVenuePayload = (
   { publishing = false, requireComplete = publishing, existing = false, changes = payload } = {},
 ) => {
   const errors = [];
+  if (payload.location?.countryCode) {
+    errors.push(...Object.values(validateAddress(payload.location, { requireComplete })));
+  }
+  if (payload.location?.coordinates !== undefined && !isValidCoordinates(payload.location.coordinates)) {
+    errors.push("Venue coordinates must contain a latitude from -90 to 90 and a longitude from -180 to 180.");
+  }
+  if (Object.prototype.hasOwnProperty.call(changes, "cancellationPolicy")) {
+    const policy = changes.cancellationPolicy;
+    if (!policy || typeof policy !== "object" || Array.isArray(policy)) errors.push("Enter a cancellation policy.");
+    else {
+      if (typeof policy.allowGuestCancellation !== "boolean") errors.push("Choose whether guests can cancel.");
+      if (!Number.isInteger(policy.noticeHours) || policy.noticeHours < 0 || policy.noticeHours > 8760) errors.push("Cancellation notice must be 0-8760 whole hours.");
+      if (policy.allowGuestReschedule !== undefined && typeof policy.allowGuestReschedule !== "boolean") errors.push("Choose whether guests can request rescheduling.");
+      if (policy.rescheduleNoticeHours !== undefined && (!Number.isInteger(policy.rescheduleNoticeHours) || policy.rescheduleNoticeHours < 0 || policy.rescheduleNoticeHours > 8760)) errors.push("Rescheduling notice must be 0-8760 whole hours.");
+      if (policy.maxReschedules !== undefined && (!Number.isInteger(policy.maxReschedules) || policy.maxReschedules < 1 || policy.maxReschedules > 100)) errors.push("Reschedule limit must be a whole number from 1 to 100.");
+      for (const field of ["noticeUnit", "rescheduleNoticeUnit"]) {
+        if (policy[field] !== undefined && !["hours", "days"].includes(policy[field])) errors.push("Choose hours or days for the notice period.");
+      }
+      if (!Number.isInteger(policy.refundDays) || policy.refundDays < 1 || policy.refundDays > 90) errors.push("Refund deadline must be 1-90 whole days.");
+      if (typeof policy.refundInstructions !== "string" || policy.refundInstructions.length > 2000) errors.push("Refund instructions must be at most 2000 characters.");
+    }
+  }
   const shouldValidate = (field) =>
     !existing ||
     publishing ||
@@ -19,6 +43,19 @@ const validateVenuePayload = (
   }
 
 
+  if (shouldValidate("availability") && payload.availability) {
+    const a = { ...payload.availability, operationalHours: payload.availability.operationalHours || {} };
+    const clock = value => /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(value || "");
+    if (a.operationalHours?.open !== undefined || a.operationalHours?.close !== undefined || publishing) {
+      const close = ["00:00", "24:00"].includes(a.operationalHours.close) ? "24:00" : a.operationalHours.close;
+      if (!clock(a.operationalHours.open) || !(clock(a.operationalHours.close) || a.operationalHours.close === "24:00") || a.operationalHours.open >= close)
+        errors.push("Opening hours require a valid start before closing (HH:mm; 24:00 means midnight).");
+    }
+    if (a.minDuration !== undefined && (!Number.isInteger(a.minDuration) || a.minDuration < 1)) errors.push("Minimum duration must be a positive whole number.");
+    if (a.maxDuration !== undefined && (!Number.isInteger(a.maxDuration) || a.maxDuration < (a.minDuration || 1))) errors.push("Maximum duration must be at least the minimum.");
+    if (a.advanceNotice?.days !== undefined && (!Number.isInteger(a.advanceNotice.days) || a.advanceNotice.days < 0 || a.advanceNotice.days > 365)) errors.push("Advance notice must be 0-365 whole days.");
+    if (a.advanceNotice?.sameDayCutoffTime && !clock(a.advanceNotice.sameDayCutoffTime)) errors.push("Use HH:mm for the same-day cutoff.");
+  }
   const limits = settings.contentLimits;
   const validateLength = (value, maximum, label) => {
     if (typeof value === "string" && value.length > maximum) {
@@ -73,7 +110,12 @@ const validateVenuePayload = (
       (!Number.isInteger(payload.capacity.max) || payload.capacity.max <= 0)) {
     errors.push("Capacity must be a positive whole number");
   }
+  if (shouldValidate("basePrice") && payload.basePrice?.unit !== undefined && !["hour", "day"].includes(payload.basePrice.unit))
+    errors.push("Choose hourly or daily pricing. Per-event pricing is not supported.");
   for (const field of ["basePrice", "weekendPrice"]) {
+    const minimum = payload[field]?.minDuration;
+    if (shouldValidate(field) && minimum !== undefined && (!Number.isInteger(minimum) || minimum < 1 || minimum > 24))
+      errors.push("Minimum booking hours must be a whole number from 1 to 24.");
     const price = payload[field];
     if (shouldValidate(field) && price?.amount !== undefined &&
         (!Number.isFinite(price.amount) || price.amount < 0)) {
@@ -94,6 +136,10 @@ const validateVenuePayload = (
   }
 
   if (requireComplete) {
+    if (!payload.location?.addressString || !isValidCoordinates(payload.location?.coordinates))
+      errors.push("A mapped venue address is required before publishing.");
+    if (!payload.basePrice || !Number.isFinite(payload.basePrice.amount) || payload.basePrice.amount <= 0 || !["hour", "day"].includes(payload.basePrice.unit))
+      errors.push("A positive hourly or daily price is required before publishing.");
     for (const [field, label] of [
       ["venueName", "Venue name"], ["venueType", "Venue type"],
       ["shortDescription", "Short description"], ["description", "Description"],
@@ -143,22 +189,17 @@ const validateVenuePayload = (
   return errors;
 };
 
-const ownerMeetsPublishingRequirements = (user, settings) => {
-  if (
-    settings.publishing.requireIdentityVerification &&
-    !user?.isIdentityVerified
-  ) {
-    return false;
-  }
-  const hasPayoutAccount = Boolean(
-    user?.vendorAccountCode ||
-    (user?.bankDetails?.accountNumber && user?.bankDetails?.bankCode)
-  );
-  const requirePayout = settings.publishing.requirePayoutAccount !== false;
-  if (requirePayout && !hasPayoutAccount) {
-    return false;
-  }
-  return true;
+const payoutReadinessError = (user, venue) => {
+  if (venue.bookingSettings === "REVIEW") {
+    if ((venue.basePrice?.currency || "NGN") !== "NGN") return "Review bookings require NGN pricing. Change the currency or use instant booking.";
+    if (!user?.bankDetails?.accountNumber || !user?.bankDetails?.bankCode) return "Connect the venue owner's payout bank account before enabling review bookings.";
+  } else if (!user?.vendorAccountCode) return "Connect the venue owner's online payout account before enabling instant bookings.";
+  return null;
+};
+const ownerMeetsPublishingRequirements = (user, settings, venue) => {
+  if (!user?.isIdentityVerified) return false;
+  if (venue) return !payoutReadinessError(user, venue);
+  return Boolean(user?.vendorAccountCode || (user?.bankDetails?.accountNumber && user?.bankDetails?.bankCode));
 };
 
 const publicEventCenterSettings = (settings) => ({
@@ -171,6 +212,7 @@ const publicEventCenterSettings = (settings) => ({
 });
 
 module.exports = {
+  payoutReadinessError,
   getEventCenterSettings,
   ownerMeetsPublishingRequirements,
   publicEventCenterSettings,

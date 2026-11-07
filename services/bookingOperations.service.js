@@ -11,13 +11,13 @@ function paymentSummary(booking, record = {}) {
     if (payment.kind === "SECURITY_DEPOSIT") securityMinor += payment.amountMinor;
     if (payment.kind === "SECURITY_RETURN") securityMinor -= payment.amountMinor;
   }
-  const balanceMinor = Math.max(0, totalMinor - paidMinor);
+  const balanceMinor = booking.status === "CANCELLED" ? 0 : Math.max(0, totalMinor - paidMinor);
   return { totalMinor, paidMinor, balanceMinor, securityMinor, openingPaidMinor,
     currency: booking.totalPrice?.currency || "NGN", overdue: booking.status !== "CANCELLED" && balanceMinor > 0 && !!record.paymentDueDate && dayOf(record.paymentDueDate) < dayOf(new Date()) };
 }
 function applyOperation(booking, record, payload, actor, now = new Date()) {
   const next = JSON.parse(JSON.stringify(record));
-  next.payments ||= []; next.handovers ||= []; next.audit ||= [];
+  next.payments ||= []; next.refunds ||= []; next.handovers ||= []; next.audit ||= [];
   const reason = typeof payload.reason === "string" ? payload.reason.trim().slice(0, 500) : "";
   if (payload.action === "DETAILS") {
     const fields = { eventPurpose: 200, seating: 500, clientRequests: 2000, privateNotes: 4000 };
@@ -34,6 +34,20 @@ function applyOperation(booking, record, payload, actor, now = new Date()) {
       next.paymentDueDate = payload.paymentDueDate ? new Date(`${payload.paymentDueDate}T12:00:00Z`) : null;
       if (next.paymentDueDate && (Number.isNaN(next.paymentDueDate.getTime()) || next.paymentDueDate.toISOString().slice(0, 10) !== payload.paymentDueDate)) fail(400, "Invalid due date.");
     }
+  } else if (payload.action === "REFUND_APPROVE") {
+    if (booking.bookingType !== "MANUAL") fail(400, "Use the online refund workflow for this booking.");
+    if (!/^[a-zA-Z0-9-]{8,100}$/.test(payload.id || "") || !reason) fail(400, "A refund key and reason are required.");
+    if (next.refunds.some(r => r.id === payload.id)) return record;
+    const amountMinor = minor(payload.amount), available = paymentSummary(booking, next).paidMinor - next.refunds.filter(r => r.status === "APPROVED").reduce((n,r) => n + r.amountMinor, 0);
+    if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0 || amountMinor > available) fail(400, "Approval exceeds unallocated collections.");
+    next.refunds.push({ id: payload.id, amountMinor, reason, status: "APPROVED", approvedAt: now, approvedBy: actor });
+  } else if (payload.action === "REFUND_CONFIRM") {
+    const refund = next.refunds.find(r => r.id === payload.refundId);
+    if (!refund || refund.status === "APPROVED") fail(409, "Record the payment before confirming receipt.");
+    if (refund.status === "CONFIRMED") return record;
+    if (record.customerId && String(record.customerId) !== String(actor)) fail(403, "The linked customer must confirm receipt in their account.");
+    if (!record.customerId && !reason) fail(400, "Record the customer's receipt acknowledgement or receipt reference.");
+    Object.assign(refund, { status: "CONFIRMED", confirmedAt: now, confirmedBy: actor, confirmationEvidence: reason || "Customer confirmed in their account" });
   } else if (payload.action === "PAYMENT") {
     const { kind, id, method } = payload;
     if (typeof id !== "string" || !/^[a-zA-Z0-9-]{8,100}$/.test(id)) fail(400, "A payment reference key is required.");
@@ -49,7 +63,13 @@ function applyOperation(booking, record, payload, actor, now = new Date()) {
     if (kind === "REFUND" && amountMinor > summary.paidMinor) fail(400, "Refund exceeds recorded payments.");
     if (kind === "SECURITY_RETURN" && amountMinor > summary.securityMinor) fail(400, "Return exceeds the security deposit held.");
     if (["REFUND", "SECURITY_RETURN"].includes(kind) && !reason) fail(400, "A reason is required for a refund or deposit return.");
-    next.payments.push({ id, kind, amountMinor, method, reference: String(payload.reference || "").slice(0, 150), reason, actor, at: now });
+    if (kind === "REFUND") {
+      const refund = next.refunds.find(r => r.id === payload.refundId);
+      if (!refund || refund.status !== "APPROVED" || refund.amountMinor !== amountMinor) fail(409, "Approve this refund installment before recording it as sent.");
+      if (!refund.settlement?.id || refund.settlement.method !== method || !refund.receipt?.publicId || refund.receipt.settlementId !== refund.settlement.id) fail(409, "Prepare the refund account and upload proof of this payment before marking it sent.");
+      Object.assign(refund, { status: "SENT", sentAt: now });
+    }
+    next.payments.push({ id, kind, refundId: payload.refundId, amountMinor, method, reference: String(payload.reference || "").slice(0, 150), reason, actor, at: now });
   } else if (payload.action === "HANDOVER") {
     const session = bookingSessions(booking).find(item => item.sessionId === payload.sessionId);
     if (!session || new Date(session.startsAt) > now) fail(400, "Choose a current or past booking session.");
@@ -73,10 +93,11 @@ async function saveOperation(venueId, booking, payload, actor) {
   const Model = require("../models/client/bookingOperations.schema");
   return require("mongoose").connection.transaction(async session => {
     // Read the current manual schedule inside the same transaction as its ledger.
-    if (booking.bookingType === "MANUAL" && payload.action === "PAYMENT") {
+    if (booking.bookingType === "MANUAL" && ["PAYMENT", "REFUND_APPROVE", "REFUND_CONFIRM"].includes(payload.action)) {
       const Venue = require("../models/client/eventCenter.schema");
       const venue = await Venue.findById(venueId).session(session).lean();
       if (!venue) fail(404, "Venue not found.");
+      if (venue.archivedAt) fail(409, "Archived venues cannot accept new financial operations.");
       const current = require("./manualBookingRead.service").buildManualBookings([venue]).find(item => String(item._id) === String(booking._id));
       booking = current || { ...booking, status: "CANCELLED" };
       // Also serialize refunds for removed bookings against calendar edits.
@@ -101,6 +122,15 @@ async function saveOperation(venueId, booking, payload, actor) {
       for (const field of ["unavailableDates", "unavailableSlots"]) await Venue.updateOne({ _id: venueId, [`availability.${field}.bookingId`]: String(booking._id) },
         { $set: { [`availability.${field}.$[booking].depositAmount`]: summary.paidMinor / 100, [`availability.${field}.$[booking].paymentStatus`]: status } },
         { arrayFilters: [{ "booking.bookingId": String(booking._id) }], session });
+    }
+    if (booking.bookingType === "MANUAL" && ["PAYMENT", "REFUND_APPROVE", "REFUND_CONFIRM"].includes(payload.action)) {
+      const venue = await require("../models/client/eventCenter.schema").findById(venueId).session(session).lean();
+      const recipients = [...new Set([String(venue.createdBy), ...(record.customerId ? [String(record.customerId)] : [])])];
+      await require("./eventCenterRefundNotifications.service").queueNotices(recipients.map(recipient => ({
+        key: `manual-finance:${record._id}:${saved.revision}:${recipient}`, recipient, type: "SYSTEM", title: "Booking payment update",
+        message: `${venue.venueName || "Venue"}: a payment or refund update was recorded for ${booking._id}.`,
+        data: { screen: recipient === String(venue.createdBy) ? "VenueBookingOperations" : "ManualVenueBooking", venueId: String(venueId), bookingId: String(booking._id) },
+      })),session);
     }
     return saved;
   });

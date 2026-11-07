@@ -48,6 +48,19 @@ router.get("/:id/payout", verifyJWT, async (req,res) => {
     res.json({success:true,data:payout});
   } catch(error){res.status(400).json({success:false,message:"Could not load payout"});}
 });
+const cancellation = require("../../controllers/client/venueCancellation.controller");
+router.get("/:id/cancellation", verifyJWT, cancellation.preview);
+router.post("/:id/cancel", verifyJWT, ticketCreateLimiter, cancellation.cancel);
+router.get("/:id/organiser-details", verifyJWT, require("../../controllers/client/eventCenterRefundWorkspace.controller").details);
+router.get("/:id/refund", verifyJWT, cancellation.organiserRefund);
+const reschedule = require("../../controllers/client/venueReschedule.controller");
+router.get("/:id/reschedule-availability", verifyJWT, ticketScanLimiter, reschedule.availability);
+router.get("/:id/reschedule-request", verifyJWT, reschedule.get);
+router.post("/:id/reschedule-request", verifyJWT, ticketCreateLimiter, reschedule.request);
+router.patch("/:id/reschedule-request", verifyJWT, ticketCreateLimiter, reschedule.resolve);
+const reviews = require("../../controllers/client/venueReview.controller");
+router.get("/:id/review", verifyJWT, reviews.mine);
+router.post("/:id/review", verifyJWT, ticketCreateLimiter, reviews.create);
 router.get("/:id", verifyJWT, getTicketById);
 
 module.exports = router;

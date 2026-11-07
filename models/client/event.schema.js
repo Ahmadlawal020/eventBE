@@ -230,6 +230,10 @@ const eventSchema = new mongoose.Schema(
     /* ===== LOCATION ===== */
 
     location: {
+      countryCode: { type: String, uppercase: true, trim: true, enum: ["", ...Object.keys(require("../../data/address/countries.json").countries)] },
+      building: { type: String, trim: true, maxlength: 200 },
+      locality: { type: String, trim: true, maxlength: 200 },
+      district: { type: String, trim: true, maxlength: 200 },
       addressString: {
         type: String,
         trim: true,
@@ -266,14 +270,10 @@ const eventSchema = new mongoose.Schema(
       },
 
       coordinates: {
-        latitude: Number,
-        longitude: Number,
+        latitude: { type: Number, min: -90, max: 90, validate: value => value == null || Number.isFinite(value) },
+        longitude: { type: Number, min: -180, max: 180, validate: value => value == null || Number.isFinite(value) },
       },
 
-      isSpecificLocation: {
-        type: Boolean,
-        default: false,
-      },
     },
 
     /* ===== META ===== */
@@ -329,6 +329,7 @@ const eventSchema = new mongoose.Schema(
       customRefundTerms: { type: String, trim: true, maxlength: 1000 },
       cancellationNotificationMethod: { type: String, trim: true, maxlength: 500 },
       cancellationRefundProcess: { type: String, trim: true, maxlength: 1000 },
+      cancellationRefundDays: { type: Number, min: 1, max: 30, validate: Number.isInteger },
       cancellationRefundTimeline: { type: String, trim: true, maxlength: 500 },
       description: {
         type: String,
@@ -348,6 +349,7 @@ const eventSchema = new mongoose.Schema(
       trim: true,
       maxlength: 1000,
     },
+    cancellationRefundDays: { type: Number, min: 1, max: 30, validate: Number.isInteger },
     cancellationRefundTimeline: {
       type: String,
       trim: true,

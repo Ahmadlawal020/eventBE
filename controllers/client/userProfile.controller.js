@@ -93,16 +93,13 @@ const updateUser = asyncHandler(async (req, res) => {
   const user = await User.findById(id).exec();
   if (!user) return res.status(404).json({ message: "User not found." });
 
-  // Prevent duplicate emails
-  if (email && email.toLowerCase().trim() !== user.email.toLowerCase().trim()) {
-    const trimmedEmail = email.toLowerCase().trim();
-    const duplicate = await User.findOne({ email: trimmedEmail, _id: { $ne: user._id } }).lean().exec();
-    if (duplicate) {
-      return res.status(409).json({ message: "The address has been taken" });
-    }
-    user.email = trimmedEmail;
-    user.authProvider = "local";
-    user.googleId = undefined;
+  if (password !== undefined || (email !== undefined && (typeof email !== "string" || email.trim().toLowerCase() !== user.email))) {
+    return res.status(400).json({ success: false, message: "Use the verified email-change or password-reset flow to change account credentials." });
+  }
+  if (phoneNumber !== undefined && phoneNumber !== user.phoneNumber) {
+    if (typeof phoneNumber !== "string") return res.status(400).json({ message: "Invalid phone number." });
+    user.isPhoneVerified = false;
+    user.phoneVerifiedAt = null;
   }
 
   user.firstName = firstName ?? user.firstName;
@@ -144,12 +141,6 @@ const updateUser = asyncHandler(async (req, res) => {
     user.roles = [...new Set([...existingRestrictedRoles, ...verifiedRoles])];
   }
 
-  if (password) {
-    user.password = await bcrypt.hash(password, 10);
-    user.$inc("sessionVersion", 1);
-    user.refreshToken = "";
-  }
-
   const updatedUser = await user.save();
 
   // Profile fields do not change the verification flags used for publishing.
@@ -180,7 +171,7 @@ const updateUser = asyncHandler(async (req, res) => {
   });
 });
 
-// @desc    Delete user account and all personal data
+// @desc    Reject immediate deletion until coordinated account closure is available
 // @route   DELETE /api/user-info/:id
 // @access  Private (owner only)
 const deleteUserAccount = asyncHandler(async (req, res) => {
@@ -195,21 +186,13 @@ const deleteUserAccount = asyncHandler(async (req, res) => {
     return res.status(404).json({ message: "User not found." });
   }
 
-  // Cleanup Cloudinary profile picture
-  if (user.profilePicture?.publicId) {
-    try {
-      await cloudinary.uploader.destroy(user.profilePicture.publicId);
-    } catch (err) {
-      console.error("[CLOUDINARY DELETE ERROR]", err);
-    }
-  }
-
-  // Delete the user record
-  await User.findByIdAndDelete(id);
-
-  res.status(200).json({
-    success: true,
-    message: "Your account and associated personal data have been permanently deleted.",
+  // A snapshot of current obligations cannot exclude concurrent checkout, ticket
+  // transfers or late provider callbacks. Keep the account and its media intact
+  // until a coordinated closure workflow can settle and retain related records.
+  return res.status(409).json({
+    success: false,
+    code: "ACCOUNT_CLOSURE_REQUIRES_SUPPORT",
+    message: "Account deletion requires a support review of bookings, refunds and payouts. Your account has not been deleted. Please contact support to close it.",
   });
 });
 
@@ -293,13 +276,13 @@ const verifyChangeEmailOTP = asyncHandler(async (req, res) => {
   user.$inc("sessionVersion", 1);
   // Generate new tokens for the updated email
   const accessToken = jwt.sign(
-    { UserInfo: { id: user._id, email: user.email, roles: user.roles, sessionVersion: user.sessionVersion || 0 } },
+    { accountType: "client", UserInfo: { id: user._id, email: user.email, roles: user.roles, sessionVersion: user.sessionVersion || 0 } },
     process.env.ACCESS_TOKEN_SECRET,
     { expiresIn: "15m" }
   );
 
   const refreshToken = jwt.sign(
-    { id: user._id, email: user.email, sessionVersion: user.sessionVersion || 0 },
+    { accountType: "client", id: user._id, email: user.email, sessionVersion: user.sessionVersion || 0 },
     process.env.REFRESH_TOKEN_SECRET,
     { expiresIn: "7d" }
   );

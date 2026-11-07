@@ -53,10 +53,6 @@ router.get("/listing/:listingType/:listingId/stats", requireRole("staff"), staff
 router.post("/scanner/:listingType/:listingId/verify", requireRole("staff"), staffScannerController.verifyTicketStaff);
 router.post("/scanner/:listingType/:listingId/validate", requireRole("staff"), staffScannerController.validateTicketStaff);
 
-router.get("/bookings/venue/:eventCenterId/holds", requireRole("organiser"), eventCenterBookingController.getVenueHolds);
-router.post("/bookings/venue/:eventCenterId/holds", requireRole("organiser"), eventCenterBookingController.changeVenueHold);
-router.patch("/bookings/venue/:eventCenterId/holds/:holdId", requireRole("organiser"), eventCenterBookingController.changeVenueHold);
-router.get("/bookings/venue/:eventCenterId/today", requireRole("staff", "organiser"), eventCenterBookingController.getVenueToday);
 router.get("/bookings/:bookingId/operations", requireRole("staff", "organiser"), eventCenterBookingController.getBookingOperations);
 router.patch("/bookings/:bookingId/operations", requireRole("staff", "organiser"), eventCenterBookingController.updateBookingOperations);
 router.get("/bookings/search/:eventCenterId", requireRole("staff", "organiser"), eventCenterBookingController.searchBooking);

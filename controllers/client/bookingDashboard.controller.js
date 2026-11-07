@@ -98,7 +98,7 @@ const getOrganiserBookingStats = async (req, res) => {
               $group: {
                 _id: null,
                 totalBookings: { $sum: 1 },
-                activeBookings: { $sum: { $cond: [{ $eq: ["$status", "ACTIVE"] }, 1, 0] } },
+                activeBookings: { $sum: { $cond: [{ $in: ["$status", ["ACTIVE", "CONFIRMED"]] }, 1, 0] } },
                 completedBookings: { $sum: { $cond: [{ $eq: ["$status", "COMPLETED"] }, 1, 0] } },
                 cancelledBookings: { $sum: { $cond: [{ $eq: ["$status", "CANCELLED"] }, 1, 0] } },
                 totalCheckedIn: { $sum: { $cond: ["$checkIn.isCheckedIn", 1, 0] } },
@@ -192,6 +192,17 @@ const getOrganiserBookingStats = async (req, res) => {
       }
     }
 
+    const venueMoney = await require("../../services/venueMoney.service").loadVenueMoney(financeVenueIds, manualBookings);
+    const finance = venueMoney.currencies.length === 1 ? venueMoney.currencies[0] : venueMoney.currencies.length === 0 ? { netReceipts: 0, grossCollections: 0, fees: 0, refundsSent: 0, refundsConfirmed: 0, refundLiability: 0 } : null;
+    agg.totalRevenue = finance?.netReceipts ?? null;
+    agg.grossCollections = finance?.grossCollections ?? null;
+    agg.platformFees = finance?.fees ?? null;
+    agg.refundsSent = finance?.refundsSent ?? null;
+    agg.refundsConfirmed = finance?.refundsConfirmed ?? null;
+    agg.refundLiability = finance?.refundLiability ?? null;
+    agg.moneyByCurrency = venueMoney.currencies;
+    facetData.revenueByCurrency = venueMoney.currencies.map(r => ({ _id: r.currency, revenue: r.netReceipts }));
+    facetData.revenueByBookingUnit = venueMoney.byUnit;
     const attendanceBookings = await attendanceForBookings([
       ...await EventCenterBooking.find({ eventCenter: { $in: venueIds } }).select("_id eventCenter selectedDates bookingUnit status checkIn").lean(),
       ...manualBookings,
@@ -214,7 +225,7 @@ const getOrganiserBookingStats = async (req, res) => {
     }
     facetData.staffEfficiency = [...attendanceActors].map(([_id, count]) => ({ _id, count })).sort((a, b) => b.count - a.count).slice(0, 5);
 
-    const avgBookingValue = financeVenueIds.length > 0 && agg.totalBookings > 0 ? (agg.totalRevenue / agg.totalBookings).toFixed(2) : null;
+    const avgBookingValue = financeVenueIds.length > 0 && agg.totalBookings > 0 ? (Number(agg.totalRevenue || 0) / agg.totalBookings).toFixed(2) : null;
 
     const venueAnalytics = {
       listed: venues.filter(v => v.status === "LISTED").length,
@@ -269,6 +280,9 @@ const getOrganiserBookingStats = async (req, res) => {
       stats.count++;
       stats.revenue += manualCollectedAmount(booking);
       if (booking.checkIn.isCheckedIn) stats.checkedIn++;
+    }
+    for (const [id, money] of venueMoney.perVenue) {
+      if (venueStatsMap[id]) venueStatsMap[id].revenue = money.length === 1 ? money[0].netReceipts : null;
     }
     const venueList = venues.map((v) => {
       const stats = venueStatsMap[v._id.toString()] || { count: 0, revenue: 0, checkedIn: 0, pendingReview: 0 };
@@ -392,6 +406,8 @@ const getSingleVenueBookingStats = async (req, res) => {
         return {
           ...b,
           depositAmount: null,
+          manualFinance: undefined, subtotalPrice: undefined, platformFeeAmount: undefined, buyerFeeAmount: undefined,
+          organiserFeeAmount: undefined, organiserPayoutAmount: undefined, feePercentage: undefined, refund: undefined,
           totalPrice: {
             ...b.totalPrice,
             amount: null
@@ -401,13 +417,17 @@ const getSingleVenueBookingStats = async (req, res) => {
       return b;
     });
 
+    const refundRecords = hasFinancePerm ? await require("../../models/client/eventCenterRefund.schema")
+      .find({ eventCenterId: venue._id }).select("amountMinor currency markedPaidAt status").lean() : [];
+    const financeRows = hasFinancePerm ? require("../../services/venueMoney.service").venueMoney(platformBookings, refundRecords, manualBookings) : [];
     // Aggregate stats for this specific venue
     const stats = {
       total: bookings.length,
       active: bookings.filter(b => b.status === 'ACTIVE' || b.status === 'CONFIRMED').length,
       pendingReview: bookings.filter(b => b.status === 'PENDING_REVIEW').length,
       checkedIn: bookings.filter(b => b.attendance.summary.attended > 0).length,
-      revenue: hasFinancePerm ? bookings.reduce((acc, b) => acc + (b.bookingType === 'MANUAL' ? manualCollectedAmount(b) : b.paymentStatus === 'COMPLETED' ? b.totalPrice.amount : 0), 0) : null,
+      revenue: hasFinancePerm && financeRows.length === 1 ? financeRows[0].netReceipts : null,
+      moneyByCurrency: financeRows,
     };
 
     res.status(200).json({

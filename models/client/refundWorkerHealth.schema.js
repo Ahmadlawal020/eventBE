@@ -5,6 +5,10 @@ module.exports = mongoose.model(
     {
       name: { type: String, unique: true },
       startedAt: Date,
+      nextRunAt: Date,
+      revision: String,
+      completedRevision: String,
+      processId: Number,
       lockedUntil: Date,
       lockToken: String,
       heartbeatAt: Date,

@@ -28,7 +28,11 @@ test("overpayments, negative amounts and platform cash replacements are rejected
 test("cash refunds require a reason and cannot exceed money received", () => {
   assert.throws(() => applyOperation(booking, record, { ...payment, kind: "REFUND", amount: 100 }, "owner", now));
   assert.throws(() => applyOperation(booking, record, { ...payment, kind: "REFUND", amount: 201, reason: "Cancelled" }, "owner", now));
-  const updated = applyOperation(booking, record, { ...payment, kind: "REFUND", amount: 100, reason: "Agreed reduction" }, "owner", now);
+  const approved = applyOperation(booking, record, { action: "REFUND_APPROVE", id: "refund-one", amount: 100, reason: "Agreed reduction" }, "owner", now);
+  assert.throws(() => applyOperation(booking, approved, { ...payment, kind: "REFUND", refundId: "refund-one", amount: 100, reason: "Agreed reduction" }, "owner", now), /proof/);
+  approved.refunds[0].settlement = { id: "prepared", method: "CASH" };
+  approved.refunds[0].receipt = { publicId: "private-proof", settlementId: "prepared" };
+  const updated = applyOperation(booking, approved, { ...payment, kind: "REFUND", refundId: "refund-one", amount: 100, reason: "Agreed reduction" }, "owner", now);
   assert.equal(paymentSummary(booking, updated).paidMinor, 10000);
 });
 test("security deposits remain separate from booking revenue", () => {
@@ -72,8 +76,8 @@ test("day preparation gaps span the dates before and after a booking", () => {
   assert.throws(() => assertVenueSchedule(v, [{ date: "2030-01-03" }], "day", { now }), /preparation/);
   assert.throws(() => assertVenueSchedule(v, [{ date: "2030-01-05" }], "day", { now }), /preparation/);
 });
-test("expired holds do not block new reservations", () => {
-  const v = venue({ unavailableDates: [{ date: "2030-01-03", holdExpiresAt: "2030-01-01", type: "BLOCKED" }] });
+test("retired organiser holds never block new reservations", () => {
+  const v = venue({ unavailableDates: [{ date: "2030-01-03", holdId: "test-hold", holdExpiresAt: "2099-01-01", type: "BLOCKED" }] });
   assert.doesNotThrow(() => assertVenueSchedule(v, slots, "hour", { now }));
 });
 test("pending payouts are not unsettled customer payments and currencies are separate", () => {
@@ -86,7 +90,7 @@ test("reminders have distinct session and recipient keys", () => {
   b.attendance = attendanceFor(b, [], now);
   const candidates = reminderCandidates(venue(), [b], [], now);
   assert.equal(candidates.length, 2); assert.notEqual(candidates[0].key, candidates[1].key);
-  assert.equal(candidates[1].data.screen, "TicketDetails");
+  assert.equal(candidates[1].data.screen, "ManualVenueBooking");
 });
 test("manual bookings remind the organiser, without inventing an account for a phone number", () => {
   const b = { ...booking, selectedDates: [{ date: "2030-01-03" }] }; b.attendance = attendanceFor(b, [], now);

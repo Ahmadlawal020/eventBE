@@ -28,10 +28,11 @@ async function measured(name, action) {
       { $set: { lastError: String(error.message).slice(0, 500) } },
     );
     console.error("[REFUND WORKER FAILED]", name, error.message);
+    return { failed: 1 };
   }
 }
 async function runRefundOperations() {
-  await Promise.all([
+  const results = await Promise.all([
     measured("notifications", () =>
       processRefundNotices({
         limit: bounded(process.env.REFUND_NOTICE_BATCH, 50, 500),
@@ -52,6 +53,7 @@ async function runRefundOperations() {
   const health = await getRefundOperations();
   if (health.alerts.length)
     console.error("[REFUND OPERATIONS ALERT]", JSON.stringify(health.alerts));
+  return { failed: results.reduce((sum, result) => sum + (result?.failed || result?.failedCount || 0), 0) };
 }
 async function getRefundOperations() {
   const now = new Date();

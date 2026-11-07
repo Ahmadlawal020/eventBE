@@ -15,7 +15,7 @@ const policy = {
 function harness({ owner = true, permissions = [], missing = false, status = "IN_PROGRESS", concurrentChange = false } = {}) {
   let writes = 0, realignments = 0;
   const saved = {
-    _id: "507f1f77bcf86cd799439011", createdBy: "owner", status,
+    _id: "507f1f77bcf86cd799439011", createdBy: "owner", status, updatedAt: new Date("2026-11-01T00:00:00Z"),
     schedule: { from: "2027-01-01", to: "2027-01-02" },
     ticketGuide: { description: "Entry instructions", includeFees: true, ...policy },
   };
@@ -48,7 +48,7 @@ function harness({ owner = true, permissions = [], missing = false, status = "IN
   vm.runInNewContext(fs.readFileSync(require.resolve("../controllers/client/event.controller"), "utf8"), context);
   return { writes: () => writes, realignments: () => realignments, async update(body, id = saved._id) {
     const res = { code: 200, status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };
-    await context.module.exports.updateEvent({ params: { id }, user: { id: owner ? "owner" : "other" }, body }, res);
+    await context.module.exports.updateEvent({ params: { id }, user: { id: owner ? "owner" : "other" }, body: { expectedUpdatedAt: saved.updatedAt.toISOString(), ...body } }, res);
     return res;
   } };
 }
@@ -154,5 +154,32 @@ test("cancelled event information cannot be edited by its organiser", async () =
     const result = await harness({ status: "CANCELLED" }).update(patch);
     assert.equal(result.code, 409);
     assert.match(result.body.message, /event has been cancelled/);
+  }
+});
+
+
+test("policy saves reject a missing or stale editor version before writing", async () => {
+  for (const version of [null, "invalid", "2026-10-01T00:00:00Z"]) {
+    const f = harness();
+    const result = await f.update({ cancellationRefundProcess: "Changed", expectedUpdatedAt: version });
+    assert.equal(result.code, 409);
+    assert.equal(f.writes(), 0);
+  }
+});
+test("structured deadlines persist matching top-level and attendee-facing terms", async () => {
+  const f = harness();
+  const result = await f.update({ cancellationRefundDays: 14, cancellationRefundProcess: "Send to your verified account" });
+  assert.equal(result.code, 200, JSON.stringify(result.body));
+  assert.equal(result.body.data.cancellationRefundDays, 14);
+  assert.equal(result.body.data.ticketGuide.cancellationRefundDays, 14);
+  assert.equal(result.body.data.cancellationRefundTimeline, result.body.data.ticketGuide.cancellationRefundTimeline);
+  assert.match(result.body.data.cancellationRefundTimeline, /14 calendar days from event cancellation/);
+  assert.equal(result.body.data.expectedUpdatedAt, undefined);
+});
+test("invalid structured deadlines cannot reach persistence", async () => {
+  for (const days of [0, 31, 1.5, "7", null]) {
+    const f = harness();
+    assert.equal((await f.update({ cancellationRefundDays: days })).code, 400);
+    assert.equal(f.writes(), 0);
   }
 });

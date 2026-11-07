@@ -5,7 +5,7 @@ const envOrigins = (process.env.CORS_ALLOWED_ORIGINS || "")
   .map((origin) => origin.trim())
   .filter(Boolean);
 
-const allowedOrigins = [...new Set([...defaultAllowedOrigins, ...envOrigins])];
+const allowedOrigins = [...new Set([...(process.env.NODE_ENV === "production" ? [] : defaultAllowedOrigins), ...envOrigins])];
 
 const corsOptions = {
   origin: (origin, callback) => {

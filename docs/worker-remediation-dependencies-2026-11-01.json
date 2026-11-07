@@ -1,0 +1,24 @@
+{
+  "date": "2026-11-01",
+  "counts": {
+    "info": 0,
+    "low": 16,
+    "moderate": 0,
+    "high": 0,
+    "critical": 0,
+    "total": 16
+  },
+  "findings": [
+    {
+      "name": "deepmerge",
+      "severity": "low",
+      "range": ">=4.2.0",
+      "advisories": [
+        "https://github.com/advisories/GHSA-gcqx-w48m-w2h4"
+      ]
+    }
+  ],
+  "backports": {
+    "deepmerge": "Installed 4.3.1 is patched by scripts/patch-dependencies.cjs; npm audits versions and still reports its original advisory. Regression tests cover both input objects, null-prototype targets, and nested arrays."
+  }
+}

@@ -6,7 +6,7 @@ function reminderCandidates(venue, bookings, records = [], now = new Date()) {
     if (!recipient) return;
     result.push({ key: `${venue._id}:${booking._id}:${recipient}:${kind}:${suffix}`, recipient: String(recipient),
       type: kind, title: kind === "VENUE_PAYMENT_DUE" ? "Booking payment due" : kind === "VENUE_ATTENDANCE_FOLLOWUP" ? "Confirm session attendance" : "Upcoming venue booking",
-      message, data: { screen: client ? "TicketDetails" : "VenueBookingOperations", type: "EVENT_CENTER", bookingId: String(booking._id), ticketId: String(booking._id), venueId: String(venue._id) } });
+      message, data: { screen: client ? booking.bookingType === "MANUAL" ? "ManualVenueBooking" : "TicketDetails" : "VenueBookingOperations", type: "EVENT_CENTER", bookingId: String(booking._id), ticketId: String(booking._id), venueId: String(venue._id) } });
   };
   for (const booking of bookings) {
     if (!["ACTIVE", "CONFIRMED", "COMPLETED"].includes(booking.status)) continue;
@@ -30,11 +30,11 @@ function reminderCandidates(venue, bookings, records = [], now = new Date()) {
   }
   return result;
 }
-let cursor = null;
 async function runVenueReminders() {
   const Venue = require("../models/client/eventCenter.schema");
+  const checkpoints = require("mongoose").connection.collection("worker_scan_checkpoints");
+  const cursor = (await checkpoints.findOne({ _id: "venue-reminders" }))?.cursor;
   const venues = await Venue.find(cursor ? { _id: { $gt: cursor } } : {}).sort({ _id: 1 }).limit(100).lean();
-  cursor = venues.length === 100 ? venues[venues.length - 1]._id : null;
   const Reminder = require("../models/client/bookingReminder.schema");
   for (const venue of venues) {
     const [platform, manual, records] = await Promise.all([
@@ -43,15 +43,11 @@ async function runVenueReminders() {
       require("../models/client/bookingOperations.schema").find({ eventCenter: venue._id }).lean(),
     ]);
     const bookings = await require("./bookingAttendance.service").attendanceForBookings([...platform, ...manual]);
-    for (const candidate of reminderCandidates(venue, bookings, records)) {
-      let claim;
-      try {
-        claim = await Reminder.findOneAndUpdate({ key: candidate.key, state: { $ne: "SENT" }, $or: [{ leaseUntil: { $exists: false } }, { leaseUntil: { $lte: new Date() } }] },
-          { $set: { leaseUntil: new Date(Date.now() + 10 * 60000) }, $setOnInsert: { key: candidate.key, state: "PENDING" } }, { upsert: true, new: true });
-      } catch (error) { if (error.code === 11000) continue; throw error; }
-      const sent = await require("./notification").dispatchNotification({ ...candidate, referenceId: claim._id, referenceType: "Custom", deduplicate: true, channels: ["in_app", "push"] });
-      if (sent) await Reminder.updateOne({ _id: claim._id }, { $set: { state: "SENT", sentAt: new Date() } });
-    }
+    const candidates = reminderCandidates(venue, bookings, records);
+    const alreadySent = await Reminder.find({ key: { $in: candidates.map(row => row.key) }, state: "SENT" }).select("key").lean();
+    const sentKeys = new Set(alreadySent.map(row => row.key));
+    await require("./eventCenterRefundNotifications.service").queueNotices(candidates.filter(row => !sentKeys.has(row.key)).map(row => ({ ...row, channels: ["in_app", "push"] })));
   }
+  await checkpoints.updateOne({ _id: "venue-reminders" }, { $set: { cursor: venues.length === 100 ? venues[venues.length - 1]._id : null } }, { upsert: true });
 }
 module.exports = { reminderCandidates, runVenueReminders };

@@ -1,3 +1,4 @@
+const { publicVenue, canReadPrivateVenue, withoutRetiredVenueHolds } = require("../../services/publicVenue.service");
 const EventCenter = require("../../models/client/eventCenter.schema");
 const User = require("../../models/client/user.schema");
 const mongoose = require("mongoose");
@@ -48,10 +49,11 @@ const createEventCenter = async (req, res) => {
       });
     }
     const owner = publishing ? await User.findById(req.user.id) : null;
+    const paymentTerms = { bookingSettings: bookingSettings || settings.booking.defaultBookingMode, basePrice };
     const canAutoPublish =
       publishing &&
       settings.publishing.autoPublishVerifiedOwners &&
-      ownerMeetsPublishingRequirements(owner, settings);
+      ownerMeetsPublishingRequirements(owner, settings, paymentTerms);
 
     const newCenter = new EventCenter({
       venueType,
@@ -63,6 +65,7 @@ const createEventCenter = async (req, res) => {
       images,
       availability,
       capacity,
+      cancellationPolicy: req.body.cancellationPolicy,
       bookingSettings: bookingSettings || settings.booking.defaultBookingMode,
       basePrice: basePrice
         ? {
@@ -86,7 +89,11 @@ const createEventCenter = async (req, res) => {
       arrivalGuide,
     });
 
-    const savedCenter = await newCenter.save();
+    const savedCenter = await mongoose.connection.transaction(async session => {
+      await require("../../services/venueMedia.service").attachVenueMedia(images, null, newCenter._id, req.user.id, session);
+      if ((availability?.unavailableDates || []).length || (availability?.unavailableSlots || []).length) throw Object.assign(new Error("Save the venue draft before adding bookings."), { status: 400 });
+      return newCenter.save({ session });
+    });
 
     res.status(201).json({
       success: true,
@@ -95,7 +102,7 @@ const createEventCenter = async (req, res) => {
     });
   } catch (err) {
     console.error("[CREATE EVENT CENTER]", err);
-    res.status(500).json({ success: false, message: "Server error" });
+    res.status(err.status || 500).json({ success: false, message: err.status ? err.message : "Server error" });
   }
 };
 
@@ -119,7 +126,7 @@ const getEventCenters = async (req, res) => {
     res.json({
       success: true,
       message: "Event Centers fetched successfully",
-      data: centers,
+      data: centers.map(publicVenue),
       pagination: { total, page, limit, pages: Math.ceil(total / limit) },
     });
   } catch (err) {
@@ -151,7 +158,7 @@ const getEventCenterById = async (req, res) => {
     res.json({
       success: true,
       message: "Event Center fetched successfully",
-      data: center,
+      data: await canReadPrivateVenue(center, req.user) ? withoutRetiredVenueHolds(center) : publicVenue(center),
     });
   } catch (err) {
     console.error("[GET EVENT CENTER BY ID]", err);
@@ -163,6 +170,7 @@ const getEventCenterById = async (req, res) => {
 const getMyDraftEventCenters = async (req, res) => {
   try {
     const drafts = await EventCenter.find({
+      archivedAt: null,
       status: "IN_PROGRESS",
       $or: [{ createdBy: req.user.id }, { coOrganisers: req.user.id }],
     }).populate("createdBy", "firstName surname email");
@@ -180,76 +188,22 @@ const getMyDraftEventCenters = async (req, res) => {
 
 // ===================== DELETE EVENT CENTER =====================
 const deleteEventCenter = async (req, res) => {
-  const { id } = req.params;
-
   try {
-    const center = await EventCenter.findById(id);
-
-    if (!center) {
-      return res
-        .status(404)
-        .json({ success: false, message: "Event Center not found" });
-    }
-
-    // Verify that only the original host (createdBy) can delete the event center
-    if (center.createdBy.toString() !== req.user.id.toString()) {
-      return res
-        .status(403)
-        .json({
-          success: false,
-          message: "Only the original host can remove this listing",
-        });
-    }
-
-    // 1️⃣ Delete the event center itself
-    await EventCenter.findByIdAndDelete(id);
-
-    // 2️⃣ Respond immediately so the client doesn't time out
-    res.json({
-      success: true,
-      message: "Event Center deleted successfully",
-    });
-
-    // 3️⃣ Clean up Cloudinary images in the background (fire-and-forget)
-    if (center.images && center.images.length > 0) {
-      const hasCloudinaryConfig =
-        process.env.CLOUDINARY_API_KEY && process.env.CLOUDINARY_API_SECRET;
-
-      if (hasCloudinaryConfig) {
-        Promise.all(
-          center.images.map((img) =>
-            cloudinary.uploader.destroy(img.publicId).catch((err) => {
-              console.error(
-                `[CLOUDINARY DELETE ERROR] for ${img.publicId}:`,
-                err,
-              );
-            }),
-          ),
-        )
-          .then(() =>
-            console.log(
-              `[DELETE EVENT CENTER] Cleaned up ${center.images.length} images from Cloudinary`,
-            ),
-          )
-          .catch((err) =>
-            console.error(
-              "[DELETE EVENT CENTER] Cloudinary cleanup error:",
-              err,
-            ),
-          );
-      }
-    }
-  } catch (err) {
-    console.error("[DELETE EVENT CENTER]", err);
-    res.status(500).json({ success: false, message: "Server error" });
-  }
+    await require("../../services/venueLifecycle.service").archiveVenue(req.params.id, req.user.id);
+    res.json({ success: true, message: "Venue archived. Booking history has been retained." });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : "Could not remove venue." }); }
 };
 
 // ===================== UPDATE EVENT CENTER (PATCH) =====================
 const normalizeImagePositions = (images = []) =>
   images
     .sort((a, b) => a.position - b.position)
-    .map((img, index) => ({ ...img, position: index }));
+    .map((img, index) => ({
+      // Read schema fields explicitly: spreading a Mongoose subdocument loses them.
+      publicId: img.publicId,
+      url: img.url,
+      position: index,
+    }));
 
 const updateEventCenter = async (req, res) => {
   const { id } = req.params;
@@ -266,6 +220,9 @@ const updateEventCenter = async (req, res) => {
         .status(404)
         .json({ success: false, message: "Event Center not found" });
 
+    const editablePayload = require("../../services/venueEditableFields.service").venueEditablePayload(req.body);
+    if (prevCenter.archivedAt) return res.status(409).json({ message: "Archived venues cannot be edited." });
+
     // Permission check: co-organisers need MANAGE_LISTING, staff need MANAGE_CALENDAR (or ALL_ACCESS)
     const isOwner = prevCenter.createdBy?.toString() === req.user.id;
     let isCalendarOnlyStaff = false;
@@ -276,6 +233,7 @@ const updateEventCenter = async (req, res) => {
       // 1. Check Co-Organiser permissions
       const coOrganiserInvite = await CoOrganiserInvitation.findOne({
         coOrganiser: req.user.id,
+        host: prevCenter.createdBy,
         status: "ACCEPTED",
         "listings.listingId": id,
       }).lean();
@@ -285,6 +243,8 @@ const updateEventCenter = async (req, res) => {
         coOrganiserPerms.includes("ALL_ACCESS")
       ) {
         hasAccess = true;
+      } else if (coOrganiserPerms.includes("MANAGE_CALENDAR")) {
+        hasAccess = true; isCalendarOnlyStaff = true;
       }
 
       // 2. Check Staff permissions if not a co-organiser
@@ -292,6 +252,7 @@ const updateEventCenter = async (req, res) => {
         const StaffInvitation = require("../../models/client/staffInvitation.schema");
         const staffInvite = await StaffInvitation.findOne({
           staff: req.user.id,
+          organiser: prevCenter.createdBy,
           status: "ACCEPTED",
           "listings.listingId": id,
         }).lean();
@@ -328,13 +289,16 @@ const updateEventCenter = async (req, res) => {
         });
       }
     } else {
-      updatePayload = { ...req.body };
+      updatePayload = editablePayload;
     }
 
     const expectedUpdatedAt = req.body.expectedUpdatedAt;
     delete updatePayload.expectedUpdatedAt;
     delete updatePayload.updatedAt;
     delete updatePayload.__v;
+    if (Object.prototype.hasOwnProperty.call(updatePayload, "cancellationPolicy")) {
+      updatePayload.cancellationPolicy = require("../../services/venuePolicyUpdate.service").mergePolicyUpdate(prevCenter, updatePayload.cancellationPolicy, expectedUpdatedAt);
+    }
     if (updatePayload.availability && prevCenter.updatedAt &&
         (!expectedUpdatedAt || new Date(expectedUpdatedAt).getTime() !== new Date(prevCenter.updatedAt).getTime())) {
       return res.status(409).json({ success: false, message: "The calendar changed. Refresh it before saving your changes." });
@@ -342,8 +306,8 @@ const updateEventCenter = async (req, res) => {
     // Platform reservations are server-owned and cannot be removed by a calendar save.
     if (updatePayload.availability) for (const field of ["unavailableDates", "unavailableSlots"]) {
       if (updatePayload.availability[field]) updatePayload.availability[field] = [
-        ...updatePayload.availability[field].filter(entry => entry.type !== "BOOKED" && !entry.holdId),
-        ...(prevCenter.availability?.[field] || []).filter(entry => entry.type === "BOOKED" || (entry.holdId && new Date(entry.holdExpiresAt) > new Date())),
+        ...updatePayload.availability[field].filter(entry => entry.type !== "BOOKED" && !entry.holdId).map(entry => { const clean = { ...entry }; delete clean.holdExpiresAt; delete clean.pendingCheckout; return clean; }),
+        ...(prevCenter.availability?.[field] || []).filter(entry => entry.type === "BOOKED" && !entry.holdId),
       ];
     }
 
@@ -511,29 +475,31 @@ const updateEventCenter = async (req, res) => {
     if (updatePayload.location) {
       const loc = updatePayload.location;
       updatePayload.location = {
-        addressString: loc.addressString ?? prevCenter.location.addressString,
-        street: loc.street ?? prevCenter.location.street,
-        flat: loc.flat ?? prevCenter.location.flat,
-        city: loc.city ?? prevCenter.location.city,
-        area: loc.area ?? prevCenter.location.area,
-        postcode: loc.postcode ?? prevCenter.location.postcode,
-        country: loc.country ?? prevCenter.location.country,
-        isSpecificLocation:
-          loc.isSpecificLocation ?? prevCenter.location.isSpecificLocation,
+        addressString: loc.addressString ?? prevCenter.location?.addressString,
+        street: loc.street ?? prevCenter.location?.street,
+        flat: loc.flat ?? prevCenter.location?.flat,
+        city: loc.city ?? prevCenter.location?.city,
+        area: loc.area ?? prevCenter.location?.area,
+        postcode: loc.postcode ?? prevCenter.location?.postcode,
+        country: loc.country ?? prevCenter.location?.country,
+        countryCode: loc.countryCode ?? prevCenter.location?.countryCode,
+        building: loc.building ?? prevCenter.location?.building,
+        locality: loc.locality ?? prevCenter.location?.locality,
+        district: loc.district ?? prevCenter.location?.district,
         coordinates: {
           latitude:
             loc.coordinates?.latitude ??
-            prevCenter.location.coordinates.latitude,
+            prevCenter.location?.coordinates?.latitude,
           longitude:
             loc.coordinates?.longitude ??
-            prevCenter.location.coordinates.longitude,
+            prevCenter.location?.coordinates?.longitude,
         },
       };
     }
 
     const settings = await getEventCenterSettings();
     const publishing =
-      updatePayload.isDraft === false || updatePayload.status === "LISTED";
+      updatePayload.isDraft === false || ["LISTED", "ACTION_REQUIRED"].includes(updatePayload.status);
     const candidatePayload = {
       ...prevCenter.toObject(),
       ...updatePayload,
@@ -544,6 +510,7 @@ const updateEventCenter = async (req, res) => {
     };
     const validationErrors = validateVenuePayload(candidatePayload, settings, {
       publishing,
+      requireComplete: publishing || (prevCenter.status === "LISTED" && updatePayload.location !== undefined),
       existing: true,
       changes: updatePayload,
     });
@@ -555,12 +522,16 @@ const updateEventCenter = async (req, res) => {
       });
     }
 
+    if (prevCenter.status === "LISTED" && updatePayload.status === undefined && updatePayload.isDraft === undefined) {
+      const owner = await User.findById(prevCenter.createdBy);
+      if (!ownerMeetsPublishingRequirements(owner, settings, candidatePayload)) updatePayload.status = "ACTION_REQUIRED";
+    }
     // Handle status transition if isDraft: false is passed (legacy/intent)
     if (updatePayload.isDraft === false) {
-      const user = await User.findById(req.user.id);
+      const user = await User.findById(prevCenter.createdBy);
       const canAutoPublish =
         settings.publishing.autoPublishVerifiedOwners &&
-        ownerMeetsPublishingRequirements(user, settings);
+        ownerMeetsPublishingRequirements(user, settings, candidatePayload);
       updatePayload.status = canAutoPublish ? "LISTED" : "ACTION_REQUIRED";
 
       // Clean up legacy field if present in payload
@@ -570,16 +541,14 @@ const updateEventCenter = async (req, res) => {
       updatePayload.status === "ACTION_REQUIRED"
     ) {
       // Explicit status update from frontend (new logic)
-      const user = await User.findById(req.user.id);
+      const user = await User.findById(prevCenter.createdBy);
       const canAutoPublish =
         settings.publishing.autoPublishVerifiedOwners &&
-        ownerMeetsPublishingRequirements(user, settings);
+        ownerMeetsPublishingRequirements(user, settings, candidatePayload);
       updatePayload.status = canAutoPublish ? "LISTED" : "ACTION_REQUIRED";
     }
 
-    const updatedCenter = updatePayload.availability && prevCenter.updatedAt
-      ? await EventCenter.findOneAndUpdate({ _id: id, updatedAt: prevCenter.updatedAt }, updatePayload, { new: true, runValidators: true })
-      : await EventCenter.findByIdAndUpdate(id, updatePayload, { new: true, runValidators: true });
+    const updatedCenter = await require("../../services/venueCalendarMutation.service").commitVenueUpdate(id, updatePayload, prevCenter.updatedAt, req.user.id);
     if (!updatedCenter && updatePayload.availability) return res.status(409).json({ success: false, message: "The calendar changed while saving. Refresh and try again." });
 
     if (!updatedCenter) return res.status(409).json({ success: false, message: "A moderator must restore this listing before its status can change." });
@@ -590,8 +559,8 @@ const updateEventCenter = async (req, res) => {
     });
   } catch (err) {
     console.error(`[UPDATE EVENT CENTER CATCH]: status=${err.status} name=${err.name} message=${err.message}`, err);
-    if (err.status === 400 || err.name === "ValidationError" || err.name === "CastError") {
-      return res.status(400).json({ success: false, message: err.message });
+    if (err.status || err.name === "ValidationError" || err.name === "CastError") {
+      return res.status(err.status || 400).json({ success: false, message: err.message });
     }
     console.error("[UPDATE EVENT CENTER]", err);
     res.status(500).json({ success: false, message: "Server error" });
@@ -599,89 +568,16 @@ const updateEventCenter = async (req, res) => {
 };
 
 // ===================== IMAGE MANAGEMENT =====================
-const deleteEventCenterImage = async (req, res) => {
-  const { id } = req.params;
-  const { publicId } = req.body;
-
-  if (!publicId)
-    return res
-      .status(400)
-      .json({ success: false, message: "publicId is required" });
-
+const imageAction = remove => async (req, res) => {
   try {
-    const center = await EventCenter.findById(id);
-    if (!center)
-      return res
-        .status(404)
-        .json({ success: false, message: "Event Center not found" });
-
-    // 1️⃣ Delete from Cloudinary
-    try {
-      await cloudinary.uploader.destroy(publicId);
-    } catch (cloudinaryErr) {
-      console.error("[CLOUDINARY DELETE ERROR]", cloudinaryErr);
-    }
-
-    // 2️⃣ Remove from database
-    center.images = center.images
-      .filter((img) => img.publicId !== publicId)
-      .sort((a, b) => a.position - b.position)
-      .map((img, index) => ({ ...img, position: index }));
-
-    await center.save();
-
-    res.json({
-      success: true,
-      message: "Image deleted successfully from database and Cloudinary",
-      data: center.images,
-    });
-  } catch (err) {
-    console.error("[DELETE EVENT CENTER IMAGE]", err);
-    res.status(500).json({ success: false, message: "Server error" });
+    const data = await require("../../services/venueMedia.service").changeImages(req.params.id, req.user.id, req.body, remove);
+    return res.json({ success: true, message: remove ? "Photo removed." : "Photo order updated.", data });
+  } catch (error) {
+    return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Could not update venue photos." });
   }
 };
-
-const reorderEventCenterImages = async (req, res) => {
-  const { id } = req.params;
-  const { publicId, toPosition } = req.body;
-
-  if (!publicId || typeof toPosition !== "number")
-    return res.status(400).json({
-      success: false,
-      message: "publicId and toPosition are required",
-    });
-
-  try {
-    const center = await EventCenter.findById(id);
-    if (!center)
-      return res
-        .status(404)
-        .json({ success: false, message: "Event Center not found" });
-
-    const images = [...center.images].sort((a, b) => a.position - b.position);
-    const fromIndex = images.findIndex((img) => img.publicId === publicId);
-    if (fromIndex === -1)
-      return res.status(404).json({
-        success: false,
-        message: "Image not found",
-      });
-
-    const [movedImage] = images.splice(fromIndex, 1);
-    images.splice(toPosition, 0, movedImage);
-    center.images = images.map((img, index) => ({ ...img, position: index }));
-
-    await center.save();
-
-    res.json({
-      success: true,
-      message: "Image order updated successfully",
-      data: center.images,
-    });
-  } catch (err) {
-    console.error("[REORDER EVENT CENTER IMAGES]", err);
-    res.status(500).json({ success: false, message: "Server error" });
-  }
-};
+const deleteEventCenterImage = imageAction(true);
+const reorderEventCenterImages = imageAction(false);
 
 // ===================== GET MY EVENT CENTERS =====================
 const getMyEventCenters = async (req, res) => {
@@ -689,6 +585,7 @@ const getMyEventCenters = async (req, res) => {
     await syncUserEventCenters(req.user.id);
 
     const centers = await EventCenter.find({
+      archivedAt: null,
       $or: [{ createdBy: req.user.id }, { coOrganisers: req.user.id }],
       status: { $in: ["LISTED", "ACTION_REQUIRED", "UNLISTED"] },
     }).populate("createdBy", "firstName surname email");
@@ -717,6 +614,7 @@ const getPersonalEventCenterListings = async (req, res) => {
     await syncUserEventCenters(req.user.id);
 
     const centers = await EventCenter.find({
+      archivedAt: null,
       $or: [{ createdBy: req.user.id }, { coOrganisers: req.user.id }],
     })
       .select({
@@ -757,7 +655,7 @@ const getPersonalEventCenterListings = async (req, res) => {
 };
 
 // ===================== SYNC EVENT CENTERS ON VERIFICATION =====================
-const syncUserEventCenters = async (userId) => {
+const syncUserEventCenters = async (userId, { throwOnError = false } = {}) => {
   try {
     const [user, settings] = await Promise.all([
       User.findById(userId),
@@ -765,22 +663,19 @@ const syncUserEventCenters = async (userId) => {
     ]);
     if (!user) return;
 
-    const canAutoPublish =
-      settings.publishing.autoPublishVerifiedOwners &&
-      ownerMeetsPublishingRequirements(user, settings);
-    if (canAutoPublish) {
-      await EventCenter.updateMany(
-        { createdBy: userId, status: "ACTION_REQUIRED" },
-        { status: "LISTED" },
-      );
-    } else {
-      await EventCenter.updateMany(
-        { createdBy: userId, status: "LISTED" },
-        { status: "ACTION_REQUIRED" },
-      );
+    const candidates = await EventCenter.find({ createdBy: userId, status: { $in: ["ACTION_REQUIRED", "LISTED"] } }).lean();
+    for (const venue of candidates) {
+      const ready = ownerMeetsPublishingRequirements(user, settings, venue);
+      if (!ready && venue.status === "LISTED") {
+        await EventCenter.updateOne({ _id: venue._id, status: "LISTED", updatedAt: venue.updatedAt }, { $set: { status: "ACTION_REQUIRED" } });
+      } else if (ready && venue.status === "ACTION_REQUIRED" && settings.publishing.autoPublishVerifiedOwners) {
+        if (validateVenuePayload(venue, settings, { publishing: true, requireComplete: true }).length) continue;
+        await EventCenter.updateOne({ _id: venue._id, status: "ACTION_REQUIRED", updatedAt: venue.updatedAt }, { $set: { status: "LISTED" } });
+      }
     }
   } catch (err) {
     console.error("[SYNC USER EVENT CENTERS]", err);
+    if (throwOnError) throw err;
   }
 };
 

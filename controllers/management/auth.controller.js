@@ -25,13 +25,13 @@ const generateTokens = (user) => {
   const { _id: id, email, roles } = user;
 
   const accessToken = jwt.sign(
-    { UserInfo: { id, email, roles, sessionVersion: user.sessionVersion || 0 } },
+    { accountType: "management", UserInfo: { id, email, roles, sessionVersion: user.sessionVersion || 0 } },
     process.env.ACCESS_TOKEN_SECRET,
     { expiresIn: "15m" },
   );
 
   const refreshToken = jwt.sign(
-    { id, email, sessionVersion: user.sessionVersion || 0 },
+    { accountType: "management", id, email, sessionVersion: user.sessionVersion || 0 },
     process.env.REFRESH_TOKEN_SECRET,
     { expiresIn: "7d" },
   );
@@ -135,7 +135,7 @@ const handleAdminLogin = asyncHandler(async (req, res) => {
 });
 
 const handleAdminRefreshToken = asyncHandler(async (req, res) => {
-  const refreshToken = req.cookies?.[REFRESH_COOKIE_NAME] || req.body.refreshToken;
+  const refreshToken = req.cookies?.[REFRESH_COOKIE_NAME] ?? req.body?.refreshToken;
   if (!refreshToken) {
     if (req.body?.restore === true) return res.status(200).json({ success: true, message: "No active session" });
     return res.status(400).json({ success: false, message: "Refresh token required" });
@@ -153,7 +153,7 @@ const handleAdminRefreshToken = asyncHandler(async (req, res) => {
   }
 
   jwt.verify(refreshToken, process.env.REFRESH_TOKEN_SECRET, async (err, decoded) => {
-    if (err || foundAdmin.email !== decoded.email || (decoded.sessionVersion || 0) !== (foundAdmin.sessionVersion || 0)) {
+    if (err || decoded.accountType !== "management" || foundAdmin.email !== decoded.email || (decoded.sessionVersion || 0) !== (foundAdmin.sessionVersion || 0)) {
       return res.status(403).json({ success: false, message: "Forbidden" });
     }
 
@@ -175,20 +175,18 @@ const handleAdminRefreshToken = asyncHandler(async (req, res) => {
 });
 
 const handleAdminLogout = asyncHandler(async (req, res) => {
-  const refreshToken = req.cookies?.[REFRESH_COOKIE_NAME] || req.body.refreshToken;
+  const refreshToken = req.cookies?.[REFRESH_COOKIE_NAME] ?? req.body?.refreshToken;
   res.clearCookie(REFRESH_COOKIE_NAME, {
     httpOnly: refreshCookieOptions.httpOnly,
     secure: refreshCookieOptions.secure,
     sameSite: refreshCookieOptions.sameSite,
     path: refreshCookieOptions.path,
   });
-  if (!refreshToken) return res.sendStatus(204);
-
-  const foundAdmin = await Staff.findOne({ refreshToken }).exec();
-  if (!foundAdmin) return res.sendStatus(204);
-
-  foundAdmin.refreshToken = "";
-  await foundAdmin.save();
+  if (refreshToken === undefined) return res.sendStatus(204);
+  if (typeof refreshToken !== "string" || !refreshToken.trim() || refreshToken.length > 8192) {
+    return res.status(400).json({ success: false, message: "Invalid logout token." });
+  }
+  await Staff.updateOne({ refreshToken: { $eq: refreshToken } }, { $set: { refreshToken: "" } });
 
   res.status(200).json({ success: true, message: "Admin logged out" });
 });
@@ -201,39 +199,14 @@ const registerAdmin = asyncHandler(async (req, res) => {
     return res.status(400).json({ success: false, message: "First name, surname, email, and password are required" });
   }
 
-  // We allow bootstrap without auth if there are zero admins
-  const adminCount = await Staff.countDocuments();
-  const assignedRole = Array.isArray(roles) && roles.length === 1
-    ? roles[0]
-    : adminCount === 0
-      ? "super_admin"
-      : null;
-  if (!assignedRole || !assignableRoles.includes(assignedRole)) {
-    return res.status(400).json({ success: false, message: "Exactly one valid admin role is required" });
+  const assignedRole = Array.isArray(roles) && roles.length === 1 ? roles[0] : null;
+  if (!assignableRoles.includes(assignedRole) || typeof password !== "string" || password.length < 8) {
+    return res.status(400).json({ success: false, message: "One valid role and a password of at least 8 characters are required." });
   }
-
-  let requestingUser = null;
-  
-  if (adminCount > 0) {
-    const authHeader = req.headers.authorization || req.headers.Authorization;
-    if (!authHeader?.startsWith("Bearer ")) {
-      return res.status(401).json({ success: false, message: "Unauthorized - Admin token required" });
-    }
-
-    const token = authHeader.split(" ")[1];
-    try {
-      const decoded = jwt.verify(token, process.env.ACCESS_TOKEN_SECRET);
-      requestingUser = decoded.UserInfo;
-      
-      const currentStaff = requestingUser?.id ? await Staff.findById(requestingUser.id).lean() : null;
-      const policy = require("../../services/management/geographicPolicy");
-      if (!policy.activeStaff(currentStaff) || !policy.isOwner(currentStaff)) {
-        return res.status(403).json({ success: false, message: "Admin access required to register a new admin" });
-      }
-    } catch (err) {
-      return res.status(403).json({ success: false, message: "Forbidden - Invalid admin token" });
-    }
+  if (!require("../../services/management/geographicPolicy").isOwner(req.managementStaff)) {
+    return res.status(403).json({ success: false, message: "Only the platform owner can register administrators." });
   }
+  const requestingUser = req.user;
 
   const existingAdmin = await Staff.findOne({ email: email.toLowerCase() }).exec();
   if (existingAdmin) {
@@ -246,7 +219,7 @@ const registerAdmin = asyncHandler(async (req, res) => {
     email: email.toLowerCase(),
     password,
     roles: [assignedRole],
-    geographicAccess: { mode: adminCount === 0 ? "global" : "scoped", grants: [] },
+    geographicAccess: { mode: "scoped", grants: [] },
   });
 
   if (requestingUser && requestingUser.id) {

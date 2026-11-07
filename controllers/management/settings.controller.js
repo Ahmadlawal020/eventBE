@@ -1,4 +1,5 @@
 const PlatformSettings = require("../../models/management/platformSettings.schema");
+const { validateMapSettings, publicMapConfig } = require("../../services/mapSettings.service");
 const { recordAdminAction } = require("../../services/management/adminAudit.service");
 
 // GET /api/admin/settings
@@ -13,6 +14,9 @@ const getSettings = async (req, res) => {
     return res.json({
       success: true,
       data: {
+        ...publicMapConfig(settings),
+        googleMapsApiKey: settings.googleMapsApiKey || "",
+        googleMapsMapId: settings.googleMapsMapId || "",
         platformName: settings.platformName,
         supportEmail: settings.supportEmail,
         supportPhone: settings.supportPhone,
@@ -35,6 +39,9 @@ const getSettings = async (req, res) => {
 const updateSettings = async (req, res) => {
   try {
     const allowedFields = [
+      "mapProvider",
+      "googleMapsApiKey",
+      "googleMapsMapId",
       "platformName",
       "supportEmail",
       "supportPhone",
@@ -62,7 +69,10 @@ const updateSettings = async (req, res) => {
     }
 
     const previousSettings = await PlatformSettings.findOne({ key: "platform_settings" });
+    const mapError = validateMapSettings(update, previousSettings);
+    if (mapError) return res.status(400).json({ success: false, message: mapError });
     const previousValue = previousSettings ? { ...previousSettings.toObject() } : null;
+    delete previousValue?.googleMapsApiKey;
     delete previousValue?._id;
     delete previousValue?.key;
     delete previousValue?.__v;
@@ -72,21 +82,26 @@ const updateSettings = async (req, res) => {
     const settings = await PlatformSettings.findOneAndUpdate(
       { key: "platform_settings" },
       { $set: update },
-      { upsert: true, new: true }
+      { upsert: true, new: true, runValidators: true }
     );
 
+    const auditUpdate = { ...update };
+    if ("googleMapsApiKey" in auditUpdate) auditUpdate.googleMapsApiKey = update.googleMapsApiKey ? "[configured]" : "[cleared]";
     await recordAdminAction({
       req,
       action: "PLATFORM_SETTINGS_UPDATED",
       targetType: "System",
       targetId: settings._id,
       previousValue,
-      newValue: update,
+      newValue: auditUpdate,
     });
 
     return res.json({
       success: true,
       data: {
+        ...publicMapConfig(settings),
+        googleMapsApiKey: settings.googleMapsApiKey || "",
+        googleMapsMapId: settings.googleMapsMapId || "",
         platformName: settings.platformName,
         supportEmail: settings.supportEmail,
         supportPhone: settings.supportPhone,
@@ -100,6 +115,7 @@ const updateSettings = async (req, res) => {
       },
     });
   } catch (error) {
+    if (error.name === "ValidationError") return res.status(400).json({ success: false, message: error.message });
     console.error("Error updating platform settings:", error);
     return res.status(500).json({ success: false, message: "Server error" });
   }

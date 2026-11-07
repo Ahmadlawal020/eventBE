@@ -45,7 +45,7 @@ const venueQuote = (venue, input) => {
     const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
     const weekend = venue.pricing?.weekendPrice || venue.weekendPrice;
     const override = (venue.availability?.customPrices || venue.pricing?.customPrices || []).find(p => dayKey(p.date) === date);
-    const amount = Number(override?.amount ?? override?.price ?? ([0,5,6].includes(weekday) && Number(weekend?.amount) > 0 ? weekend.amount : base?.amount));
+    const amount = Number(override?.amount ?? override?.price ?? ([0,6].includes(weekday) && Number(weekend?.amount) > 0 ? weekend.amount : base?.amount));
     if (!Number.isFinite(amount) || amount <= 0) throw fail("Venue price must be a positive amount");
     let units = 1;
     if (unit === "hour") {
@@ -55,6 +55,8 @@ const venueQuote = (venue, input) => {
       const close = minutes(venue.availability?.operationalHours?.close || "24:00", true);
       if (start < open || end > close) throw fail("Selected time is outside venue operating hours");
       units = (end - start) / 60;
+      const required = require("./venuePricingRules.service").minimumDuration(venue, date);
+      if (units < required) throw fail("Select at least " + required + " hours on " + date + ".");
     }
     duration += units;
     subtotalCents += Math.round(amount * 100) * units;
@@ -181,6 +183,12 @@ async function completePayment(reference, transaction, {buyerId, kind} = {}) {
         return { booking, type, conflict: true, changed };
       }
     }
+    if (type === "EVENT_CENTER" && booking.status === "CANCELLED" && !booking.refund?.state && booking.cancellation?.refundMode !== "DIRECT") {
+      booking.paymentStatus = "COMPLETED";
+      booking.paymentResolutionRequired = true;
+      booking.refund = { state: "QUEUED", requestedAt: new Date(), amountMinor: Math.round(booking.totalPrice.amount * 100) };
+      await booking.save({ session });
+    }
     if (booking.status === "CANCELLED" || booking.paymentResolutionRequired) {
       if (booking.paymentStatus !== "COMPLETED") {
         booking.paymentStatus = "COMPLETED";
@@ -199,24 +207,36 @@ async function completePayment(reference, transaction, {buyerId, kind} = {}) {
         try { require("./venueBookingRules.service").assertVenueSchedule(venue, dates, booking.bookingUnit, { bookingId: booking._id, checkTiming: false }); }
         catch { preparationConflict = true; }
       }
-      const conflict = !venue || venue.status !== "LISTED" || preparationConflict || dates.some(slot => {
+      const reviewStart = booking.bookingMode === "REVIEW" ? require("./venueReviewPolicy.service").firstBookingStart(booking) : null;
+      const sessions = require("./bookingAttendance.service").bookingSessions(booking);
+      const paidAt = new Date(transaction.paid_at || Date.now());
+      const expiredCheckout = booking.reservationExpiresAt && paidAt > booking.reservationExpiresAt;
+      const ended = !sessions.length || sessions.some(s => new Date(s.endsAt) <= new Date());
+      const paidAfterStart = booking.bookingUnit === "hour" && sessions.some(s => paidAt >= new Date(s.startsAt));
+      const reviewExpired = expiredCheckout || ended || paidAfterStart || (booking.bookingMode === "REVIEW" && (!reviewStart || reviewStart <= new Date()));
+      const conflict = !venue || venue.status !== "LISTED" || preparationConflict || reviewExpired || dates.some(slot => {
         const date = dayKey(slot.date);
-        const dayBlocked = (availability?.unavailableDates || []).some(d=>dayKey(d.date)===date && String(d.bookingId)!==String(booking._id));
-        const hoursBlocked = (availability?.unavailableSlots || []).some(d=>dayKey(d.date)===date && String(d.bookingId)!==String(booking._id) &&
+        const dayBlocked = (availability?.unavailableDates || []).filter(d => !d.holdId).some(d=>dayKey(d.date)===date && String(d.bookingId)!==String(booking._id));
+        const hoursBlocked = (availability?.unavailableSlots || []).filter(d => !d.holdId).some(d=>dayKey(d.date)===date && String(d.bookingId)!==String(booking._id) &&
           (booking.bookingUnit === "day" || (minutes(slot.startTime)<minutes(d.endTime,true) && minutes(slot.endTime,true)>minutes(d.startTime))));
         return dayBlocked || hoursBlocked;
       });
       if (conflict) {
         booking.paymentStatus="COMPLETED";booking.status="CANCELLED";booking.paymentResolutionRequired=true;
+        booking.refund = { state: "QUEUED", requestedAt: new Date(), amountMinor: Math.round(booking.totalPrice.amount * 100) };
+        booking.inventoryReserved = false;
         await booking.save({session});
+        await Venue.updateOne({ _id: booking.eventCenter }, { $pull: { "availability.unavailableDates": { bookingId: String(booking._id) }, "availability.unavailableSlots": { bookingId: String(booking._id) } } }, { session });
+        await require("./venueBookingEvents.service").recordVenueEvent(booking, "CANCELLED", null, session, { reason: "Payment received, but the reservation could not be confirmed. A provider refund is queued." });
         return {booking,type,conflict:true,changed:true};
       }
       const common = {type:"BOOKED",bookingId:String(booking._id),clientName:booking.guestDetails?.fullName,clientEmail:booking.guestDetails?.email,clientPhone:booking.guestDetails?.phoneNumber};
       const field = booking.bookingUnit === "day" ? "unavailableDates" : "unavailableSlots";
       const entries = dates.map(d=>({...common,date:d.date,...(booking.bookingUnit === "hour"?{startTime:d.startTime,endTime:d.endTime}:{})}));
+      await Venue.updateOne({ _id: venue._id }, { $pull: { "availability.unavailableDates": { bookingId: String(booking._id) }, "availability.unavailableSlots": { bookingId: String(booking._id) } } }, { session });
       await Venue.updateOne({_id:venue._id},{$push:{[`availability.${field}`]:{$each:entries}}},{session});
       if (booking.bookingMode === "REVIEW") {
-        booking.status="PENDING_REVIEW";booking.reviewDeadline=new Date(Date.now()+86400000);
+        booking.status="PENDING_REVIEW";booking.reviewDeadline=require("./venueReviewPolicy.service").reviewDeadline(booking);
       } else {
         booking.ticketNumber=generateTicketNumber("MNS");booking.qrPayload=generateQRPayload(booking.ticketNumber,booking.eventCenter,"EVENT_CENTER");
       }
@@ -233,6 +253,7 @@ async function completePayment(reference, transaction, {buyerId, kind} = {}) {
         await createTicketsForBooking(booking, session);
       }
     }
+    if (type === "EVENT_CENTER" && changed) await require("./venueBookingEvents.service").recordVenueEvent(booking, "CREATED", booking.buyer, session);
     if (type === "EVENT_TICKET" && changed) await require("./eventPurchaseNotices.service").queueEventPurchase(booking, session);
     return {booking,type,conflict:false,changed};
   });

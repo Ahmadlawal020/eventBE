@@ -219,13 +219,20 @@ const getFinanceStats = async (req, res) => {
       todayRevenue: 0,
     };
 
-    const totalEarnings = (venueData.totalRevenue || 0) + (ticketData.totalRevenue || 0);
+    let totalEarnings = (venueData.totalRevenue || 0) + (ticketData.totalRevenue || 0);
     const [payoutRecords, ownedVenues] = await Promise.all([
       require("../../models/client/venuePayout.schema").find({ organiser: userId }).lean(),
       require("../../models/client/eventCenter.schema").find({ createdBy: userId }).lean(),
     ]);
     const directBookings = await require("../../services/manualBookingRead.service").getManualBookings(ownedVenues);
     const venueFinance = require("../../services/venueFinanceSummary.service").venueFinanceSummary(payoutRecords, directBookings);
+    const venueMoneyData = await require("../../services/venueMoney.service").loadVenueMoney(ownedVenues.map(v => v._id), directBookings);
+    const ngnMoney = rows => rows.find(r => r.currency === "NGN")?.netReceipts || 0;
+    venueData.totalRevenue = ngnMoney(venueMoneyData.currencies);
+    venueData.thisMonthRevenue = ngnMoney(venueMoneyData.period(startOfMonth));
+    venueData.thisWeekRevenue = ngnMoney(venueMoneyData.period(startOfWeek));
+    venueData.todayRevenue = ngnMoney(venueMoneyData.period(startOfToday));
+    totalEarnings = venueData.totalRevenue + (ticketData.totalRevenue || 0);
     const naira = venueFinance.find(row => row.currency === "NGN");
     const pendingPayouts = naira?.pendingPayouts || 0;
     const thisMonthEarnings = (venueData.thisMonthRevenue || 0) + (ticketData.thisMonthRevenue || 0);
@@ -257,9 +264,7 @@ const getFinanceStats = async (req, res) => {
       const nextDayDate = new Date(dayDate);
       nextDayDate.setDate(dayDate.getDate() + 1);
 
-      const dayVenueSum = thisWeekVenueBookings
-        .filter((b) => b.createdAt >= dayDate && b.createdAt < nextDayDate)
-        .reduce((acc, b) => acc + (b.organiserPayoutAmount ?? b.subtotalPrice?.amount ?? b.totalPrice?.amount ?? 0), 0);
+      const dayVenueSum = ngnMoney(venueMoneyData.period(dayDate, new Date(+nextDayDate - 1)));
 
       const dayTicketSum = thisWeekTicketBookings
         .filter((b) => b.createdAt >= dayDate && b.createdAt < nextDayDate)
@@ -337,7 +342,15 @@ const getFinanceStats = async (req, res) => {
     });
 
     // Merge and sort newest first
-    const allTransactions = [...formattedVenueTransactions, ...formattedTicketTransactions]
+    const recordedRefunds = await require("../../models/client/eventCenterRefund.schema").find({ organiser: userObjectId, markedPaidAt: { $type: "date" } })
+      .select("eventCenterId amountMinor currency markedPaidAt status organiserReference")
+      .populate("eventCenterId", "venueName").sort({ markedPaidAt: -1 }).limit(15).lean();
+    const refundTransactions = recordedRefunds.map(r => ({
+      id: String(r._id), title: "Refund - " + (r.eventCenterId?.venueName || "Venue booking"), category: "VENUE_REFUND",
+      date: r.markedPaidAt, amount: r.amountMinor / 100, currency: r.currency, type: "out", status: r.status,
+      reference: r.organiserReference || "DIRECT-" + r._id,
+    }));
+    const allTransactions = [...formattedVenueTransactions, ...formattedTicketTransactions, ...refundTransactions]
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
       .slice(0, 20);
 
@@ -359,6 +372,8 @@ const getFinanceStats = async (req, res) => {
           todayEarnings,
         },
         venueFinance,
+        venueMoneyByCurrency: venueMoneyData.currencies,
+        reportingBasis: "Net receipts for bookings created in each period, restated for recorded refunds.",
         breakdown: {
           ticketRevenue: ticketData.totalRevenue || 0,
           ticketSalesCount: ticketData.completedTicketsCount || 0,

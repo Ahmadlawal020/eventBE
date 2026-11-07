@@ -1,4 +1,3 @@
-const { CronJob } = require("cron");
 const Event = require("../models/client/event.schema");
 const { getEffectiveEventSettings: getEventSettings } = require("../services/eventSettings.service");
 
@@ -87,16 +86,4 @@ const markCompletedEvents = async (options = {}) => {
   }
 };
 
-// Run every 15 minutes (avoid auto-starting during unit tests to allow process exit)
-const isTest = process.env.NODE_ENV === "test" || process.env.NODE_TEST_CONTEXT || process.execArgv.includes("--test") || process.argv.includes("--test");
-const job = new CronJob("*/15 * * * *", () => require("../services/eventOperations.service").runWorker("event-completion", markCompletedEvents).catch(error => console.error("[COMPLETION WORKER]", error.message)), null, !isTest, "UTC");
-
-if (!isTest) {
-  console.log("[Cron Job] Event Completion Job scheduled every 15 minutes.");
-}
-
-job.markCompletedEvents = markCompletedEvents;
-job.buildCompletionFilter = buildCompletionFilter;
-
-module.exports = job;
-
+module.exports = { markCompletedEvents, buildCompletionFilter };

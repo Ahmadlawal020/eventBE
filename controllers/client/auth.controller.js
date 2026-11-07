@@ -1,3 +1,5 @@
+const crypto = require("crypto");
+const SignupVerification = require("../../models/client/signupVerification.schema");
 const User = require("../../models/client/user.schema");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
@@ -10,13 +12,13 @@ const generateTokens = (user) => {
   const { _id: id, email, roles } = user;
 
   const accessToken = jwt.sign(
-    { UserInfo: { id, email, roles, sessionVersion: user.sessionVersion || 0 } },
+    { accountType: "client", UserInfo: { id, email, roles, sessionVersion: user.sessionVersion || 0 } },
     process.env.ACCESS_TOKEN_SECRET,
     { expiresIn: "15m" }
   );
 
   const refreshToken = jwt.sign(
-    { id, email, sessionVersion: user.sessionVersion || 0 },
+    { accountType: "client", id, email, sessionVersion: user.sessionVersion || 0 },
     process.env.REFRESH_TOKEN_SECRET,
     { expiresIn: "7d" }
   );
@@ -51,6 +53,7 @@ const handleSignup = asyncHandler(async (req, res) => {
     dob,
     googleId,
     googleSignupToken,
+    emailVerificationToken,
     authProvider = "local",
     referralCode: incomingReferralCode,
   } = req.body;
@@ -102,7 +105,7 @@ const handleSignup = asyncHandler(async (req, res) => {
     emailVerifiedAt: new Date(),
   };
 
-  if (googleId) {
+  if (authProvider === "google" && googleId) {
     userData.googleId = googleId;
   }
 
@@ -126,7 +129,16 @@ const handleSignup = asyncHandler(async (req, res) => {
 
   const { accessToken, refreshToken } = generateTokens(newUser);
   newUser.refreshToken = refreshToken;
-  await newUser.save();
+  await require("mongoose").connection.transaction(async session => {
+    if (authProvider === "local") {
+      const proof = typeof emailVerificationToken === "string" && await SignupVerification.findOneAndDelete({
+        digest: crypto.createHash("sha256").update(emailVerificationToken).digest("hex"),
+        email, expiresAt: { $gt: new Date() },
+      }, { session });
+      if (!proof) { res.status(401); throw new Error("Verify your email before signing up."); }
+    }
+    await newUser.save({ session });
+  });
 
   res.status(201).json({
     success: true,
@@ -217,22 +229,17 @@ const handleLogin = asyncHandler(async (req, res) => {
 
 //  Logout
 const handleLogout = asyncHandler(async (req, res) => {
-  const cookies = req.cookies;
-  const { refreshToken } = req.body;
-
-  if (!refreshToken) return res.sendStatus(204); // No content
-
-  const foundUser = await User.findOne({ refreshToken }).exec();
-  if (!foundUser) {
-    return res.sendStatus(204);
+  const { refreshToken, pushToken } = req.body || {};
+  if (refreshToken === undefined) return res.sendStatus(204);
+  if (typeof refreshToken !== "string" || !refreshToken.trim() || refreshToken.length > 8192 ||
+      (pushToken !== undefined && (typeof pushToken !== "string" || !pushToken.trim() || pushToken.length > 4096))) {
+    return res.status(400).json({ success: false, message: "Invalid logout token." });
   }
-
-  // Delete refreshToken in db
-  foundUser.refreshToken = '';
-  if (req.body.pushToken && Array.isArray(foundUser.pushTokens)) {
-    foundUser.pushTokens = foundUser.pushTokens.filter((t) => t.token !== req.body.pushToken);
-  }
-  await foundUser.save();
+  // Match a literal token and clear it atomically, without overwriting a concurrent refresh.
+  await User.updateOne({ refreshToken: { $eq: refreshToken } }, {
+    $set: { refreshToken: "" },
+    ...(pushToken ? { $pull: { pushTokens: { token: pushToken } } } : {}),
+  });
 
   res.status(200).json({ success: true, message: "Logged out" });
 });
@@ -250,7 +257,7 @@ const handleRefreshToken = asyncHandler(async (req, res) => {
     refreshToken,
     process.env.REFRESH_TOKEN_SECRET,
     async (err, decoded) => {
-      if (err || foundUser.email !== decoded.email || (decoded.sessionVersion || 0) !== (foundUser.sessionVersion || 0))
+      if (err || decoded.accountType !== "client" || foundUser.email !== decoded.email || (decoded.sessionVersion || 0) !== (foundUser.sessionVersion || 0))
         return res.status(403).json({ success: false, message: "Forbidden" });
 
       const { accessToken, refreshToken: newRefresh } =
@@ -339,7 +346,7 @@ const handleGoogleAuth = asyncHandler(async (req, res) => {
     picture,
   } = payload;
 
-  if (!email) {
+  if (!email || payload.email_verified !== true) {
     return res.status(400).json({
       success: false,
       message: "Google account has no email",
@@ -438,7 +445,8 @@ const handleRequestOTP = asyncHandler(async (req, res) => {
 
 // ✅ Verify OTP
 const handleVerifyOTP = asyncHandler(async (req, res) => {
-  const { identifier, code, type } = req.body;
+  const { code, type } = req.body;
+  const identifier = req.body.identifier.trim().toLowerCase();
 
   const result = await otpService.verifyOTP(identifier, code, type, { consume: ["email", "phone"].includes(type) });
 
@@ -472,7 +480,16 @@ const handleVerifyOTP = asyncHandler(async (req, res) => {
     }
   }
 
+  let emailVerificationToken;
+  if (type === "email" && !updatedUser) {
+    emailVerificationToken = crypto.randomBytes(32).toString("hex");
+    await SignupVerification.create({
+      digest: crypto.createHash("sha256").update(emailVerificationToken).digest("hex"),
+      email: identifier.trim().toLowerCase(), expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+    });
+  }
   res.json({
+    emailVerificationToken,
     success: true,
     message: "Verification successful",
     user: updatedUser ? { id: updatedUser._id, isEmailVerified: updatedUser.isEmailVerified, isPhoneVerified: updatedUser.isPhoneVerified } : null,

@@ -127,10 +127,7 @@ const getSingleListingStats = async (req, res) => {
       return res.status(404).json({ success: false, message: "Listing not found or access denied" });
     }
 
-    // Since we don't have historical performance data in the schema yet (it's just a single object),
-    // we return the current performance metrics. 
-    // In a real app, you'd probably have a Performance collection tracking this daily.
-    // For now, we'll provide the current stats and some simulated trend data if needed.
+    // Return the current stored metrics; historical trends are not available.
 
     const performance = listing.performance || {
       views: 0,
@@ -165,8 +162,6 @@ const getSingleListingStats = async (req, res) => {
           performanceScore,
           conversionRate: ((performance.clicks || 0) / (performance.views || 1) * 100).toFixed(1),
         },
-        // In a real implementation, you'd aggregate historical data here
-        // For this task, we'll stick to the current performance object
       },
     });
   } catch (error) {

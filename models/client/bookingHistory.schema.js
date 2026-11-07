@@ -30,7 +30,7 @@ const bookingHistorySchema = new mongoose.Schema(
     },
     action: {
       type: String,
-      enum: ["CREATED", "RESCHEDULED", "CANCELLED", "CHECKED_IN", "PAYMENT_UPDATED", "ACCEPTED", "DECLINED"],
+      enum: ["CREATED", "RESCHEDULED", "CANCELLED", "CHECKED_IN", "PAYMENT_UPDATED", "ACCEPTED", "DECLINED", "UPDATED", "COMPLETED"],
       required: true,
     },
     performedBy: {
@@ -53,6 +53,7 @@ const bookingHistorySchema = new mongoose.Schema(
       },
     ],
     guestName: { type: String },
+    guestDetails: { fullName: String, email: String, phoneNumber: String },
     reason: { type: String },
     totalPrice: {
       amount: { type: Number },

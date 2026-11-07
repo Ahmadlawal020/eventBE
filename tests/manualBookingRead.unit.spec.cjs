@@ -65,6 +65,8 @@ function controllerFixture(owner = true) {
     "../../models/client/staffInvitation.schema": { findOne: () => chain(null) },
     mongoose: {},
   };
+  mocks["../../services/venueMoney.service"] = require("../services/venueMoney.service");
+  mocks["../../models/client/eventCenterRefund.schema"] = { find: () => ({ select: () => ({ lean: async () => [] }) }) };
   const sandbox = { require: id => { assert.ok(id in mocks, id); return mocks[id]; }, module: { exports: {} }, console };
   vm.runInNewContext(fs.readFileSync(require.resolve("../controllers/client/bookingDashboard.controller"), "utf8"), sandbox);
   const res = { status(code) { this.code = code; return this; }, json(body) { this.body = body; } };

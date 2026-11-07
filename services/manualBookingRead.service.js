@@ -21,7 +21,7 @@ function buildManualBookings(venues, history = [], checkIns = [], now = new Date
       const latest = group.history[group.history.length - 1];
       const scheduled = [...group.history].reverse().find(entry => ["CREATED", "RESCHEDULED"].includes(entry.action));
       const entry = group.entries[0];
-      const unit = entry ? (venue.basePrice?.unit === "hour" ? "hour" : "day") : (created?.bookingUnit || scheduled?.bookingUnit || "day");
+      const unit = entry?.bookingUnit || created?.bookingUnit || scheduled?.bookingUnit || (entry?.startTime || venue.basePrice?.unit === "hour" ? "hour" : "day");
       const dates = (entry ? group.entries : (scheduled?.dates || [])).map(item => {
         if (item.startTime && item.endTime) return { date: item.date, startTime: item.startTime, endTime: item.endTime };
         if (unit === "hour" && entry) {
@@ -44,16 +44,16 @@ function buildManualBookings(venues, history = [], checkIns = [], now = new Date
       const amount = entry?.totalPrice ?? created?.totalPrice?.amount ?? 0;
       const paymentStatus = ({ paid: "COMPLETED", partially_paid: "PARTIALLY_PAID", pending: "PENDING" })[entry?.paymentStatus] || "PENDING";
       const duration = unit === "hour" ? uniqueDates.reduce((total, item) => {
-        const minutes = time => { const [h, m] = time.split(":").map(Number); return h * 60 + m; };
-        return total + (item.startTime && item.endTime ? (minutes(item.endTime) - minutes(item.startTime)) / 60 : 1);
+        const minutes = (time, end = false) => { if (end && time === "00:00") return 1440; const [h, m] = time.split(":").map(Number); return h * 60 + m; };
+        return total + (item.startTime && item.endTime ? (minutes(item.endTime, true) - minutes(item.startTime)) / 60 : 1);
       }, 0) : uniqueDates.length;
       output.push({
         _id: bookingId, bookingId, bookingType: "MANUAL", status, bookingUnit: unit, duration,
         guestName: entry?.clientName || created?.guestName || "Guest",
-        guestEmail: entry?.clientEmail || "", guestPhone: entry?.clientPhone || "",
-        guestDetails: { fullName: entry?.clientName || created?.guestName || "Guest", email: entry?.clientEmail || "", phoneNumber: entry?.clientPhone || "" },
+        guestEmail: entry?.clientEmail || created?.guestDetails?.email || "", guestPhone: entry?.clientPhone || created?.guestDetails?.phoneNumber || "",
+        guestDetails: { fullName: entry?.clientName || created?.guestName || "Guest", email: entry?.clientEmail || created?.guestDetails?.email || "", phoneNumber: entry?.clientPhone || created?.guestDetails?.phoneNumber || "" },
         dates: uniqueDates, selectedDates: uniqueDates, paymentStatus,
-        totalPrice: { amount, currency: venue.basePrice?.currency || created?.totalPrice?.currency || "NGN" },
+        totalPrice: { amount, currency: entry?.currency || created?.totalPrice?.currency || venue.basePrice?.currency || "NGN" },
         depositAmount: entry?.depositAmount || 0, checkIn,
         eventCenter: { _id: venue._id, venueName: venue.venueName, images: venue.images, location: venue.location },
         createdAt: created?.createdAt || null,
@@ -72,12 +72,24 @@ async function getManualBookings(venues) {
     require("../models/client/manualBookingCheckIn.schema").find({ eventCenter: { $in: ids } }).lean(),
     require("../models/client/bookingOperations.schema").find({ eventCenter: { $in: ids } }).lean(),
   ]);
-  return buildManualBookings(venues, history, checkIns).map(booking => {
+  const snapshots = operations.filter(o => o.bookingSnapshot && !history.some(h => String(h.eventCenter) === String(o.eventCenter) && h.bookingId === o.bookingId && h.action === "CREATED"))
+    .map(o => ({ ...o.bookingSnapshot, eventCenter: o.eventCenter, bookingId: o.bookingId, bookingType: "MANUAL", action: "CREATED", createdAt: o.bookingSnapshot.createdAt || o.createdAt }));
+  return buildManualBookings(venues, [...history, ...snapshots], checkIns).map(booking => {
     const record = operations.find(item => String(item.eventCenter) === String(booking.eventCenter._id) && item.bookingId === booking.bookingId);
-    if (!record) return booking;
+    if (!record) return { ...booking, manualFinance: require("./venueMoney.service").manualMoney(booking) };
+    if (record.bookingSnapshot) {
+      const snapshot = record.bookingSnapshot;
+      booking.bookingUnit = snapshot.bookingUnit || booking.bookingUnit;
+      if (booking.status === "CANCELLED") {
+        booking.totalPrice = snapshot.totalPrice || booking.totalPrice;
+        booking.guestName = snapshot.guestName || booking.guestName;
+        booking.guestDetails = snapshot.guestDetails || booking.guestDetails;
+        booking.selectedDates = snapshot.dates || booking.selectedDates; booking.dates = booking.selectedDates;
+      }
+    }
     const summary = require("./bookingOperations.service").paymentSummary(booking, record);
-    return { ...booking, depositAmount: summary.paidMinor / 100,
-      paymentStatus: summary.balanceMinor === 0 ? "COMPLETED" : summary.paidMinor > 0 ? "PARTIALLY_PAID" : "PENDING" };
+    return { ...booking, buyer: record.customerId, manualFinance: require("./venueMoney.service").manualMoney(booking, record), depositAmount: summary.paidMinor / 100,
+      paymentStatus: summary.paidMinor >= summary.totalMinor ? "COMPLETED" : summary.paidMinor > 0 ? "PARTIALLY_PAID" : "PENDING" };
   });
 }
 const manualCollectedAmount = booking => booking.status === "CANCELLED" ? 0 : booking.paymentStatus === "COMPLETED"

@@ -1,3 +1,5 @@
+const { validateAddress } = require("./addressRules");
+const { isValidCoordinates } = require("./locationCoordinates");
 const EventSettings = require("../models/management/eventSettings.schema");
 
 const getEventSettings = () => EventSettings.getSingleton();
@@ -42,7 +44,7 @@ const normalizeTicketGuide = (guide) => {
 // Keep the two-field creation form compatible with existing ticket-guide readers.
 // Only explicit policy edits are mirrored; unrelated listing patches stay untouched.
 const normalizeEventCancellationPolicy = (payload, previous = {}) => {
-  const fields = ["cancellationRefundProcess", "cancellationRefundTimeline"];
+  const fields = ["cancellationRefundProcess", "cancellationRefundTimeline", "cancellationRefundDays"];
   const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
   const topLevelEdit = fields.some((field) => hasOwn(payload, field));
   const nestedEdit = fields.some((field) => hasOwn(payload.ticketGuide || {}, field));
@@ -65,6 +67,10 @@ const normalizeEventCancellationPolicy = (payload, previous = {}) => {
       guide[field] = result[field];
     }
   }
+  if (result.cancellationRefundDays !== undefined) {
+    result.cancellationRefundTimeline = `Eligible ticket-price refunds are due within ${result.cancellationRefundDays} calendar days from event cancellation.`;
+    guide.cancellationRefundTimeline = result.cancellationRefundTimeline;
+  }
   result.ticketGuide = normalizeTicketGuide(guide);
   return result;
 };
@@ -75,6 +81,12 @@ const validateEventPayload = (
   { publishing = false, requireComplete = publishing, existing = false, changes = payload } = {},
 ) => {
   const errors = [];
+  if (payload.location?.countryCode) {
+    errors.push(...Object.values(validateAddress(payload.location, { requireComplete })));
+  }
+  if (payload.location?.coordinates !== undefined && !isValidCoordinates(payload.location.coordinates)) {
+    errors.push("Event coordinates must contain a latitude from -90 to 90 and a longitude from -180 to 180.");
+  }
   const limits = settings.contentLimits;
   const shouldValidate = (field) =>
     !existing ||
@@ -183,11 +195,9 @@ const validateEventPayload = (
       errors.push("A valid start and end date are required before publishing");
     }
     const loc = payload.location;
-    if (!loc || !["addressString", "street", "city", "country"].every(
+    if (!loc || !(loc.countryCode ? ["addressString"] : ["addressString", "street", "city", "country"]).every(
       (field) => typeof loc[field] === "string" && loc[field].trim(),
-    ) || !Number.isFinite(loc.coordinates?.latitude) ||
-        !Number.isFinite(loc.coordinates?.longitude) ||
-        Math.abs(loc.coordinates.latitude) > 90 || Math.abs(loc.coordinates.longitude) > 180) {
+    ) || !isValidCoordinates(loc.coordinates)) {
       errors.push("A complete event location is required before publishing");
     }
   }
@@ -238,6 +248,9 @@ const validateEventPayload = (
         (typeof payload[field] !== "string" || payload[field].length > maximum)) {
       errors.push(field + " must be text of at most " + maximum + " characters");
     }
+  }
+  for (const days of [payload.cancellationRefundDays, payload.ticketGuide?.cancellationRefundDays]) {
+    if (days !== undefined && (!Number.isInteger(days) || days < 1 || days > 30)) errors.push("Refund deadline must be 1-30 whole calendar days from cancellation");
   }
   const termsRequired =
     requireComplete || (ticketGuidePatched && payload.status !== "IN_PROGRESS");
@@ -330,23 +343,9 @@ const applyGuidanceDefaults = (payload, settings) => ({
   },
 });
 
-const organiserMeetsPublishingRequirements = (user, settings) => {
-  if (
-    settings.publishing.requireIdentityVerification &&
-    !user?.isIdentityVerified
-  ) {
-    return false;
-  }
-  const hasPayoutAccount = Boolean(
-    user?.vendorAccountCode ||
-    (user?.bankDetails?.accountNumber && user?.bankDetails?.bankCode)
-  );
-  const requirePayout = settings.publishing.requirePayoutAccount !== false;
-  if (requirePayout && !hasPayoutAccount) {
-    return false;
-  }
-  return true;
-};
+// Missing setup keeps a submitted listing pending; it never prevents saving it.
+const organiserMeetsPublishingRequirements = (user) =>
+  Boolean(user?.isIdentityVerified && user?.vendorAccountCode);
 
 const publicEventSettings = (settings) => ({
   general: { eventCreationEnabled: settings.general.eventCreationEnabled, defaultTimezone: settings.general.defaultTimezone, defaultCurrency: settings.general.defaultCurrency },

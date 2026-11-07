@@ -171,37 +171,7 @@ const getAllBookingHistory = async (req, res) => {
 // CREATE HISTORY ENTRY — For client-side logging (manual bookings)
 // ============================================================================
 const createHistoryEntry = async (req, res) => {
-  const { eventCenterId, bookingId, bookingType, bookingUnit, action, dates, previousDates, guestName, totalPrice, reason } = req.body;
-
-  try {
-    if (!eventCenterId || !bookingId || !bookingType || !action) {
-      return res.status(400).json({ success: false, message: "Missing required fields" });
-    }
-
-    const auth = await authorizeBookingAccess(req.user.id, eventCenterId);
-    if (!auth.authorized) {
-      return res.status(403).json({ success: false, message: auth.error });
-    }
-
-    await logBookingHistory({
-      eventCenter: eventCenterId,
-      bookingId,
-      bookingType,
-      bookingUnit: bookingUnit || "day",
-      action,
-      performedBy: req.user.id,
-      dates: dates || [],
-      previousDates: previousDates || [],
-      guestName: guestName || "",
-      reason: reason || undefined,
-      totalPrice: totalPrice || null,
-    });
-
-    res.status(201).json({ success: true, message: "History entry logged" });
-  } catch (err) {
-    console.error("[CREATE BOOKING HISTORY ERROR]", err);
-    res.status(500).json({ success: false, message: "Server error logging history" });
-  }
+  return res.status(410).json({ success: false, message: "Booking history is recorded automatically by the server." });
 };
 
 // ============================================================================
@@ -377,6 +347,10 @@ const getBookingFullDetails = async (req, res) => {
       if (!venue) {
         const historyEntry = await BookingHistory.findOne({ bookingId, bookingType: "MANUAL" }).lean();
         if (historyEntry) venue = await EventCenter.findById(historyEntry.eventCenter).lean();
+      }
+      if (!venue) {
+        const saved = await require("../../models/client/bookingOperations.schema").findOne({ bookingId, bookingSnapshot: { $exists: true } }).select("eventCenter").lean();
+        if (saved) venue = await EventCenter.findById(saved.eventCenter).lean();
       }
       if (!venue) return res.status(404).json({ success: false, message: "Booking not found" });
       eventCenterId = venue._id;

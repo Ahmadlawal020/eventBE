@@ -7,6 +7,9 @@ const platformSettingsSchema = new Schema(
       default: "platform_settings",
       unique: true,
     },
+    mapProvider: { type: String, enum: ["leaflet", "google"], default: "leaflet" },
+    googleMapsApiKey: { type: String, default: "", trim: true, maxlength: 200 },
+    googleMapsMapId: { type: String, default: "", trim: true, maxlength: 100 },
     platformName: {
       type: String,
       default: "Munasaba",

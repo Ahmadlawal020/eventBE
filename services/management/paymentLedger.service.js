@@ -15,6 +15,8 @@ const paymentProjection = (type) => ({
   totalPrice: 1,
   currency: 1,
   paymentStatus: 1,
+  refund: 1,
+  paymentResolutionRequired: 1,
   paymentMethod: 1,
   paymentReference: 1,
   createdAt: 1,

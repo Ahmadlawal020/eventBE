@@ -12,7 +12,7 @@ const validId = (id) => mongoose.Types.ObjectId.isValid(id);
 async function cancellationPreview(req, res) {
   try {
     if (!validId(req.params.id)) return res.status(400).json({ success: false, message: "Invalid event ID." });
-    const event = await Event.findById(req.params.id).select("title createdBy status occurrence").lean();
+    const event = await Event.findById(req.params.id).select("title createdBy status occurrence cancellationRefundDays ticketGuide.cancellationRefundDays").lean();
     if (!event) return res.status(404).json({ success: false, message: "Event not found." });
     if (!isOwner(event, req.user.id)) return res.status(403).json({ success: false, message: "Only the original organiser can cancel this event." });
 
@@ -28,6 +28,7 @@ async function cancellationPreview(req, res) {
     const ticketCount = tickets.filter(ticket => ticket.status === "UNREDEEMED" && !ticket.refundHold && (ticket.occurrence || 0) === (event.occurrence || 0)).length;
     return res.json({ success: true, data: {
       event: { id: event._id, title: event.title, status: event.status },
+      refundDueDays: event.cancellationRefundDays ?? event.ticketGuide?.cancellationRefundDays ?? 7,
       paidOrders: new Set(refunds.map(refund => String(refund.bookingId))).size,
       ticketCount,
       refundLiabilityMinorByCurrency: refundsByCurrency,
@@ -40,11 +41,10 @@ async function cancellationPreview(req, res) {
 }
 
 async function cancelEvent(req, res) {
-  const { message, refundDueDays = 7, confirm } = req.body || {};
+  const { message, confirm } = req.body || {};
   if (confirm !== true) return res.status(400).json({ success: false, message: "Confirm cancellation before continuing." });
   if (typeof message !== "string" || !message.trim() || message.length > 1000) return res.status(400).json({ success: false, message: "A message to ticket holders between 1 and 1000 characters is required." });
-  const days = Number(refundDueDays);
-  if (!Number.isInteger(days) || days < 1 || days > 30) return res.status(400).json({ success: false, message: "Refund deadline must be between 1 and 30 days." });
+
 
   try {
     if (!validId(req.params.id)) return res.status(400).json({ success: false, message: "Invalid event ID." });
@@ -54,6 +54,8 @@ async function cancelEvent(req, res) {
       if (!isOwner(event, req.user.id)) throw Object.assign(new Error("Only the original organiser can cancel this event."), { statusCode: 403 });
       if (["CANCELLED", "COMPLETED"].includes(event.status)) throw Object.assign(new Error(`This event is already ${event.status.toLowerCase()}.`), { statusCode: 409 });
 
+      const days = event.cancellationRefundDays ?? event.ticketGuide?.cancellationRefundDays ?? 7;
+      if (!Number.isInteger(days) || days < 1 || days > 30) throw Object.assign(new Error("Correct the event refund deadline before cancelling."), { statusCode: 409 });
       const dueAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
       const bookings = await EventBooking.find({ eventId: event._id, paymentStatus: { $in: ["COMPLETED", "REFUNDED"] } }).session(session);
       const refundable = bookings.filter((booking) => booking.paymentStatus === "COMPLETED" && Number(booking.totalAmount || 0) > 0);

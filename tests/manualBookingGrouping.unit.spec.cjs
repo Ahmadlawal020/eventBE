@@ -30,8 +30,13 @@ function controllerHarness(availability = { unavailableDates: [] }, options = {}
     module: { exports: {} },
     console,
     require(name) {
+      if (name.endsWith("/venueEditableFields.service")) return require("../services/venueEditableFields.service");
       if (name.endsWith("/eventCenter.schema")) return EventCenter;
-      if (name.endsWith("/bookingOperations.schema")) return { find: () => ({ lean: async () => options.ledgers || [] }) };
+      // These tests cover controller grouping/serialization; the transaction service
+      // has separate real-MongoDB permission, race and rollback tests.
+      if (name.endsWith("/venueCalendarMutation.service")) return { commitVenueUpdate: async (id, patch, updatedAt) =>
+        updatedAt ? EventCenter.findOneAndUpdate({ _id: id, updatedAt }, patch) : EventCenter.findByIdAndUpdate(id, patch) };
+      if (name.endsWith("/bookingOperations.schema")) return { find: () => ({ lean: async () => options.ledgers || [] }), updateOne: async () => ({ upsertedCount: 1 }) };
       if (name.endsWith("/bookingOperations.service")) return require("../services/bookingOperations.service");
       if (name === "crypto") return require("node:crypto");
       if (name === "mongoose") return { Types: { ObjectId: { isValid: () => true } } };

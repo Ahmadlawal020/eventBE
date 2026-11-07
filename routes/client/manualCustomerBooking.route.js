@@ -1,0 +1,14 @@
+const router = require("express").Router(), c = require("../../controllers/client/manualCustomerBooking.controller");
+router.use(require("../../middleware/verifyJWT"));
+router.use(require("../../middleware/generateLimiter")({ windowMs: 60000, max: 30, message: "Please wait before trying again." }));
+router.get("/", c.mine);
+router.post("/claim", c.claim);
+router.post("/:venueId/:bookingId/invite", c.invite);
+router.post("/:venueId/:bookingId/refund-confirm", c.confirmRefund);
+const refunds = require("../../controllers/client/manualRefundSettlement.controller");
+router.get("/:venueId/:bookingId/refunds", refunds.details);
+router.patch("/:venueId/:bookingId/refunds", refunds.update);
+router.post("/:venueId/:bookingId/refunds/:refundId/receipt/prepare", refunds.prepare);
+router.post("/:venueId/:bookingId/refunds/:refundId/receipt/complete", refunds.complete);
+router.get("/:venueId/:bookingId/refunds/:refundId/receipt", refunds.receipt);
+module.exports = router;

@@ -21,7 +21,7 @@ async function attachMedia(patch, previous, eventId, actor, session) {
 async function claim(asset, eventId, actor, session) {
   if (typeof asset.url !== "string" || !asset.url.startsWith("https://")) throw fail("Upload this image through the app before saving.");
   const record = await Media.findOneAndUpdate({
-    ...asset, state: { $in: ["READY", "ATTACHED"] },
+    ...asset, eventCenterId: null, state: { $in: ["READY", "ATTACHED"] },
     $or: [{ state: "READY", owner: actor }, { state: "ATTACHED", eventId }],
   }, { $set: { state: "ATTACHED", eventId, cleanupAfter: new Date(Date.now() + 86400000) } }, { new: true, session });
   if (!record) throw fail("This image does not belong to this event or its upload has expired. Upload it again.");
@@ -39,7 +39,8 @@ async function cleanupEventMedia({ limit = 50 } = {}) {
         // Attachment writes this registry row too, so attachment and cleanup cannot both win.
         const eventUse = await Event.exists({ $or: [{ "images.publicId": asset.publicId }, ...(asset.url ? [{ "images.url": asset.url }, { "performers.image": asset.url }] : [])] }).session(session);
         const ticketUse = asset.url && await UserTicket.exists({ "eventSnapshot.coverImage": asset.url }).session(session);
-        if (eventUse || ticketUse) {
+        const venueUse = await require("../models/client/eventCenter.schema").exists({ "images.publicId": asset.publicId }).session(session);
+        if (eventUse || ticketUse || venueUse) {
           await Media.updateOne({ _id: asset._id }, { $set: { state: "ATTACHED", cleanupAfter: new Date(Date.now() + 86400000) } }, { session });
           retained++; return false;
         }

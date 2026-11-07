@@ -11,6 +11,7 @@ module.exports = async (req, res, next) => {
   try {
     // Management accounts are stored separately; never fall back between account types.
     const management = /^\/api\/admin(?:\/|$)/.test(req.originalUrl || "");
+    if (decoded.accountType !== (management ? "management" : "client")) return res.status(401).json({ success: false, message: "Please sign in again." });
     const account = await (management ? Staff : User).findById(decoded.UserInfo.id)
       .select("email roles isActive sessionVersion status accountStatus startDate accessExpiresAt").lean();
     const active = management ? require("../services/management/geographicPolicy").activeStaff(account)

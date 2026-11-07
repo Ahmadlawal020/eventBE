@@ -1,4 +1,3 @@
-const { CronJob } = require("cron");
 const Booking = require("../models/client/eventBooking.schema");
 const { getPaymentGateway } = require("../services/payment");
 const {
@@ -107,8 +106,5 @@ async function expireReservations() {
   } finally {
     running = false;
   }
-}
-if (process.env.NODE_ENV !== "test" && !process.env.NODE_TEST_CONTEXT) {
-  new CronJob("*/5 * * * *", () => require("../services/eventOperations.service").runWorker("payment-reconciliation", expireReservations).catch(error => console.error("[PAYMENT WORKER]", error.message)), null, true);
 }
 module.exports = { expireReservations };

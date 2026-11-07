@@ -13,7 +13,7 @@ async function confirmReviewBooking(id,organiserId){
   if(String(booking.organiser)!==String(organiserId))throw fail("Not authorised to accept this booking",403);
   if(booking.status==="CONFIRMED")return {booking,changed:false};
   if(booking.status!=="PENDING_REVIEW" || booking.paymentStatus!=="COMPLETED" || booking.paymentResolutionRequired)throw fail("Only paid bookings awaiting review can be accepted",409);
-  if(booking.reviewDeadline && booking.reviewDeadline<new Date())throw fail("The review deadline has passed",409);
+  require("./venueReviewPolicy.service").assertReviewOpen(booking);
   const venue=await Venue.findById(booking.eventCenter).session(session);
   const ownBlocks=booking.bookingUnit==="day"?venue?.availability?.unavailableDates:venue?.availability?.unavailableSlots;
   if(!booking.selectedDates.every(d=>(ownBlocks||[]).some(b=>String(b.bookingId)===String(booking._id)&&new Date(b.date).toISOString().slice(0,10)===new Date(d.date).toISOString().slice(0,10))))throw fail("The booking dates are no longer reserved. Contact the guest to resolve this booking.",409);
@@ -26,39 +26,43 @@ async function confirmReviewBooking(id,organiserId){
   booking.status="CONFIRMED";booking.reviewedAt=new Date();booking.referralQualifiedAt=new Date();
   booking.ticketNumber=generateTicketNumber("MNS");booking.qrPayload=generateQRPayload(booking.ticketNumber,booking.eventCenter,"EVENT_CENTER");
   await booking.save({session});
+  await require("./venueBookingEvents.service").recordVenueEvent(booking, "ACCEPTED", organiserId, session);
   return {booking,changed:true};
  });
 }
-async function processVenuePayout(id){
- const payout=await Payout.findOneAndUpdate({_id:id,status:{$in:["READY","SUBMITTING","PENDING"]},$or:[{leaseUntil:{$exists:false}},{leaseUntil:{$lt:new Date()}}]},{$set:{leaseUntil:new Date(Date.now()+120000)}},{new:true}).select("+destination");
- if(!payout)return;
- const gateway=getPaymentGateway();
- try{
-  if(payout.status!=="READY"){
-   // Never blindly repeat a transfer after a timeout or process restart.
-   // Reconcile the deterministic reference before deciding anything else.
-   const current=await gateway.verifyTransfer(payout.reference);
-   payout.providerStatus=current.status;
-   payout.status=current.status==="success"?"SUCCESS":["failed","reversed"].includes(current.status)?"FAILED":current.status==="otp"?"NEEDS_ATTENTION":"PENDING";
-  }else{
-   if(!payout.recipientCode){
-    const recipient=await gateway.createTransferRecipient({...payout.destination,currency:payout.currency});
-    payout.recipientCode=recipient.recipient_code;
-    await payout.save();
+async function processVenuePayout(id) {
+ const token = require("crypto").randomUUID();
+ const payout = await Payout.findOneAndUpdate({ _id:id, status:{$in:["READY","PREPARING","SUBMITTING","PENDING"]}, $or:[{leaseUntil:{$exists:false}},{leaseUntil:{$lt:new Date()}}] },
+   {$set:{leaseUntil:new Date(Date.now()+120000),leaseToken:token}}, {new:true}).select("+destination");
+ if (!payout) return;
+ const filter = { _id:id, leaseToken:token };
+ const gateway = getPaymentGateway();
+ const write = async values => (await Payout.updateOne(filter, {$set:values})).modifiedCount;
+ try {
+   if (["READY", "PREPARING"].includes(payout.status)) {
+     const claimed = await Payout.updateOne({...filter, status:{$in:["READY","PREPARING"]},leaseUntil:{$gt:new Date()}}, {$set:{status:"PREPARING"}});
+     if (!claimed.matchedCount) return;
+     const booking = await Booking.findById(payout.booking).lean();
+     if (!booking || !["CONFIRMED", "COMPLETED"].includes(booking.status) || booking.paymentStatus !== "COMPLETED" || booking.refund?.state) {
+       await write({status:"NEEDS_ATTENTION",lastError:"Booking is not eligible for payout"}); return;
+     }
+     let recipientCode = payout.recipientCode;
+     if (!recipientCode) {
+       const recipient = await gateway.createTransferRecipient({...payout.destination,currency:payout.currency});
+       recipientCode = recipient.recipient_code;
+       if (!await write({recipientCode})) return;
+     }
+     // Only the current lease owner can cross the external-transfer boundary.
+     const submitting = await Payout.updateOne({...filter,status:"PREPARING",leaseUntil:{$gt:new Date()}},{$set:{status:"SUBMITTING"}});
+     if (!submitting.modifiedCount) return;
+     const transfer = await gateway.transferToOrganiser({amount:payout.amountMinor,currency:payout.currency,recipient:recipientCode,reference:payout.reference});
+     await write({providerStatus:transfer.status,status:transfer.status==="success"?"SUCCESS":transfer.status==="otp"?"NEEDS_ATTENTION":["failed","reversed"].includes(transfer.status)?"FAILED":"PENDING",lastError:""});
+   } else {
+     const current = await gateway.verifyTransfer(payout.reference);
+     await write({providerStatus:current.status,status:current.status==="success"?"SUCCESS":["failed","reversed"].includes(current.status)?"FAILED":current.status==="otp"?"NEEDS_ATTENTION":"PENDING",lastError:""});
    }
-   payout.status="SUBMITTING";await payout.save();
-   const transfer=await gateway.transferToOrganiser({amount:payout.amountMinor,currency:payout.currency,recipient:payout.recipientCode,reference:payout.reference});
-   payout.providerStatus=transfer.status;
-   payout.status=transfer.status==="success"?"SUCCESS":transfer.status==="otp"?"NEEDS_ATTENTION":["failed","reversed"].includes(transfer.status)?"FAILED":"PENDING";
-  }
-  payout.lastError=undefined;
- }catch(error){
-  payout.lastError=error.response?.data?.message || error.message;
-  // A definitive rejection requires operator attention; an ambiguous network
-  // response stays SUBMITTING and is reconciled using the same reference.
-  if(error.response?.status>=400 && error.response.status<500)payout.status="NEEDS_ATTENTION";
- }finally{
-  payout.leaseUntil=new Date(Date.now()+60000);await payout.save();
- }
+ } catch (error) {
+   await write({lastError:error.response?.data?.message || error.message,...(error.response?.status>=400 && error.response.status<500?{status:"NEEDS_ATTENTION"}:{})});
+ } finally { await write({leaseUntil:new Date(Date.now()+60000)}); }
 }
 module.exports={confirmReviewBooking,processVenuePayout};

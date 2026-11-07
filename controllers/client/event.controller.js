@@ -44,6 +44,7 @@ const createEvent = async (req, res) => {
     ticketGuide,
     cancellationRefundProcess,
     cancellationRefundTimeline,
+    cancellationRefundDays,
     arrivalGuide,
     performers,
     entry,
@@ -70,6 +71,7 @@ const createEvent = async (req, res) => {
         ticketGuide,
         ...(cancellationRefundProcess !== undefined ? { cancellationRefundProcess } : {}),
         ...(cancellationRefundTimeline !== undefined ? { cancellationRefundTimeline } : {}),
+        ...(cancellationRefundDays !== undefined ? { cancellationRefundDays } : {}),
         arrivalGuide,
         performers,
         entry,
@@ -95,7 +97,7 @@ const createEvent = async (req, res) => {
       );
       const canAutoPublish =
         settings.publishing.autoPublishVerifiedOrganisers &&
-        organiserMeetsPublishingRequirements(user, settings);
+        organiserMeetsPublishingRequirements(user);
       status = canAutoPublish ? "LISTED" : "ACTION_REQUIRED";
     }
 
@@ -118,6 +120,7 @@ const createEvent = async (req, res) => {
       ticketGuide: payload.ticketGuide,
       cancellationRefundProcess: payload.cancellationRefundProcess,
       cancellationRefundTimeline: payload.cancellationRefundTimeline,
+      cancellationRefundDays: payload.cancellationRefundDays,
       arrivalGuide: payload.arrivalGuide,
       performers,
       entry,
@@ -277,11 +280,16 @@ const updateEvent = async (req, res) => {
       return res.status(409).json({ success: false, message: "You can't update this field because the event has been cancelled." });
     }
 
+    const policyEdit = ["cancellationRefundProcess", "cancellationRefundTimeline", "cancellationRefundDays"].some(key => Object.hasOwn(req.body, key) || Object.hasOwn(req.body.ticketGuide || {}, key));
+    if ((policyEdit || req.body.expectedUpdatedAt !== undefined) && (!req.body.expectedUpdatedAt || +new Date(req.body.expectedUpdatedAt) !== +new Date(prevEvent.updatedAt))) {
+      return res.status(409).json({ success: false, message: "This event changed since you started editing. Reload the latest settings before saving." });
+    }
     const updatePayload = normalizeEventCancellationPolicy(
       prepareListingPatch(req.body, EVENT_FIELDS, prevEvent.toObject()),
       prevEvent.toObject(),
     );
     delete updatePayload.previousTicketPolicy;
+    delete updatePayload.expectedUpdatedAt;
     if (prevEvent.status === "CANCELLED" &&
         (updatePayload.status !== undefined || updatePayload.isDraft !== undefined)) {
       return res.status(409).json({ success: false, message: "A cancelled event cannot be relisted. Create a new event instead." });
@@ -341,22 +349,24 @@ const updateEvent = async (req, res) => {
       const loc = updatePayload.location;
 
       updatePayload.location = {
-        addressString: loc.addressString ?? prevEvent.location.addressString,
-        street: loc.street ?? prevEvent.location.street,
-        flat: loc.flat ?? prevEvent.location.flat,
-        city: loc.city ?? prevEvent.location.city,
-        area: loc.area ?? prevEvent.location.area,
-        postcode: loc.postcode ?? prevEvent.location.postcode,
-        country: loc.country ?? prevEvent.location.country,
-        isSpecificLocation:
-          loc.isSpecificLocation ?? prevEvent.location.isSpecificLocation,
+        addressString: loc.addressString ?? prevEvent.location?.addressString,
+        street: loc.street ?? prevEvent.location?.street,
+        flat: loc.flat ?? prevEvent.location?.flat,
+        city: loc.city ?? prevEvent.location?.city,
+        area: loc.area ?? prevEvent.location?.area,
+        postcode: loc.postcode ?? prevEvent.location?.postcode,
+        country: loc.country ?? prevEvent.location?.country,
+        countryCode: loc.countryCode ?? prevEvent.location?.countryCode,
+        building: loc.building ?? prevEvent.location?.building,
+        locality: loc.locality ?? prevEvent.location?.locality,
+        district: loc.district ?? prevEvent.location?.district,
         coordinates: {
           latitude:
             loc.coordinates?.latitude ??
-            prevEvent.location.coordinates.latitude,
+            prevEvent.location?.coordinates?.latitude,
           longitude:
             loc.coordinates?.longitude ??
-            prevEvent.location.coordinates.longitude,
+            prevEvent.location?.coordinates?.longitude,
         },
       };
     }
@@ -399,7 +409,7 @@ const updateEvent = async (req, res) => {
       const user = await User.findById(prevEvent.createdBy);
       const canAutoPublish =
         settings.publishing.autoPublishVerifiedOrganisers &&
-        organiserMeetsPublishingRequirements(user, settings);
+        organiserMeetsPublishingRequirements(user);
       updatePayload.status = canAutoPublish ? "LISTED" : "ACTION_REQUIRED";
 
       delete updatePayload.isDraft;
@@ -410,7 +420,7 @@ const updateEvent = async (req, res) => {
       const user = await User.findById(prevEvent.createdBy);
       const canAutoPublish =
         settings.publishing.autoPublishVerifiedOrganisers &&
-        organiserMeetsPublishingRequirements(user, settings);
+        organiserMeetsPublishingRequirements(user);
       updatePayload.status = canAutoPublish ? "LISTED" : "ACTION_REQUIRED";
     } else if (ended && updatePayload.schedule?.to) {
       const newToDate = new Date(updatePayload.schedule.to);
@@ -418,11 +428,15 @@ const updateEvent = async (req, res) => {
         const user = await User.findById(prevEvent.createdBy);
         const canAutoPublish =
           settings.publishing.autoPublishVerifiedOrganisers &&
-          organiserMeetsPublishingRequirements(user, settings);
+          organiserMeetsPublishingRequirements(user);
         updatePayload.status = canAutoPublish ? "LISTED" : "ACTION_REQUIRED";
       }
     }
 
+    if (prevEvent.status === "LISTED" && updatePayload.status === undefined) {
+      const owner = await User.findById(prevEvent.createdBy);
+      if (!organiserMeetsPublishingRequirements(owner)) updatePayload.status = "ACTION_REQUIRED";
+    }
     delete updatePayload.isDraft;
     let adjustedTicketCount = 0;
     const updatedEvent = await mongoose.connection.transaction(async session => {
@@ -681,7 +695,6 @@ const getMyEvents = async (req, res) => {
 
 const getPersonalEventListings = async (req, res) => {
   try {
-    console.log("[GET PUBLISHED LISTINGS] req.user:", req.user);
 
     if (!req.user?.id) {
       return res.status(401).json({
@@ -848,33 +861,20 @@ const deletePerformerImage = async (req, res) => {
 // ===================== SYNC EVENTS ON VERIFICATION =====================
 const syncUserEvents = async (userId, { throwOnError = false } = {}) => {
   try {
-    const [user, settings] = await Promise.all([
-      User.findById(userId),
-      getEventSettings(),
-    ]);
+    const user = await User.findById(userId);
     if (!user) return;
 
-    const meetsRequirements = organiserMeetsPublishingRequirements(
-      user,
-      settings,
-    );
-    if (
-      meetsRequirements &&
-      settings.publishing.autoPublishVerifiedOrganisers
-    ) {
-      const pending = await Event.find({ createdBy: userId, status: "ACTION_REQUIRED" }).lean();
-      for (const event of pending) {
-        const currentSettings = await getEventSettings(event.managementLocation);
-        if (!currentSettings.publishing.autoPublishVerifiedOrganisers || !organiserMeetsPublishingRequirements(user, currentSettings)) continue;
+    const candidates = await Event.find({ createdBy: userId, status: { $in: ["ACTION_REQUIRED", "LISTED"] } }).lean();
+    for (const event of candidates) {
+      const currentSettings = await getEventSettings(event.managementLocation);
+      const ready = organiserMeetsPublishingRequirements(user);
+      if (!ready && event.status === "LISTED") {
+        await Event.updateOne({ _id: event._id, status: "LISTED", updatedAt: event.updatedAt }, { $set: { status: "ACTION_REQUIRED" } });
+      } else if (ready && event.status === "ACTION_REQUIRED" && currentSettings.publishing.autoPublishVerifiedOrganisers) {
         if (validateEventPayload(event, currentSettings, { publishing: true, requireComplete: true }).length) continue;
         if (require("../../services/eventOccurrence.service").occurrenceEnded(event)) continue;
         await Event.updateOne({ _id: event._id, status: "ACTION_REQUIRED", updatedAt: event.updatedAt }, { $set: { status: "LISTED" } });
       }
-    } else if (!meetsRequirements) {
-      await Event.updateMany(
-        { createdBy: userId, status: "LISTED" },
-        { status: "ACTION_REQUIRED" },
-      );
     }
   } catch (err) {
     console.error("[SYNC USER EVENTS]", err);

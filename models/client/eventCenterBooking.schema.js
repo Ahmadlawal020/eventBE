@@ -1,4 +1,8 @@
 const mongoose = require("mongoose");
+// Older bookings keep their saved terms, including no rescheduling limit.
+// Checkout explicitly snapshots the current listing default for new bookings.
+const bookingCancellationPolicy = require("./venueCancellationPolicy.schema").clone();
+bookingCancellationPolicy.path("maxReschedules").default(undefined);
 
 const eventCenterTicketSchema = new mongoose.Schema(
   {
@@ -24,6 +28,17 @@ const eventCenterTicketSchema = new mongoose.Schema(
       ref: "EventCenter",
       required: true,
       index: true,
+    },
+    rescheduleRequest: {
+      id: String, status: { type: String, enum: ["PENDING", "ACCEPTED", "DECLINED", "WITHDRAWN", "CANCELLED"] },
+      dates: [{ _id: false, date: String, startTime: String, endTime: String }], reason: String, requestedAt: Date,
+      resolvedAt: Date, resolvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+      resolutionReason: String,
+      resolutionCode: { type: String, enum: ["UNAVAILABLE", "ORGANISER_DECLINED", "SUPERSEDED", "BOOKING_CANCELLED"] },
+      resolutionAvailability: [{ _id: false, date: String, startTime: String, endTime: String,
+        available: Boolean, partial: Boolean, reason: String,
+        hours: [{ _id: false, startTime: String, endTime: String, available: Boolean, reason: String }],
+      }],
     },
     selectedDates: [
       {
@@ -65,10 +80,22 @@ const eventCenterTicketSchema = new mongoose.Schema(
       enum: ["PENDING", "COMPLETED", "FAILED", "REFUNDED", "FAILED_REFUND"],
       default: "PENDING",
     },
+    cancellation: { at: Date, actor: { type: mongoose.Schema.Types.ObjectId, ref: "User" }, reason: String, refundMode: { type: String, enum: ["DIRECT"] } },
+    refund: {
+      state: { type: String, enum: ["QUEUED", "SUBMITTING", "PENDING", "PROCESSED", "NEEDS_ATTENTION"] },
+      requestedAt: Date, amountMinor: Number, providerId: String, leaseUntil: Date,
+      leaseToken: String, lastError: String, attempts: { type: Number, default: 0 },
+    },
     payoutDestination: {type:mongoose.Schema.Types.Mixed,select:false},
+    checkoutSubaccount: { type: String, select: false },
+    checkoutSnapshotVersion: Number,
+    checkoutAttemptedAt: Date,
+    checkoutToken: { type: String, select: false },
+    checkoutLockedUntil: Date,
     checkoutAccessCode: {type:String, select:false},
     checkoutUrl: {type:String, select:false},
     paymentResolutionRequired: {type:Boolean, default:false},
+    reconciliation: { attempts: { type: Number, default: 0 }, nextAttemptAt: Date, lastError: String },
     reservationExpiresAt: {type:Date, index:true},
     inventoryReserved: {type:Boolean, default:false},
     paymentReference: {
@@ -90,6 +117,8 @@ const eventCenterTicketSchema = new mongoose.Schema(
     // ============================================================
     // REVIEW BOOKING FLOW
     // ============================================================
+    cancellationPolicy: { type: bookingCancellationPolicy, default: undefined },
+    rescheduleCount: { type: Number, default: 0, min: 0, validate: Number.isSafeInteger },
     bookingMode: {
       type: String,
       enum: ["INSTANT", "REVIEW"],
@@ -148,6 +177,8 @@ eventCenterTicketSchema.index({ eventCenter: 1, status: 1 });
 
 // Compound index: status + reviewDeadline for cron job expiry queries
 eventCenterTicketSchema.index({ status: 1, reviewDeadline: 1 });
+eventCenterTicketSchema.index({ eventCenter: 1, "rescheduleRequest.status": 1 });
+eventCenterTicketSchema.index({ "refund.state": 1, "refund.leaseUntil": 1 });
 
 
 eventCenterTicketSchema.pre("save", function () {

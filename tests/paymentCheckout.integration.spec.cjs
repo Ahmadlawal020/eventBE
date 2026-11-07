@@ -88,7 +88,7 @@ test("payment and cancellation race preserves every paid booking's refund",async
 test("buyer details, proof, mark paid, dispute and confirmation form an authorised cycle",async()=>{
  const saved=await reserveEventBooking(eventData());await completePayment(saved.paymentReference,paid(saved.paymentReference,20000));await cancel();
  let refund=await Refund.findOne();
- const call=async(method,user,body={})=>{const res=response();await lifecycle[method]({params:{refundId:String(refund._id)},user:{id:String(user)},body:{settlementId:"fixture-settlement",...body}},res);return res;};
+ const call=async(method,user,body={})=>{const res=response();await refundController[method]({params:{refundId:String(refund._id)},user:{id:String(user)},body:{settlementId:"fixture-settlement",...body}},res);return res;};
  assert.equal((await call("submitBankDetails",buyer,{accountName:"Buyer",accountNumber:"bad",bankCode:"058"})).code,400);
  assert.equal((await call("submitBankDetails",owner,{accountName:"Buyer",accountNumber:"0123456789",bankCode:"058"})).code,409);
  assert.equal((await call("submitBankDetails",buyer,{accountName:"Buyer",accountNumber:"0123456789",bankCode:"058"})).code,200);
@@ -441,7 +441,7 @@ test("finance exception refund requires ownership and is audited with a durable 
 async function validEventFixture() {
   const Settings = require("../models/management/eventSettings.schema");
   await Settings.getSingleton();
-  await User.updateOne({ _id: owner }, { $set: { isIdentityVerified: true } });
+  await User.updateOne({ _id: owner }, { $set: { isIdentityVerified: true, vendorAccountCode: "test-connected-subaccount" } });
   await Event.updateOne({ _id: event }, { $set: {
     title: "Recurring Event", shortDescription: "A test event", description: "An isolated test event",
     schedule: { from: new Date(Date.now() + 2 * 86400000), to: new Date(Date.now() + 2 * 86400000 + 3600000) },
@@ -1172,7 +1172,7 @@ const invokeAuth = (handler, body) => new Promise((resolve, reject) => {
   const res = response(); res.json = function(data) { this.body = data; resolve(this); return this; };
   handler({ body }, res, reject);
 });
-const accessFor = (id, sessionVersion = 0) => jwt.sign({ UserInfo: { id: String(id), sessionVersion } }, process.env.ACCESS_TOKEN_SECRET);
+const accessFor = (id, sessionVersion = 0, accountType = "client") => jwt.sign({ accountType, UserInfo: { id: String(id), sessionVersion } }, process.env.ACCESS_TOKEN_SECRET);
 const checkAccess = async token => {
   const res = response(); let allowed = false;
   await require("../middleware/verifyJWT")({ originalUrl: "/api/events", headers: { authorization: "Bearer " + token } }, res,
@@ -1287,7 +1287,7 @@ test("quotes reject duplicate items, too many items, closed sales and tier order
 
 test("Google login also rejects a suspended account", async () => {
   process.env.GOOGLE_CLIENT_ID = "test-client";
-  mock.method(require("google-auth-library").OAuth2Client.prototype, "verifyIdToken", async () => ({ getPayload: () => ({ email: "guest@example.com", sub: "test-google-id" }) }));
+  mock.method(require("google-auth-library").OAuth2Client.prototype, "verifyIdToken", async () => ({ getPayload: () => ({ email: "guest@example.com", email_verified: true, sub: "test-google-id" }) }));
   await User.updateOne({ _id: buyer }, { $set: { isActive: false } });
   assert.equal((await invokeAuth(auth.handleGoogleAuth, { idToken: "test-only-token" })).code, 403);
 });
@@ -1297,7 +1297,7 @@ test("management authentication uses the separate staff account and revokes old 
   await Staff.collection.insertOne({ _id: id, email: "staff@example.com", roles: ["admin"], isActive: true, sessionVersion: 1 });
   const check = async version => {
     const res = response(); let allowed = false;
-    await require("../middleware/verifyJWT")({ originalUrl: "/api/admin/refunds", headers: { authorization: "Bearer " + accessFor(id, version) } }, res,
+    await require("../middleware/verifyJWT")({ originalUrl: "/api/admin/refunds", headers: { authorization: "Bearer " + accessFor(id, version, "management") } }, res,
       error => { if (error) throw error; allowed = true; });
     return { allowed, code: res.code };
   };
@@ -1340,4 +1340,100 @@ test("refund workspace excludes three redeemed holders and flags only the affect
   // Missing records for the affected holder must still surface for reconciliation.
   await Refund.deleteMany({});
   assert.equal((await call("holders", { filter: "attention" })).total, 1);
+});
+
+
+test("paid and free events remain action-required until identity and payout setup are complete", async () => {
+  await validEventFixture();
+  await User.updateOne({ _id: owner }, { $unset: { vendorAccountCode: 1 } });
+  await Event.updateOne({ _id: event }, { $set: { status: "ACTION_REQUIRED" } });
+  const controller = require("../controllers/client/event.controller");
+  await controller.syncUserEvents(owner, { throwOnError: true });
+  assert.equal((await Event.findById(event)).status, "ACTION_REQUIRED");
+  await Ticket.updateMany({ eventId: event }, { $set: { ticketType: "FREE" } });
+  await controller.syncUserEvents(owner, { throwOnError: true });
+  assert.equal((await Event.findById(event)).status, "ACTION_REQUIRED");
+  await User.updateOne({ _id: owner }, { $set: { vendorAccountCode: "test-connected", isIdentityVerified: false } });
+  await controller.syncUserEvents(owner, { throwOnError: true });
+  assert.equal((await Event.findById(event)).status, "ACTION_REQUIRED");
+  await User.updateOne({ _id: owner }, { $set: { isIdentityVerified: true } });
+  await controller.syncUserEvents(owner, { throwOnError: true });
+  assert.equal((await Event.findById(event)).status, "LISTED");
+});
+test("ticket creation succeeds and moves an unready listed event to action-required", async () => {
+  await validEventFixture();
+  await User.updateOne({ _id: owner }, { $unset: { vendorAccountCode: 1 } });
+  const res = response();
+  await require("../controllers/client/eventTicketType.controller").createTicket({ user: { id: String(owner) }, body: {
+    eventId: String(event), name: "Paid tier", ticketType: "PAID", totalQuantity: 10,
+    price: { amountCents: 1000000 }, currency: { code: "NGN", symbol: "NGN" },
+    salesStartAt: new Date(), salesEndAt: new Date(Date.now() + 86400000), perTransactionLimit: { min: 1, max: 5 },
+  } }, res);
+  assert.equal(res.code, 201, JSON.stringify(res.body));
+  assert.equal(await Ticket.countDocuments({ eventId: event, name: "Paid tier" }), 1);
+  assert.equal((await Event.findById(event)).status, "ACTION_REQUIRED");
+});
+test("a second policy editor cannot overwrite the first successful save", async () => {
+  await validEventFixture();
+  const controller = require("../controllers/client/event.controller");
+  const version = (await Event.findById(event)).updatedAt.toISOString();
+  const save = async (days) => { const res = response(); await controller.updateEvent({ params: { id: String(event) }, user: { id: String(owner) }, body: { cancellationRefundDays: days, expectedUpdatedAt: version } }, res); return res; };
+  assert.equal((await save(10)).code, 200);
+  assert.equal((await save(20)).code, 409);
+  assert.equal((await Event.findById(event)).cancellationRefundDays, 10);
+});
+
+
+test("event creation and resubmission succeed as action-required for every missing setup combination", async () => {
+  await validEventFixture();
+  await require("../models/management/eventSettings.schema").updateOne({ key: "event_settings" }, { $set: {
+    "publishing.requireCoverImage": false, "publishing.minimumImages": 0, "contentLimits.minImages": 0,
+  } });
+  const template = (await Event.findById(event)).toObject();
+  const controller = require("../controllers/client/event.controller");
+  for (const [verified, payout] of [[false, true], [true, false], [false, false]]) {
+    await User.updateOne({ _id: owner }, { $set: { isIdentityVerified: verified, vendorAccountCode: payout ? "test-connected" : "" } });
+    const res = response();
+    await controller.createEvent({ user: { id: String(owner) }, body: { ...template, images: [], isDraft: false } }, res);
+    assert.equal(res.code, 201, JSON.stringify(res.body));
+    assert.equal(res.body.data.status, "ACTION_REQUIRED");
+    const savedId = res.body.data._id;
+    const updated = response();
+    await controller.updateEvent({ user: { id: String(owner) }, params: { id: String(savedId) }, body: { status: "LISTED", title: "Still editable" } }, updated);
+    assert.equal(updated.code, 200, JSON.stringify(updated.body));
+    assert.equal(updated.body.data.status, "ACTION_REQUIRED");
+    assert.equal(updated.body.data.title, "Still editable");
+  }
+});
+
+test("venue creation and resubmission save action-required instead of rejecting missing setup", async () => {
+  const Settings = require("../models/management/eventCenterSettings.schema");
+  const settings = await Settings.getSingleton();
+  settings.publishing.minimumImages = 0; settings.publishing.minimumSafetyItems = 0;
+  await settings.save();
+  const controller = require("../controllers/client/eventCenter.controller");
+  for (const bookingSettings of ["INSTANT", "REVIEW"]) {
+    for (const [verified, payout] of [[false, true], [true, false], [false, false]]) {
+      await User.updateOne({ _id: owner }, { $set: { isIdentityVerified: verified, vendorAccountCode: payout ? "test-connected" : "",
+        bankDetails: payout ? { accountNumber: "0000000000", bankCode: "000", accountName: "Test owner" } : {} } });
+      const res = response();
+      await controller.createEventCenter({ user: { id: String(owner) }, body: {
+        isDraft: false, venueName: "Pending hall", venueType: "BANQUET_HALL", shortDescription: "A hall", description: "A complete hall",
+        supportedEvents: ["MUSIC_CONCERTS"], capacity: { max: 100 }, images: [], safety: [], bookingSettings,
+        basePrice: { amount: 1000000, unit: "day", currency: "NGN" },
+        availability: { operationalHours: { open: "08:00", close: "20:00" } },
+        location: { addressString: "Test address, Lagos", coordinates: { latitude: 6.5, longitude: 3.4 } },
+      } }, res);
+      assert.equal(res.code, 201, JSON.stringify(res.body));
+      assert.equal(res.body.data.status, "ACTION_REQUIRED");
+      const savedId = res.body.data._id;
+      const updated = response();
+      await controller.updateEventCenter({ user: { id: String(owner) }, params: { id: String(savedId) }, body: { status: "LISTED", venueName: "Still editable" } }, updated);
+      assert.equal(updated.code, 200, JSON.stringify(updated.body));
+      assert.equal(updated.body.data.status, "ACTION_REQUIRED");
+      assert.equal(updated.body.data.venueName, "Still editable");
+      await controller.syncUserEventCenters(owner, { throwOnError: true });
+      assert.equal((await Venue.findById(savedId)).status, "ACTION_REQUIRED");
+    }
+  }
 });

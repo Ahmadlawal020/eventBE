@@ -1,4 +1,5 @@
 const EventCenterBooking = require("../../models/client/eventCenterBooking.schema");
+const { bookingSessions, TIME_ZONE } = require("../../services/bookingAttendance.service");
 const UserEventTicket = require("../../models/client/userEventTicket.schema");
 
 /**
@@ -18,6 +19,8 @@ const getAllMyTickets = async (req, res) => {
     const formattedEventCenterBookings = eventCenterTickets.map(ticket => ({
       ...ticket,
       ticketCategory: 'EVENT_CENTER',
+      bookingTimeZone: TIME_ZONE,
+      bookingEndsAt: bookingSessions(ticket).at(-1)?.endsAt || null,
     }));
 
     // 2. Fetch User Event Tickets (Individual tickets for events)
@@ -59,8 +62,10 @@ const getTicketDetails = async (req, res) => {
       return res.status(200).json({
         success: true,
         data: {
-          ...eventCenterTicket.toObject(),
+          ...require("../../services/guestVenueBooking.service").guestVenueBooking(eventCenterTicket),
           ticketCategory: 'EVENT_CENTER',
+          bookingTimeZone: TIME_ZONE,
+          bookingEndsAt: bookingSessions(eventCenterTicket).at(-1)?.endsAt || null,
         }
       });
     }

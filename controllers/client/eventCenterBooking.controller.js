@@ -253,104 +253,13 @@ exports.getVenueCheckIns = async (req, res) => {
  */
 exports.cancelBooking = async (req, res) => {
   try {
-    const { bookingId } = req.params;
-    const { reason } = req.body;
-
-    if (!mongoose.Types.ObjectId.isValid(bookingId)) {
-      return res.status(400).json({ success: false, message: "Invalid booking ID." });
-    }
-
-    const booking = await EventCenterBooking.findById(bookingId);
-
-    if (!booking) {
-      return res.status(404).json({ success: false, message: "Booking not found." });
-    }
-
-    const auth = await authorizeBookingAccess(req.user.id, booking.eventCenter, false);
-    if (!auth.authorized) {
-      return res.status(403).json({ success: false, message: auth.error });
-    }
-
-    if (booking.status === "CANCELLED") {
-      return res.status(400).json({ success: false, message: "Booking is already cancelled." });
-    }
-
-    // PENDING_REVIEW bookings must go through declineBooking (handles refund properly)
-    if (booking.status === "PENDING_REVIEW") {
-      return res.status(400).json({
-        success: false,
-        message: "PENDING_REVIEW bookings must be declined, not cancelled. Use the decline endpoint.",
-      });
-    }
-
-    const attendance = (await require("../../services/bookingAttendance.service").attendanceForBookings([booking.toObject()]))[0].attendance;
-    if (attendance.summary.attended > 0) {
-      return res.status(400).json({ success: false, message: "Cannot cancel. Guest is already checked in." });
-    }
-
-    const refundMinor = booking.paymentStatus === "COMPLETED" && booking.paymentReference ? Math.round(booking.totalPrice.amount * 100) : 0;
-    if (req.body.expectedRefundMinor !== undefined && req.body.expectedRefundMinor !== refundMinor) return res.status(409).json({ success: false, message: "The refund amount changed. Review the cancellation details again." });
-
-    booking.status = "CANCELLED";
-
-    // Refund payment if it was completed
-    if (booking.paymentStatus === "COMPLETED" && booking.paymentReference) {
-      try {
-        const { getPaymentGateway } = require("../../services/payment");
-        const gw = getPaymentGateway();
-        await gw.refundPayment(booking.paymentReference);
-        booking.paymentStatus = "REFUNDED";
-      } catch (refundErr) {
-        console.error("[CANCEL BOOKING] Refund failed:", refundErr.message);
-        booking.paymentStatus = "FAILED_REFUND";
-      }
-    }
-
-    await booking.save();
-
-    // Remove booked dates/slots from event center's availability
-    const eventCenter = await EventCenter.findById(booking.eventCenter);
-    if (eventCenter) {
-      if (booking.bookingUnit === "day") {
-        eventCenter.availability.unavailableDates = (
-          eventCenter.availability.unavailableDates || []
-        ).filter((entry) => {
-          return String(entry.bookingId) !== String(booking._id);
-        });
-      } else if (booking.bookingUnit === "hour") {
-        eventCenter.availability.unavailableSlots = (
-          eventCenter.availability.unavailableSlots || []
-        ).filter((slot) => {
-          return String(slot.bookingId) !== String(booking._id);
-        });
-      }
-      await eventCenter.save();
-    }
-
-    // Log booking history
-    logBookingHistory({
-      eventCenter: booking.eventCenter,
-      ticket: booking._id,
-      bookingId: String(booking._id),
-      bookingType: "PLATFORM",
-      bookingUnit: booking.bookingUnit,
-      action: "CANCELLED",
-      performedBy: req.user.id,
-      dates: booking.selectedDates,
-      guestName: booking.guestDetails?.fullName || "",
-      reason: reason || undefined,
-      totalPrice: booking.totalPrice,
-    });
-
-    res.status(200).json({
-      success: true,
-      message: booking.paymentStatus === "FAILED_REFUND" ? "Booking cancelled, but the refund needs support follow-up." : "Booking successfully cancelled.",
-      data: (await require("../../services/bookingAttendance.service").withCurrentCheckIns([booking]))[0],
-    });
-  } catch (error) {
-    console.error("Error cancelling booking:", error);
-    res.status(500).json({ success: false, message: "Server error." });
-  }
+    const booking = await EventCenterBooking.findById(req.params.bookingId);
+    if (!booking) return res.status(404).json({ message: "Booking not found." });
+    const access = await authorizeBookingAccess(req.user.id, booking.eventCenter, false);
+    if (!access.authorized) return res.status(403).json({ message: access.error });
+    const updated = await require("../../services/venueCancellation.service").cancel(booking._id, { actor: req.user.id, reason: req.body.reason, expectedRefundMinor: req.body.expectedRefundMinor });
+    res.json({ success: true, message: "Booking cancelled. Any refund is tracked separately.", data: updated });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : "Could not cancel booking." }); }
 };
 
 /**
@@ -413,155 +322,19 @@ exports.getBookingStats = async (req, res) => {
  */
 exports.rescheduleBooking = async (req, res) => {
   try {
-    const { bookingId } = req.params;
-    const { newDates } = req.body;
-
-    if (!mongoose.Types.ObjectId.isValid(bookingId)) {
-      return res.status(400).json({ success: false, message: "Invalid booking ID." });
-    }
-
-    if (!newDates || !Array.isArray(newDates) || newDates.length === 0) {
-      return res.status(400).json({ success: false, message: "New dates are required." });
-    }
-
-    const booking = await EventCenterBooking.findById(bookingId);
-
-    if (!booking) {
-      return res.status(404).json({ success: false, message: "Booking not found." });
-    }
-
-    const auth = await authorizeBookingAccess(req.user.id, booking.eventCenter);
-    if (!auth.authorized) {
-      return res.status(403).json({ success: false, message: auth.error });
-    }
-
-    if (booking.status !== "ACTIVE") {
-      return res.status(400).json({ success: false, message: "Can only reschedule active bookings." });
-    }
-
-    const eventCenter = await EventCenter.findById(booking.eventCenter);
-    if (!eventCenter) {
-      return res.status(404).json({ success: false, message: "Event center not found." });
-    }
-
-    // Validate new dates against existing availability
-    if (booking.bookingUnit === "day") {
-      const newDateStrings = newDates.map(
-        (d) => new Date(d.date).toISOString().split("T")[0]
-      );
-      const dayConflicts = (eventCenter.availability.unavailableDates || []).filter((entry) => {
-        const entryDateStr = new Date(entry.date).toISOString().split("T")[0];
-        return newDateStrings.includes(entryDateStr) &&
-               (entry.type === "BOOKED" || entry.type === "MANUAL") &&
-               String(entry.bookingId) !== String(booking._id);
-      });
-      if (dayConflicts.length > 0) {
-        return res.status(400).json({
-          success: false,
-          message: "One or more selected dates are already booked",
-        });
-      }
-    } else if (booking.bookingUnit === "hour") {
-      const existingSlots = eventCenter.availability.unavailableSlots || [];
-      for (const slot of newDates) {
-        if (hasSlotConflict(slot, existingSlots, booking._id)) {
-          return res.status(400).json({
-            success: false,
-            message: "One or more selected time slots conflict with an existing booking",
-          });
-        }
-      }
-    }
-
-    // Capture old dates for history before updating
-    const previousDates = [...(booking.selectedDates || [])];
-
-    // Remove old dates/slots from availability (filter by bookingId to avoid removing other bookings' dates)
-    if (booking.bookingUnit === "day") {
-      eventCenter.availability.unavailableDates = (
-        eventCenter.availability.unavailableDates || []
-      ).filter((entry) => {
-        return String(entry.bookingId) !== String(booking._id);
-      });
-    } else if (booking.bookingUnit === "hour") {
-      eventCenter.availability.unavailableSlots = (
-        eventCenter.availability.unavailableSlots || []
-      ).filter((slot) => String(slot.bookingId) !== String(booking._id));
-    }
-
-    // Update booking with new dates
-    booking.selectedDates = newDates.map((d) => ({
-      date: new Date(d.date),
-      ...(d.startTime && { startTime: d.startTime }),
-      ...(d.endTime && { endTime: d.endTime }),
-    }));
-    booking.duration = newDates.length;
-    await booking.save();
-
-    // Add new dates/slots to availability
-    if (booking.bookingUnit === "day") {
-      const newDateStrings = newDates.map(
-        (d) => new Date(d.date).toISOString().split("T")[0]
-      );
-      newDateStrings.forEach((dateStr) => {
-        eventCenter.availability.unavailableDates.push({
-          date: new Date(dateStr),
-          type: "BOOKED",
-          bookingId: String(booking._id),
-          clientName: booking.guestDetails?.fullName || "",
-          clientPhone: booking.guestDetails?.phoneNumber || "",
-          clientEmail: booking.guestDetails?.email || "",
-        });
-      });
-    } else if (booking.bookingUnit === "hour") {
-      newDates.forEach((slot) => {
-        eventCenter.availability.unavailableSlots.push({
-          date: new Date(slot.date),
-          startTime: slot.startTime,
-          endTime: slot.endTime,
-          type: "BOOKED",
-          bookingId: String(booking._id),
-          clientName: booking.guestDetails?.fullName || "",
-          clientPhone: booking.guestDetails?.phoneNumber || "",
-          clientEmail: booking.guestDetails?.email || "",
-        });
-      });
-    }
-    await eventCenter.save();
-
-    // Log booking history
-    logBookingHistory({
-      eventCenter: booking.eventCenter,
-      ticket: booking._id,
-      bookingId: String(booking._id),
-      bookingType: "PLATFORM",
-      bookingUnit: booking.bookingUnit,
-      action: "RESCHEDULED",
-      performedBy: req.user.id,
-      dates: booking.selectedDates,
-      previousDates: previousDates,
-      guestName: booking.guestDetails?.fullName || "",
-      totalPrice: booking.totalPrice,
-    });
-
-    res.status(200).json({
-      success: true,
-      message: "Booking rescheduled successfully.",
-      data: (await require("../../services/bookingAttendance.service").withCurrentCheckIns([booking]))[0],
-    });
-  } catch (error) {
-    console.error("Error rescheduling booking:", error);
-    res.status(500).json({ success: false, message: "Server error." });
-  }
+    const booking = await EventCenterBooking.findById(req.params.bookingId);
+    if (!booking) return res.status(404).json({ message: "Booking not found." });
+    const access = await authorizeBookingAccess(req.user.id, booking.eventCenter, false);
+    if (!access.authorized) return res.status(403).json({ message: access.error });
+    const updated = await require("../../services/venueLifecycle.service").rescheduleVenueBooking(booking._id, req.body.newDates, req.user.id);
+    res.json({ success: true, message: "Booking rescheduled.", data: updated });
+  } catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : "Could not reschedule booking." }); }
 };
 
 const operationHandlers = () => require("./bookingOperations.controller").handlers(authorizeBookingAccess);
 exports.getBookingOperations = (req, res) => operationHandlers().details(req, res);
 exports.updateBookingOperations = (req, res) => operationHandlers().update(req, res);
-exports.getVenueToday = (req, res) => operationHandlers().today(req, res);
 
-exports.getVenueHolds = (req, res) => operationHandlers().holds(req, res);
-exports.changeVenueHold = (req, res) => operationHandlers().changeHold(req, res);
 
 exports.getCancellationPreview = async (req, res) => {
   try {
@@ -570,11 +343,7 @@ exports.getCancellationPreview = async (req, res) => {
     if (!booking) return res.status(404).json({ message: "Booking not found." });
     const access = await authorizeBookingAccess(req.user.id, booking.eventCenter, false);
     if (!access.authorized) return res.status(403).json({ message: access.error });
-    const attendance = (await require("../../services/bookingAttendance.service").attendanceForBookings([booking]))[0].attendance;
-    const canCancel = ["ACTIVE", "CONFIRMED"].includes(booking.status) && attendance.summary.attended === 0;
-    return res.json({ success: true, data: { canCancel, currency: booking.totalPrice.currency,
-      refundMinor: booking.paymentStatus === "COMPLETED" && booking.paymentReference ? Math.round(booking.totalPrice.amount * 100) : 0,
-      paymentStatus: booking.paymentStatus,
-      terms: "Cancelling a paid booking before attendance requests a full refund. Refund processing may require follow-up if the payment provider rejects it." } });
+    if (String(booking.organiser) !== String(req.user.id)) return res.status(403).json({ message: "Only the booking organiser can cancel and arrange its refund." });
+    return res.json({ success: true, data: await require("../../services/venueCancellation.service").preview(booking) });
   } catch (error) { console.error("[CANCELLATION PREVIEW]", error); return res.status(500).json({ message: "Could not load cancellation details." }); }
 };

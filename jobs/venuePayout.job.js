@@ -1,16 +1,13 @@
-const {CronJob}=require("cron");
-const Payout=require("../models/client/venuePayout.schema");
-const {processVenuePayout}=require("../services/venuePayout.service");
-let running=false;
-async function settleVenuePayouts(){
- if(running)return;running=true;
- try{
-  const jobs=await Payout.find({status:{$in:["READY","SUBMITTING","PENDING"]},$or:[{leaseUntil:{$exists:false}},{leaseUntil:{$lt:new Date()}}]}).sort({updatedAt:1}).limit(100);
-  for(const payout of jobs){
-   try{await processVenuePayout(payout._id);}catch(error){console.error("[VENUE PAYOUT]",String(payout._id),error.message);}
-  }
- }
- catch(error){console.error("[VENUE PAYOUT]",error.message);}finally{running=false;}
+const Payout = require("../models/client/venuePayout.schema");
+const { processVenuePayout } = require("../services/venuePayout.service");
+async function settleVenuePayouts() {
+  return require("../services/eventOperations.service").runWorker("venue-payout", async () => {
+    const jobs = await Payout.find({ status: { $in: ["READY", "PREPARING", "SUBMITTING", "PENDING"] }, $or: [{ leaseUntil: null }, { leaseUntil: { $lte: new Date() } }] }).sort({ updatedAt: 1 }).limit(100);
+    let failed = 0;
+    for (const payout of jobs) {
+      try { await processVenuePayout(payout._id); } catch (error) { failed++; console.error("[VENUE PAYOUT]", String(payout._id), error.message); }
+    }
+    return { processed: jobs.length, failed };
+  });
 }
-new CronJob("* * * * *",settleVenuePayouts,null,true);
-module.exports={settleVenuePayouts};
+module.exports = { settleVenuePayouts };

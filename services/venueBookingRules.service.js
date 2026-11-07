@@ -28,7 +28,8 @@ function assertVenueSchedule(venue, dates, unit, { now = new Date(), bookingId, 
   const buffer = Number(availability.preparationTime || 0) * (unit === "hour" ? 3600000 : 86400000);
   for (const entry of [...(availability.unavailableDates || []), ...(availability.unavailableSlots || [])]) {
     if (bookingId && String(entry.bookingId) === String(bookingId)) continue;
-    if (entry.holdExpiresAt && new Date(entry.holdExpiresAt) <= now) continue;
+    // Retired organiser holds must never block reservations, even before data cleanup.
+    if (entry.holdId) continue;
     const existing = bookingSessions({ selectedDates: [entry], bookingUnit: entry.startTime ? "hour" : "day" });
     for (const occupied of existing) for (const requested of sessions) {
       if (new Date(requested.startsAt).getTime() < new Date(occupied.endsAt).getTime() + buffer &&

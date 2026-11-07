@@ -69,6 +69,9 @@ app.use("/api", (req, res, next) => {
   if (forbidden(req.body)) return res.status(400).json({ success: false, message: "Operating location assignments are managed by administrators" });
   next();
 });
+// Public map configuration and the hosted Google Maps document.
+app.use("/api/maps", require("./routes/client/maps.route"));
+
 // Mount user routes
 app.use("/api/auth", require("./routes/client/auth.route"));
 app.use("/api/user-info", require("./routes/client/userProfile.route"));
@@ -129,17 +132,21 @@ app.use(
 );
 app.use("/api/ticket-export", require("./routes/client/ticketExport.route"));
 app.use("/api/referrals", require("./routes/client/referral.route"));
+app.use("/api/event-center-refunds", require("./routes/client/eventCenterRefund.route"));
 app.use("/api/event-refunds", require("./routes/client/eventRefund.route"));
 
 // Mount admin routes
 app.use("/api/admin/auth", require("./routes/management/auth.route"));
 // All management routes below this boundary use current database permissions.
+app.use("/api/manual-venue-bookings", require("./routes/client/manualCustomerBooking.route"));
 app.use("/api/admin", require("./middleware/management/verifyAdmin"), require("./middleware/management/geographicBoundary"));
 app.use("/api/admin/geography", require("./routes/management/geography.route"));
 app.use("/api/admin/dashboard", require("./routes/management/dashboard.route"));
 app.use("/api/admin/users", require("./routes/management/users.route"));
 app.use("/api/admin/content-moderation", require("./routes/management/moderation.route"));
 app.use("/api/admin/listings", require("./routes/management/listings.route"));
+app.get("/api/admin/reviews", require("./controllers/client/venueReview.controller").list);
+app.patch("/api/admin/reviews/:id", require("./middleware/management/verifyModerator"), require("./controllers/client/venueReview.controller").moderate);
 app.use("/api/admin/bookings", require("./routes/management/bookings.route"));
 app.use("/api/admin/payments", require("./routes/management/payments.route"));
 app.use("/api/admin/tickets", require("./routes/management/tickets.route"));
@@ -161,6 +168,7 @@ app.use(
 );
 app.use("/api/admin/support", require("./routes/management/support.route"));
 app.use("/api/admin/transfers", require("./routes/management/transfers.route"));
+app.use("/api/admin/event-center-refunds", require("./routes/management/eventCenterRefunds.route"));
 app.use("/api/admin/refunds", require("./routes/management/refunds.route"));
 app.use(
   "/api/admin/co-organisers",

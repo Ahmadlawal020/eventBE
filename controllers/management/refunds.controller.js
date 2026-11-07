@@ -70,7 +70,7 @@ const getRefunds = async (req, res) => {
         pagination: { total, page: pageNumber, limit: limitNumber, pages: Math.ceil(total / limitNumber) },
       }});
     }
-    const query = { paymentStatus: { $in: ["REFUNDED", "FAILED_REFUND"] } };
+    const query = { $or: [{ paymentStatus: { $in: ["REFUNDED", "FAILED_REFUND"] } }, { "refund.state": { $exists: true } }] };
     if (search) {
       query.paymentReference = new RegExp(
         search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
@@ -133,7 +133,7 @@ const getRefundDetail = async (req, res) => {
 
     if (
       refund &&
-      ["REFUNDED", "FAILED_REFUND"].includes(refund.paymentStatus)
+      (["REFUNDED", "FAILED_REFUND"].includes(refund.paymentStatus) || refund.refund?.state)
     ) {
       return res.status(200).json({
         success: true,
@@ -175,7 +175,7 @@ const getRefundDetail = async (req, res) => {
 
     if (
       refund &&
-      ["REFUNDED", "FAILED_REFUND"].includes(refund.paymentStatus)
+      (["REFUNDED", "FAILED_REFUND"].includes(refund.paymentStatus) || refund.refund?.state)
     ) {
       return res.status(200).json({
         success: true,

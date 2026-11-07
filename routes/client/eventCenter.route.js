@@ -23,6 +23,10 @@ const {
 // AUTHENTICATED ROUTES
 // ====================
 router.post("/", verifyJWT, createEventCenter);
+const media = require("../../controllers/client/eventMedia.controller");
+const mediaLimit = require("../../middleware/generateLimiter")({ windowMs: 60000, max: 20, message: "Please wait before uploading more photos." });
+router.post("/media/prepare", verifyJWT, mediaLimit, media.prepare);
+router.post("/media/complete", verifyJWT, mediaLimit, media.complete);
 
 router.get(
   "/my-event-center-listings",
@@ -41,8 +45,14 @@ router.delete("/:id", verifyJWT, deleteEventCenter);
 // ====================
 // PUBLIC ROUTES
 // ====================
+const holderRefunds = require("../../controllers/client/eventCenterHolderRefundWorkspace.controller");
+router.get("/:id/refund-workspace", verifyJWT, holderRefunds.summary);
+router.get("/:id/refund-holders", verifyJWT, holderRefunds.holders);
+router.get("/:id/refund-holder-tickets", verifyJWT, holderRefunds.holderTickets);
+router.get("/:id/booking-refunds", verifyJWT, require("../../controllers/client/eventCenterRefundWorkspace.controller").list);
 router.get("/settings", getPublicEventCenterSettings);
 router.get("/", getEventCenters);
 router.get("/:id", require("../../middleware/optionalJWT"), getEventCenterById); // MUST remain last
 
+router.get("/:eventCenterId/reviews", require("../../controllers/client/venueReview.controller").public);
 module.exports = router;

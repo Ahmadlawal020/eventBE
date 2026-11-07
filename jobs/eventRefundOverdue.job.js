@@ -1,4 +1,3 @@
-const { CronJob } = require("cron");
 const mongoose = require("mongoose");
 const EventRefund = require("../models/client/eventRefund.schema");
 const { queueNotices } = require("../services/refundNotifications.service");
