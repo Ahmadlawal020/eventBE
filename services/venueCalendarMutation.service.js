@@ -88,6 +88,9 @@ async function syncManualBookings(previous, candidate, actor, session) {
     await Operations.updateOne({ _id: `${previous._id}:${id}` }, { $set: { bookingSnapshot }, $setOnInsert: {
       eventCenter: previous._id, bookingId: id, openingPaidMinor: opening, revision: 0, payments: [], handovers: [], audit: [],
     } }, { upsert: true, session });
+    if (!oldRows && rows) await require("./manualBookingEmail.service").queueBookingCode({
+      venue: previous, bookingId: id, email: first.clientEmail, name: first.clientName,
+    }, session);
     const changed = oldRows && rows && (first.totalPrice !== oldRows[0].totalPrice || first.clientName !== oldRows[0].clientName || first.clientEmail !== oldRows[0].clientEmail || first.clientPhone !== oldRows[0].clientPhone);
     const action = !rows ? "CANCELLED" : !oldRows ? "CREATED" : moved ? "RESCHEDULED" : changed ? "UPDATED" : null;
     if (action) {

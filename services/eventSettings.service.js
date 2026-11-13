@@ -84,7 +84,8 @@ const validateEventPayload = (
   if (payload.location?.countryCode) {
     errors.push(...Object.values(validateAddress(payload.location, { requireComplete })));
   }
-  if (payload.location?.coordinates !== undefined && !isValidCoordinates(payload.location.coordinates)) {
+  const evtCoords = payload.location?.coordinates;
+  if (evtCoords !== undefined && (evtCoords.latitude !== undefined || evtCoords.longitude !== undefined) && !isValidCoordinates(evtCoords)) {
     errors.push("Event coordinates must contain a latitude from -90 to 90 and a longitude from -180 to 180.");
   }
   const limits = settings.contentLimits;

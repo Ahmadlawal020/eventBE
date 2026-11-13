@@ -27,6 +27,16 @@ const getListings = async (req, res) => {
       limit = 20,
     } = req.query;
 
+    const invalid = message => res.status(400).json({ message });
+    for (const [key, value] of Object.entries({ minPrice, maxPrice, minCapacity })) {
+      if (value === undefined || value === "") continue;
+      if (typeof value !== "string" || !/^\d+(\.\d{1,2})?$/.test(value) || !Number.isFinite(Number(value)) ||
+          (key === "minCapacity" && !Number.isSafeInteger(Number(value)))) return invalid("Enter valid non-negative prices and a whole-number capacity.");
+    }
+    if (minPrice && maxPrice && Number(minPrice) > Number(maxPrice)) return invalid("Maximum price must be at least the minimum price.");
+    if (listingType && !["event", "eventCenter"].includes(listingType)) return invalid("Choose events or venues.");
+    if (bookingType && !["INSTANT", "REVIEW"].includes(bookingType)) return invalid("Choose a valid booking option.");
+
     const availability = require("../../services/venueSearchAvailability.service");
     const selection = availability.requestedDates(req.query);
     if (selection) {
@@ -47,7 +57,7 @@ const getListings = async (req, res) => {
 
     // --- 1️⃣ Process Events ---
     if (showEvents) {
-      const eventQuery = { status: "LISTED" };
+      const eventQuery = { status: "LISTED", "moderation.status": { $nin: ["UNLISTED", "CANCELLED"] } };
 
       if (q) eventQuery.title = { $regex: escapeRegex(q), $options: "i" };
       if (location) {
@@ -130,7 +140,7 @@ const getListings = async (req, res) => {
 
     // --- 2️⃣ Process Event Centers ---
     if (showCenters) {
-      const centerQuery = { status: "LISTED" };
+      const centerQuery = { status: "LISTED", archivedAt: null, "moderation.status": { $nin: ["UNLISTED", "CANCELLED"] } };
 
       if (q) centerQuery.venueName = { $regex: escapeRegex(q), $options: "i" };
       if (location) {
@@ -161,7 +171,7 @@ const getListings = async (req, res) => {
         if (center.basePrice?.amount !== undefined) prices.push(center.basePrice.amount);
         if (center.weekendPrice?.amount !== undefined) prices.push(center.weekendPrice.amount);
 
-        const lowestAmount = prices.length > 0 ? Math.min(...prices) : null;
+        const lowestAmount = center.basePrice?.amount ?? null;
         const maxAmount = prices.length > 0 ? Math.max(...prices) : null;
         const currencyCode = center.basePrice?.currency || center.weekendPrice?.currency || "USD";
 
@@ -176,7 +186,8 @@ const getListings = async (req, res) => {
           price: lowestAmount !== null ? {
             amount: lowestAmount,
             maxAmount: maxAmount,
-            currency: currencyCode
+            currency: currencyCode,
+            unit: center.basePrice?.unit,
           } : null,
           type: "eventCenter",
           createdAt: center.createdAt

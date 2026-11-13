@@ -263,6 +263,53 @@ test("venue audit remediation enforces permissions and atomic booking invariants
     const saved=await Venue.findById(v._id);assert.equal(saved.availability.unavailableDates.length,1);assert.equal(new Date(saved.availability.unavailableDates[0].date).toISOString().slice(0,10),day(22));
     assert.equal((await invoke(c.resolve,v.createdBy,params,{action:"ACCEPTED",requestId})).code,409);
   });
+  await t.test("new direct bookings queue one email code atomically and retry delivery to the provided address", async () => {
+    const v = await fixture();
+    const patch = { availability: { ...v.availability.toObject(), unavailableDates: [manual(day(20), { clientEmail: "guest@example.invalid" })] } };
+    await commitVenueUpdate(v._id, patch, v.updatedAt, v.createdBy);
+    const key = `manual-booking-code:${v._id}:manual-test`;
+    let notice = await Outbox.findOne({ key });
+    assert.ok(notice);
+    assert.equal(notice.manualBookingClaim.email, "guest@example.invalid");
+    const token = notice.manualBookingClaim.token;
+    assert.match(token, /^[a-f0-9]{48}$/);
+    const record = await Operations.findById(`${v._id}:manual-test`).select("+claimHash");
+    assert.equal(record.claimHash, require("crypto").createHash("sha256").update(token).digest("hex"));
+    assert.ok(record.claimExpiresAt > new Date());
+    const updated = await Venue.findById(v._id);
+    await commitVenueUpdate(v._id, { availability: updated.availability.toObject() }, updated.updatedAt, v.createdBy);
+    assert.equal(await Outbox.countDocuments({ key }), 1);
+    let fail = true;
+    const messages = [];
+    const email = mock.method(require("../services/email.service"), "sendEmail", async message => {
+      messages.push(message);
+      if (fail) throw Error("Temporary email outage");
+      return { id: "accepted" };
+    });
+    try {
+      const { deliverNotice } = require("../services/eventCenterRefundNotifications.service");
+      notice.lockToken = "test-email-lock"; await notice.save();
+      await assert.rejects(deliverNotice(notice, notice.lockToken), /Temporary email outage/);
+      assert.equal((await Outbox.findById(notice._id)).completedAt, null);
+      fail = false;
+      await deliverNotice(notice, notice.lockToken);
+      const delivered = await Outbox.findById(notice._id);
+      assert.ok(delivered.completedAt); assert.ok(delivered.emailSentAt);
+      assert.equal(delivered.manualBookingClaim.token, undefined);
+      assert.equal(messages[1].to, "guest@example.invalid");
+      assert.ok(messages[1].html.includes(token));
+      assert.match(messages[1].html, /Direct venue bookings/);
+      assert.equal(messages[0].idempotencyKey, messages[1].idempotencyKey);
+      const c = require("../controllers/client/manualCustomerBooking.controller");
+      assert.equal((await invoke(c.claim, oid(), {}, { token })).code, 200);
+      assert.equal((await invoke(c.claim, oid(), {}, { token })).code, 409);
+      assert.equal(await require("../services/manualBookingEmail.service").deliverBookingCode(notice), false);
+    } finally { email.mock.restore(); }
+    const invalid = await fixture();
+    await assert.rejects(commitVenueUpdate(invalid._id, { availability: { ...invalid.availability.toObject(), unavailableDates: [manual(day(20), { clientEmail: "bad-address" })] } }, invalid.updatedAt, invalid.createdBy), /valid customer email/);
+    assert.equal(await Operations.countDocuments({ eventCenter: invalid._id }), 0);
+    assert.equal(await Outbox.countDocuments({ key: `manual-booking-code:${invalid._id}:manual-test` }), 0);
+  });
   await t.test("manual booking codes are single-use and customer views exclude private notes", async () => {
     const v=await fixture(), buyer=oid();
     await commitVenueUpdate(v._id,{availability:{...v.availability.toObject(),unavailableDates:[manual(day(20))]}},v.updatedAt,v.createdBy);

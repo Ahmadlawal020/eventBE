@@ -104,6 +104,7 @@ app.use("/api/staff", require("./routes/client/staff.route"));
 app.use("/api/notifications", require("./routes/client/notification.route"));
 app.use("/api/messages", require("./routes/client/message.route"));
 app.use("/api/analytics", require("./routes/client/analytics.route"));
+app.use("/api/discovery", require("./routes/client/discovery.route"));
 app.use(
   "/api/ticket-dashboard",
   require("./routes/client/ticketDashboard.route"),

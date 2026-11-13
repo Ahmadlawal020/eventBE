@@ -17,6 +17,14 @@ async function queueNotices(notices, session) {
 // Each channel is persisted separately. Retrying email cannot duplicate the in-app notice.
 async function deliverNotice(notice, token) {
   const filter = { _id: notice._id, lockToken: token };
+  if (notice.manualBookingClaim?.token) {
+    const sent = await require("./manualBookingEmail.service").deliverBookingCode(notice);
+    await Outbox.updateOne(filter, {
+      $set: { completedAt: new Date(), ...(sent ? { emailSentAt: new Date() } : {}), lastError: null, lockedUntil: new Date(0) },
+      $unset: { "manualBookingClaim.token": 1 },
+    });
+    return;
+  }
   const user = await User.findById(notice.recipient).select("firstName email pushTokens notificationPreferences").lean();
   if (!user) throw Object.assign(new Error("Notification recipient no longer exists"), { permanent: true });
   if (!notice.inAppSentAt) {

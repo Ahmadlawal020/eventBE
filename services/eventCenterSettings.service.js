@@ -14,7 +14,8 @@ const validateVenuePayload = (
   if (payload.location?.countryCode) {
     errors.push(...Object.values(validateAddress(payload.location, { requireComplete })));
   }
-  if (payload.location?.coordinates !== undefined && !isValidCoordinates(payload.location.coordinates)) {
+  const coords = payload.location?.coordinates;
+  if (coords !== undefined && (coords.latitude !== undefined || coords.longitude !== undefined) && !isValidCoordinates(coords)) {
     errors.push("Venue coordinates must contain a latitude from -90 to 90 and a longitude from -180 to 180.");
   }
   if (Object.prototype.hasOwnProperty.call(changes, "cancellationPolicy")) {
