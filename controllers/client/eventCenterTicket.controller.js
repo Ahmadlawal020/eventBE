@@ -170,6 +170,43 @@ const createTicket = async (req, res) => {
       if(!isReviewMode && !owner?.vendorAccountCode)return res.status(409).json({success:false,message:"The organiser must connect a payout account before accepting online payments."});
       if(isReviewMode && (!owner?.bankDetails?.accountNumber || !owner?.bankDetails?.bankCode || quote.currency!=="NGN"))return res.status(409).json({success:false,message:"Review bookings require a connected NGN payout bank account."});
 
+      // Sweep any expired pending reservations by this buyer on this venue before attempting a new hold,
+      // and resume an active in-window pending reservation for the same dates if one already exists.
+      const existingPending = mongoose.isValidObjectId(buyerId) && mongoose.isValidObjectId(eventCenterId)
+        ? await EventCenterBooking.find({
+            buyer: buyerId,
+            eventCenter: eventCenterId,
+            status: "ACTIVE",
+            paymentStatus: "PENDING",
+          }).lean()
+        : [];
+      let sweptAny = false;
+      for (const oldBooking of existingPending) {
+        if (new Date(oldBooking.reservationExpiresAt || (+new Date(oldBooking.createdAt) + 30 * 60000)) <= new Date()) {
+          const swept = await require("../../services/venueCheckout.service").expireVenueCheckout(oldBooking._id);
+          if (swept) sweptAny = true;
+        } else {
+          const oldDatesKey = JSON.stringify((oldBooking.selectedDates || []).map(d => ({
+            date: new Date(d.date).toISOString().slice(0, 10),
+            startTime: d.startTime || undefined,
+            endTime: d.endTime || undefined,
+          })));
+          const newDatesKey = JSON.stringify((quote.selectedDates || []).map(d => ({
+            date: new Date(d.date).toISOString().slice(0, 10),
+            startTime: d.startTime || undefined,
+            endTime: d.endTime || undefined,
+          })));
+          if (oldBooking.bookingUnit === bookingUnit && oldDatesKey === newDatesKey) {
+            const resumed = await require("../../services/venueCheckoutAttempt.service").resumeVenueCheckout(oldBooking._id, gateway);
+            return res.status(resumed.data.checkoutPending ? 202 : 201).json(resumed);
+          }
+        }
+      }
+      if (sweptAny) {
+        const refreshedVenue = await EventCenter.findById(eventCenterId);
+        if (refreshedVenue) eventCenter.updatedAt = refreshedVenue.updatedAt;
+      }
+
       // Persist immutable checkout details before contacting the payment provider.
       const pending = await require("../../services/venueCheckout.service").reserveVenueCheckout(eventCenterId, eventCenter.updatedAt, {
         buyer: buyerId, organiser: eventCenter.createdBy, guestDetails: { fullName, phoneNumber, email }, selectedDates: quote.selectedDates,
@@ -223,7 +260,7 @@ const getMyTickets = async (req, res) => {
     const [tickets, total] = await Promise.all([
       EventCenterBooking.find(filter)
         .populate("eventCenter", "venueName images location")
-        .select("buyer guestDetails eventCenter selectedDates bookingUnit duration totalPrice paymentStatus status paymentReference paymentResolutionRequired ticketNumber bookingMode reviewDeadline createdAt")
+        .select("buyer guestDetails eventCenter selectedDates bookingUnit duration totalPrice rescheduledPrice paymentStatus status paymentReference paymentResolutionRequired ticketNumber bookingMode reviewDeadline createdAt")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
@@ -326,7 +363,13 @@ const getTicketById = async (req, res) => {
 
   try {
     const ticket = await EventCenterBooking.findOne({ _id: id, buyer: userId })
-      .populate("eventCenter")
+      .populate({
+        path: "eventCenter",
+        populate: {
+          path: "createdBy",
+          select: "firstName surname email profilePicture isIdentityVerified isPhoneVerified",
+        },
+      })
       .populate("buyer", "firstName surname email phoneNumber");
 
     if (!ticket) {
@@ -393,10 +436,17 @@ const verifyTicket = async (req, res) => {
       return res.status(403).json({ success: false, message: auth.error });
     }
 
-    const current = await require("../../services/bookingAttendance.service").currentSessionCheckIn(ticket, String(ticket.eventCenter?._id || ticket.eventCenter));
+    const venueId = String(ticket.eventCenter?._id || ticket.eventCenter);
+    const [current, opsRecord] = await Promise.all([
+      require("../../services/bookingAttendance.service").currentSessionCheckIn(ticket, venueId),
+      require("../../models/client/bookingOperations.schema").findById(`${venueId}:${ticket._id}`).lean(),
+    ]);
+    const paySummary = require("../../services/bookingOperations.service").paymentSummary(ticket, opsRecord || {});
     res.status(200).json({
       success: true,
       data: {
+        bookingId: String(ticket._id),
+        venueId,
         ticketNumber: ticket.ticketNumber,
         guestName: ticket.buyer
           ? `${ticket.buyer.firstName} ${ticket.buyer.surname}`
@@ -407,12 +457,24 @@ const verifyTicket = async (req, res) => {
         venueName: ticket.eventCenter?.venueName,
         status: ticket.status,
         paymentStatus: ticket.paymentStatus,
-        totalPrice: ticket.totalPrice,
+        totalPrice: ticket.rescheduledPrice?.amount != null ? ticket.rescheduledPrice : ticket.totalPrice,
+        outstandingBalanceMinor: paySummary.balanceMinor || 0,
+        outstandingCurrency: paySummary.currency || ticket.totalPrice?.currency || "NGN",
         bookingUnit: ticket.bookingUnit,
         duration: ticket.duration,
         selectedDates: ticket.selectedDates,
         isCheckedIn: current.isCheckedIn,
         checkedInAt: current.checkedInAt,
+        canCheckIn: current.canCheckIn,
+        entryReason: current.entryReason,
+        entryClosed: current.entryClosed,
+        attendanceSummary: current.summary,
+        sessions: current.sessions,
+        refundHold: Boolean(
+          ticket.rescheduleCheckoutId ||
+            ticket.paymentResolutionRequired ||
+            ticket.refund?.state,
+        ),
         type: "EVENT_CENTER",
       },
     });
@@ -451,7 +513,10 @@ const declineBooking = async (req, res) => {
   try {
     const ticket = await EventCenterBooking.findById(req.params.id);
     if (!ticket) return res.status(404).json({ success: false, message: "Booking not found." });
-    if (String(ticket.organiser) !== req.user.id) return res.status(403).json({ success: false, message: "Not authorized to decline this booking." });
+    const venue = await EventCenter.findById(ticket.eventCenter).select("createdBy coOrganisers").lean();
+    const isOwner = String(ticket.organiser) === req.user.id;
+    const isCoOrganiser = (venue?.coOrganisers || []).some((c) => String(c) === req.user.id);
+    if (!isOwner && !isCoOrganiser) return res.status(403).json({ success: false, message: "Not authorized to decline this booking." });
     const updated = await require("../../services/venueLifecycle.service").cancelVenueBooking(ticket._id, { actor: req.user.id, mode: "decline", reason: req.body.reason });
     return res.json({ success: true, message: "Booking declined. Any refund is tracked separately.", data: updated });
   } catch (error) {

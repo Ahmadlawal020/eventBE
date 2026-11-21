@@ -320,15 +320,18 @@ exports.getBookingStats = async (req, res) => {
 /**
  * Reschedule a booking to new dates
  */
+exports.previewReschedule = async (req, res) => {
+  try {
+    const data = await require("../../services/organiserReschedule.service").prepare(req.params.bookingId, req.body.eventCenterId, req.body.newDates, req.user.id);
+    res.json({ success: true, data: data.review });
+  } catch (error) { res.status(error.status || error.statusCode || 500).json({ message: error.status || error.statusCode ? error.message : "Could not review rescheduling." }); }
+};
 exports.rescheduleBooking = async (req, res) => {
   try {
-    const booking = await EventCenterBooking.findById(req.params.bookingId);
-    if (!booking) return res.status(404).json({ message: "Booking not found." });
-    const access = await authorizeBookingAccess(req.user.id, booking.eventCenter, false);
-    if (!access.authorized) return res.status(403).json({ message: access.error });
-    const updated = await require("../../services/venueLifecycle.service").rescheduleVenueBooking(booking._id, req.body.newDates, req.user.id);
-    res.json({ success: true, message: "Booking rescheduled.", data: updated });
-  } catch (error) { res.status(error.statusCode || 500).json({ success: false, message: error.statusCode ? error.message : "Could not reschedule booking." }); }
+    if (typeof req.body.reviewToken !== "string") return res.status(409).json({ message: "Review the dates and price before confirming." });
+    const updated = await require("../../services/organiserReschedule.service").commit(req.params.bookingId, req.body.eventCenterId, req.body.newDates, req.user.id, { reviewToken: req.body.reviewToken, reason: req.body.reason });
+    res.json({ success: true, message: "Booking rescheduled. Record any payment or refund separately.", data: updated });
+  } catch (error) { res.status(error.status || error.statusCode || 500).json({ message: error.status || error.statusCode ? error.message : "Could not reschedule booking." }); }
 };
 
 const operationHandlers = () => require("./bookingOperations.controller").handlers(authorizeBookingAccess);

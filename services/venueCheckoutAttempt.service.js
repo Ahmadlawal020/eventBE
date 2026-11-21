@@ -12,7 +12,7 @@ function response(booking, pending = false) {
       percentage: booking.feePercentage, mode: booking.feeMode },
   } };
 }
-async function resumeVenueCheckout(id, gateway) {
+async function resumeVenueCheckout(id, gateway, Booking = require("../models/client/eventCenterBooking.schema")) {
   let booking = await Booking.findById(id).select("+checkoutAccessCode +checkoutUrl +checkoutSubaccount");
   if (!booking) throw fail(404, "Booking not found.");
   if (booking.paymentStatus !== "PENDING" || booking.status !== "ACTIVE" || booking.paymentResolutionRequired || new Date(booking.reservationExpiresAt || 0) <= new Date()) return response(booking, true);
@@ -28,8 +28,21 @@ async function resumeVenueCheckout(id, gateway) {
     // A retry must reconcile the original reference before attempting initialization.
     // Never change a reference, price or payout destination after an uncertain response.
     if (booking.checkoutAttemptedAt || !booking.checkoutSnapshotVersion) {
-      try { await gateway.verifyPayment(booking.paymentReference); return response(booking, true); }
-      catch (error) { if (!missingTransaction(error)) return response(booking, true); }
+      try {
+        const tx = await gateway.verifyPayment(booking.paymentReference);
+        if (tx?.status && ["failed", "abandoned"].includes(String(tx.status).toLowerCase()) && booking.checkoutSnapshotVersion) {
+          const newReference = `${booking.paymentReference.split("-r")[0]}-r${Date.now().toString(36)}`;
+          booking = await Booking.findOneAndUpdate(
+            { _id: id, checkoutToken: token },
+            { $set: { paymentReference: newReference, paystackReference: newReference } },
+            { new: true },
+          ).select("+checkoutAccessCode +checkoutUrl +checkoutSubaccount");
+        } else {
+          return response(booking, true);
+        }
+      } catch (error) {
+        if (!missingTransaction(error)) return response(booking, true);
+      }
     }
     // Older attempts lack an immutable split destination and cannot safely be initialized again.
     if (!booking.checkoutSnapshotVersion) return response(booking, true);

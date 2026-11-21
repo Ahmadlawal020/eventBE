@@ -4,9 +4,9 @@ const editable = new Set([
   "neighborhoodDescription", "transitDescription", "otherDetailsDescription", "oneLiner",
   "theSpace", "yourProperty", "guestAccess", "interaction", "neighborhood", "transit", "otherDetails",
   "location", "supportedEvents", "images", "amenities", "availability", "capacity", "bookingSettings",
-  "basePrice", "weekendPrice", "discounts", "venueRules", "customVenueRules", "safety",
+  "basePrice", "weekendPrice", "venueRules", "customVenueRules", "safety",
   "safetyConsiderations", "checkIn", "checkOut", "loadingDockDetails", "handoverDetails",
-  "cancellationPolicy", "status", "isDraft", "expectedUpdatedAt", "yourSpace", "arrivalGuide", "entry",
+  "cancellationPolicy", "status", "isDraft", "expectedUpdatedAt", "calendarChangeReason", "scheduleOverrideToken", "yourSpace", "arrivalGuide", "entry",
 ]);
 const fail = message => Object.assign(new Error(message), { status: 400 });
 function validateKeys(value) {
@@ -22,6 +22,9 @@ function venueEditablePayload(payload) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw fail("Invalid listing update.");
   for (const key of Object.keys(payload)) if (!editable.has(key)) throw fail("This listing field cannot be edited: " + key);
   validateKeys(payload);
-  return { ...payload };
+  const { calendarChangeReason, scheduleOverrideToken, ...fields } = payload;
+  if (scheduleOverrideToken !== undefined && (typeof scheduleOverrideToken !== "string" || !/^[a-f0-9]{64}$/.test(scheduleOverrideToken))) throw fail("Invalid availability confirmation. Review the dates again.");
+  if (calendarChangeReason !== undefined && (typeof calendarChangeReason !== "string" || calendarChangeReason.length > 1000)) throw fail("Keep the calendar change reason under 1000 characters.");
+  return fields;
 }
 module.exports = { venueEditablePayload };

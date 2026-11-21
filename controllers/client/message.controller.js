@@ -2,6 +2,7 @@ const Message = require("../../models/client/message.schema");
 const Conversation = require("../../models/client/conversation.schema");
 const Event = require("../../models/client/event.schema");
 const EventCenter = require("../../models/client/eventCenter.schema");
+const EventCenterBooking = require("../../models/client/eventCenterBooking.schema");
 const StaffInvitation = require("../../models/client/staffInvitation.schema");
 const CoOrganiserInvitation = require("../../models/client/coOrganiserInvitation.schema");
 const User = require("../../models/client/user.schema");
@@ -58,7 +59,7 @@ const checkCustomerCareAccess = async (userId, listingId, listingType) => {
 
 // 📤 Send Message
 const sendMessage = async (req, res) => {
-  const { content, contextType, contextId, conversationId } = req.body;
+  const { content, contextType, contextId, conversationId, recipientId } = req.body;
   const senderId = req.user.id;
 
   try {
@@ -113,16 +114,51 @@ const sendMessage = async (req, res) => {
           : conversation.participants[0];
       }
     } else {
-      receiverId = organiserId;
+      let guestParticipantId;
       if (isSenderRepresentative) {
-        return res.status(400).json({
-          success: false,
-          message: "Organisers, Co-Organisers, and Staff cannot start conversations with their own listings",
+        if (!recipientId) {
+          return res.status(400).json({
+            success: false,
+            message: "Organisers, Co-Organisers, and Staff cannot start conversations with their own listings",
+          });
+        }
+        if (
+          String(recipientId) === String(senderId) ||
+          String(recipientId) === String(organiserId)
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: "You cannot start a conversation with yourself.",
+          });
+        }
+        if (finalContextType !== "EventCenter") {
+          return res.status(403).json({
+            success: false,
+            message: "Organisers can only start conversations with guests who have a pending venue booking request.",
+          });
+        }
+        const hasPendingRequest = await EventCenterBooking.exists({
+          eventCenter: finalContextId,
+          buyer: recipientId,
+          status: "PENDING_REVIEW",
         });
+        if (!hasPendingRequest) {
+          return res.status(403).json({
+            success: false,
+            message: "Organisers can only start a conversation with guests who have a pending booking request.",
+          });
+        }
+        receiverId = String(recipientId);
+        guestParticipantId = String(recipientId);
+      } else {
+        receiverId = organiserId;
+        guestParticipantId = String(senderId);
       }
 
+      const participantPair = [guestParticipantId, organiserId];
+
       conversation = await Conversation.findOne({
-        participants: { $all: [senderId, receiverId] },
+        participants: { $all: participantPair },
         contextType: finalContextType,
         contextId: finalContextId,
       });
@@ -130,7 +166,7 @@ const sendMessage = async (req, res) => {
       if (!conversation) {
         try {
           conversation = new Conversation({
-            participants: [senderId, receiverId],
+            participants: participantPair,
             contextType: finalContextType,
             contextId: finalContextId,
             isReplied: true,
@@ -141,7 +177,7 @@ const sendMessage = async (req, res) => {
         } catch (err) {
           if (err.code === 11000) {
             conversation = await Conversation.findOne({
-              participants: { $all: [senderId, receiverId] },
+              participants: { $all: participantPair },
               contextType: finalContextType,
               contextId: finalContextId,
             });

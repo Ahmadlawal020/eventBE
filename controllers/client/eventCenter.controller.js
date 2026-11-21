@@ -25,7 +25,6 @@ const createEventCenter = async (req, res) => {
     capacity,
     bookingSettings,
     basePrice,
-    discounts,
     venueRules,
     customVenueRules,
     safety,
@@ -73,7 +72,6 @@ const createEventCenter = async (req, res) => {
             currency: basePrice.currency || settings.general.defaultCurrency,
           }
         : basePrice,
-      discounts,
       venueRules,
       customVenueRules,
       safety,
@@ -113,14 +111,19 @@ const getEventCenters = async (req, res) => {
     const limit = Math.min(50, Math.max(1, parseInt(req.query.limit) || 20));
     const skip = (page - 1) * limit;
 
+    const publicFilter = {
+      status: "LISTED",
+      archivedAt: null,
+      "moderation.status": { $nin: ["UNLISTED", "CANCELLED"] },
+    };
     const [centers, total] = await Promise.all([
-      EventCenter.find({ status: "LISTED" })
+      EventCenter.find(publicFilter)
         .populate("createdBy", "firstName surname email")
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
-      EventCenter.countDocuments({ status: "LISTED" }),
+      EventCenter.countDocuments(publicFilter),
     ]);
 
     res.json({
@@ -381,7 +384,7 @@ const updateEventCenter = async (req, res) => {
         const ledger = ledgers.find(record => record.bookingId === String(entry.bookingId));
         if (!ledger) continue;
         const summary = require("../../services/bookingOperations.service").paymentSummary({ totalPrice: { amount: entry.totalPrice } }, ledger);
-        if (summary.totalMinor < summary.paidMinor) errors.push("The agreed price cannot be lower than recorded payments. Record a refund first.");
+        if (!ledger.rescheduleAdjustment && summary.totalMinor < summary.paidMinor) errors.push("The agreed price cannot be lower than recorded payments. Record a refund first.");
         entry.depositAmount = summary.paidMinor / 100;
         entry.paymentStatus = summary.balanceMinor === 0 ? "paid" : summary.paidMinor > 0 ? "partially_paid" : "pending";
       }
@@ -417,20 +420,27 @@ const updateEventCenter = async (req, res) => {
           continue;
         }
         const isSlot = entry.startTime !== undefined || entry.endTime !== undefined;
+        const normalizedEntryEnd = entry.endTime === "00:00" ? "24:00" : entry.endTime;
         if (isSlot && (!/^([01]\d|2[0-3]):[0-5]\d$/.test(entry.startTime) ||
-            !/^(([01]\d|2[0-3]):[0-5]\d|24:00)$/.test(entry.endTime) ||
-            entry.startTime >= entry.endTime)) {
+            !/^(([01]\d|2[0-3]):[0-5]\d|24:00)$/.test(normalizedEntryEnd) ||
+            entry.startTime >= normalizedEntryEnd)) {
           errors.push(`Entry ${i + 1}: a valid time range is required`);
           continue;
         }
-        const entryDateKey = new Date(entry.date).toISOString().split("T")[0];
+        const toDateKey = (val) => {
+          const attendanceSvc = require("../../services/bookingAttendance.service");
+          if (typeof attendanceSvc.dayOf === "function") return attendanceSvc.dayOf(val);
+          return typeof val === "string" && /^\d{4}-\d{2}-\d{2}/.test(val)
+            ? val.slice(0, 10)
+            : new Date(val).toISOString().slice(0, 10);
+        };
+        const entryDateKey = toDateKey(entry.date);
         const hasConflict = existingBooked.some((booked) => {
-          const bookedDateKey = new Date(booked.date)
-            .toISOString()
-            .split("T")[0];
+          const bookedDateKey = toDateKey(booked.date);
           if (bookedDateKey !== entryDateKey) return false;
           if (!isSlot || !booked.startTime || !booked.endTime) return true;
-          return entry.startTime < booked.endTime && entry.endTime > booked.startTime;
+          const normalizedBookedEnd = booked.endTime === "00:00" ? "24:00" : booked.endTime;
+          return entry.startTime < normalizedBookedEnd && normalizedEntryEnd > booked.startTime;
         });
         if (hasConflict) {
           errors.push(
@@ -511,6 +521,7 @@ const updateEventCenter = async (req, res) => {
     const validationErrors = validateVenuePayload(candidatePayload, settings, {
       publishing,
       requireComplete: publishing || (prevCenter.status === "LISTED" && updatePayload.location !== undefined),
+      isListed: prevCenter.status === "LISTED" && updatePayload.status !== "UNLISTED",
       existing: true,
       changes: updatePayload,
     });
@@ -548,7 +559,7 @@ const updateEventCenter = async (req, res) => {
       updatePayload.status = canAutoPublish ? "LISTED" : "ACTION_REQUIRED";
     }
 
-    const updatedCenter = await require("../../services/venueCalendarMutation.service").commitVenueUpdate(id, updatePayload, prevCenter.updatedAt, req.user.id);
+    const updatedCenter = await require("../../services/venueCalendarMutation.service").commitVenueUpdate(id, updatePayload, prevCenter.updatedAt, req.user.id, { scheduleOverrideToken: req.body.scheduleOverrideToken, reason: typeof req.body.calendarChangeReason === "string" ? req.body.calendarChangeReason.trim().slice(0, 1000) : undefined });
     if (!updatedCenter && updatePayload.availability) return res.status(409).json({ success: false, message: "The calendar changed while saving. Refresh and try again." });
 
     if (!updatedCenter) return res.status(409).json({ success: false, message: "A moderator must restore this listing before its status can change." });
@@ -560,7 +571,7 @@ const updateEventCenter = async (req, res) => {
   } catch (err) {
     console.error(`[UPDATE EVENT CENTER CATCH]: status=${err.status} name=${err.name} message=${err.message}`, err);
     if (err.status || err.name === "ValidationError" || err.name === "CastError") {
-      return res.status(err.status || 400).json({ success: false, message: err.message });
+      return res.status(err.status || 400).json({ success: false, message: err.message, ...(err.code === "SCHEDULE_REVIEW_REQUIRED" ? { code: err.code, warnings: err.warnings, reviewToken: err.reviewToken } : {}) });
     }
     console.error("[UPDATE EVENT CENTER]", err);
     res.status(500).json({ success: false, message: "Server error" });
@@ -571,7 +582,7 @@ const updateEventCenter = async (req, res) => {
 const imageAction = remove => async (req, res) => {
   try {
     const data = await require("../../services/venueMedia.service").changeImages(req.params.id, req.user.id, req.body, remove);
-    return res.json({ success: true, message: remove ? "Photo removed." : "Photo order updated.", data });
+    return res.json({ success: true, message: remove ? "Photo removed." : "Photo order updated.", data, updatedAt: data?.updatedAt });
   } catch (error) {
     return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Could not update venue photos." });
   }

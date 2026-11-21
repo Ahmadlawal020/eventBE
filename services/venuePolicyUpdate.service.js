@@ -1,4 +1,4 @@
-const fields = new Set(["allowGuestCancellation", "noticeHours", "noticeUnit", "allowGuestReschedule", "rescheduleNoticeHours", "rescheduleNoticeUnit", "maxReschedules", "refundDays", "refundInstructions"]);
+const fields = new Set(["allowGuestCancellation", "noticeHours", "noticeUnit", "allowGuestReschedule", "rescheduleApprovalRequired", "rescheduleNoticeHours", "rescheduleNoticeUnit", "maxReschedules", "refundMinDays", "refundDays", "refundInstructions"]);
 function mergePolicyUpdate(venue, patch, expectedUpdatedAt) {
   const fail = (message, status) => { throw Object.assign(new Error(message), { status }); };
   if (!patch || typeof patch !== "object" || Array.isArray(patch) || Object.keys(patch).some(key => !fields.has(key)))

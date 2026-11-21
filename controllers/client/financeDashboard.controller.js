@@ -27,6 +27,33 @@ const getFinanceStats = async (req, res) => {
     const eventIds = userEvents.map((e) => e._id);
     const eventMap = new Map(userEvents.map((e) => [e._id.toString(), e.title]));
 
+    // Resolve owned + co-organiser venues with current VIEW_FINANCES / ALL_ACCESS permission
+    const EventCenter = require("../../models/client/eventCenter.schema");
+    const CoOrganiserInvitation = require("../../models/client/coOrganiserInvitation.schema");
+    const candidateVenues = await EventCenter.find({
+      $or: [{ createdBy: userObjectId }, { coOrganisers: userObjectId }],
+    }).lean();
+    const venueInvites = candidateVenues.some((v) => String(v.createdBy) !== String(userId))
+      ? await CoOrganiserInvitation.find({
+          coOrganiser: userObjectId,
+          status: "ACCEPTED",
+          permissions: { $in: ["VIEW_FINANCES", "ALL_ACCESS"] },
+        }).lean()
+      : [];
+    const ownedVenues = candidateVenues.filter((v) => {
+      if (String(v.createdBy) === String(userId)) return true;
+      return venueInvites.some(
+        (inv) =>
+          String(inv.host) === String(v.createdBy) &&
+          (inv.listings || []).some((l) => String(l.listingId) === String(v._id)),
+      );
+    });
+    const financeVenueIds = ownedVenues.map((v) => v._id);
+    const venueMatch =
+      financeVenueIds.length > 0
+        ? { $or: [{ organiser: userObjectId }, { eventCenter: { $in: financeVenueIds } }] }
+        : { organiser: userObjectId };
+
     // Date boundaries for analytics
     const now = new Date();
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -42,7 +69,7 @@ const getFinanceStats = async (req, res) => {
 
     // 2. Aggregate EventCenterBookings (Venue Hires)
     const venueStats = await EventCenterBooking.aggregate([
-      { $match: { organiser: userObjectId } },
+      { $match: venueMatch },
       {
         $group: {
           _id: null,
@@ -220,10 +247,15 @@ const getFinanceStats = async (req, res) => {
     };
 
     let totalEarnings = (venueData.totalRevenue || 0) + (ticketData.totalRevenue || 0);
-    const [payoutRecords, ownedVenues] = await Promise.all([
-      require("../../models/client/venuePayout.schema").find({ organiser: userId }).lean(),
-      require("../../models/client/eventCenter.schema").find({ createdBy: userId }).lean(),
-    ]);
+    const payoutRecords = await require("../../models/client/venuePayout.schema")
+      .find({ organiser: userId })
+      .populate({
+        path: "booking",
+        select: "eventCenter ticketNumber",
+        populate: { path: "eventCenter", select: "venueName" },
+      })
+      .sort({ createdAt: -1 })
+      .lean();
     const directBookings = await require("../../services/manualBookingRead.service").getManualBookings(ownedVenues);
     const venueFinance = require("../../services/venueFinanceSummary.service").venueFinanceSummary(payoutRecords, directBookings);
     const venueMoneyData = await require("../../services/venueMoney.service").loadVenueMoney(ownedVenues.map(v => v._id), directBookings);
@@ -245,7 +277,7 @@ const getFinanceStats = async (req, res) => {
 
     // Query this week's venue bookings
     const thisWeekVenueBookings = await EventCenterBooking.find({
-      organiser: userObjectId,
+      ...venueMatch,
       paymentStatus: "COMPLETED",
       createdAt: { $gte: startOfWeek },
     }).select("totalPrice subtotalPrice organiserPayoutAmount createdAt").lean();
@@ -292,7 +324,7 @@ const getFinanceStats = async (req, res) => {
 
     // 5. Fetch Recent Unified Transactions (Venue Bookings + Ticket Sales)
     const [recentVenueBookings, recentTicketBookings] = await Promise.all([
-      EventCenterBooking.find({ organiser: userObjectId })
+      EventCenterBooking.find(venueMatch)
         .populate("eventCenter", "venueName")
         .populate("buyer", "fullName email")
         .sort({ createdAt: -1 })
@@ -307,20 +339,28 @@ const getFinanceStats = async (req, res) => {
         : [],
     ]);
 
-    const formattedVenueTransactions = recentVenueBookings.map((b) => ({
-      id: b._id.toString(),
-      title: `Venue Hire - ${b.eventCenter?.venueName || "Event Venue"}`,
-      category: "VENUE_BOOKING",
-      date: b.createdAt,
-      amount: b.organiserPayoutAmount ?? b.subtotalPrice?.amount ?? b.totalPrice?.amount ?? 0,
-      type: "in",
-      status: b.paymentStatus || "COMPLETED",
-      reference: b.paymentReference || b.paystackReference || `VEN_${b._id.toString().slice(-6)}`,
-      customerName: b.guestDetails?.fullName || b.buyer?.fullName || "Guest Customer",
-      customerEmail: b.guestDetails?.email || b.buyer?.email || "",
-      bookingUnit: b.bookingUnit || "day",
-      duration: b.duration || 1,
-    }));
+    const formattedVenueTransactions = recentVenueBookings.map((b) => {
+      const netAmount =
+        b.organiserPayoutAmount ??
+        b.subtotalPrice?.amount ??
+        Math.max(0, (b.totalPrice?.amount ?? 0) - (b.platformFeeAmount ?? 0));
+      const modeLabel = b.bookingMode === "REVIEW" ? "Review Booking" : "Instant Booking";
+      return {
+        id: b._id.toString(),
+        title: `${modeLabel} - ${b.eventCenter?.venueName || "Event Venue"}`,
+        category: "VENUE_BOOKING",
+        subCategory: b.bookingMode === "REVIEW" ? "REVIEW_BOOKING" : "INSTANT_BOOKING",
+        date: b.createdAt,
+        amount: netAmount,
+        type: "in",
+        status: b.paymentStatus || "COMPLETED",
+        reference: b.paymentReference || b.paystackReference || `VEN_${b._id.toString().slice(-6)}`,
+        customerName: b.guestDetails?.fullName || b.buyer?.fullName || "Guest Customer",
+        customerEmail: b.guestDetails?.email || b.buyer?.email || "",
+        bookingUnit: b.bookingUnit || "day",
+        duration: b.duration || 1,
+      };
+    });
 
     const formattedTicketTransactions = recentTicketBookings.map((t) => {
       const eventTitle = eventMap.get(t.eventId?.toString()) || "Event";
@@ -342,17 +382,121 @@ const getFinanceStats = async (req, res) => {
     });
 
     // Merge and sort newest first
-    const recordedRefunds = await require("../../models/client/eventCenterRefund.schema").find({ organiser: userObjectId, markedPaidAt: { $type: "date" } })
+    const refundMatch =
+      financeVenueIds.length > 0
+        ? { $or: [{ organiser: userObjectId }, { eventCenterId: { $in: financeVenueIds } }], markedPaidAt: { $type: "date" } }
+        : { organiser: userObjectId, markedPaidAt: { $type: "date" } };
+    const recordedRefunds = await require("../../models/client/eventCenterRefund.schema").find(refundMatch)
       .select("eventCenterId amountMinor currency markedPaidAt status organiserReference")
       .populate("eventCenterId", "venueName").sort({ markedPaidAt: -1 }).limit(15).lean();
     const refundTransactions = recordedRefunds.map(r => ({
-      id: String(r._id), title: "Refund - " + (r.eventCenterId?.venueName || "Venue booking"), category: "VENUE_REFUND",
+      id: String(r._id), title: "Cancellation Refund - " + (r.eventCenterId?.venueName || "Venue booking"), category: "VENUE_REFUND",
+      subCategory: "CANCELLATION_REFUND",
       date: r.markedPaidAt, amount: r.amountMinor / 100, currency: r.currency, type: "out", status: r.status,
       reference: r.organiserReference || "DIRECT-" + r._id,
     }));
-    const allTransactions = [...formattedVenueTransactions, ...formattedTicketTransactions, ...refundTransactions]
+
+    // Build ledger rows for manual booking deposits, reschedule payments (fee-exempt), and reschedule/manual refunds
+    const venueNameById = new Map(ownedVenues.map((v) => [String(v._id), v.venueName || "Event Venue"]));
+    const manualOpeningTransactions = directBookings
+      .filter((b) => {
+        const op = (venueMoneyData.allOperations || []).find((o) => String(o.bookingId) === String(b._id));
+        const openingMinor = op?.openingPaidMinor ?? Math.round((b.paymentStatus === "COMPLETED" ? b.totalPrice?.amount || 0 : b.depositAmount || 0) * 100);
+        return openingMinor > 0;
+      })
+      .map((b) => {
+        const op = (venueMoneyData.allOperations || []).find((o) => String(o.bookingId) === String(b._id));
+        const openingMinor = op?.openingPaidMinor ?? Math.round((b.paymentStatus === "COMPLETED" ? b.totalPrice?.amount || 0 : b.depositAmount || 0) * 100);
+        const vName = b.eventCenter?.venueName || venueNameById.get(String(b.eventCenter?._id || b.eventCenter)) || "Event Venue";
+        return {
+          id: `manual-open-${b._id}`,
+          title: `Manual Booking - ${vName}`,
+          category: "VENUE_BOOKING",
+          subCategory: "MANUAL_BOOKING",
+          date: b.createdAt || op?.createdAt || new Date(),
+          amount: openingMinor / 100,
+          currency: b.totalPrice?.currency || "NGN",
+          type: "in",
+          status: "COMPLETED",
+          reference: String(b._id),
+          customerName: b.guestName || b.guestDetails?.fullName || "Walk-in Client",
+          customerEmail: b.guestDetails?.email || "",
+        };
+      });
+
+    const operationsTransactions = (venueMoneyData.allOperations || []).flatMap((op) => {
+      const vName = venueNameById.get(String(op.eventCenter)) || "Event Venue";
+      const isManualBooking = String(op.bookingId || "").startsWith("manual-");
+      const guestName = op.bookingSnapshot?.guestName || op.bookingSnapshot?.guestDetails?.fullName || "Client";
+      const currency = op.agreedPrice?.currency || op.bookingSnapshot?.totalPrice?.currency || "NGN";
+      return (op.payments || [])
+        .filter((p) => ["PAYMENT", "REFUND"].includes(p.kind))
+        .map((p) => {
+          const isRefund = p.kind === "REFUND";
+          const netMinor = isRefund
+            ? p.amountMinor || 0
+            : Math.max(0, (p.amountMinor || 0) - (p.platformFeeMinor || 0));
+          const isPaystackReschedule = !isRefund && String(p.method || "").toUpperCase() === "PAYSTACK";
+          const title = isRefund
+            ? `${op.rescheduleAdjustment ? "Reschedule Refund" : "Manual Refund"} - ${vName}`
+            : op.rescheduleAdjustment
+              ? `${isPaystackReschedule ? "Instant Reschedule Top-up" : "Direct Reschedule Payment"} - ${vName}`
+              : `Manual Booking Payment - ${vName}`;
+          return {
+            id: `op-${op._id}-${p.id}`,
+            title,
+            category: isRefund ? "VENUE_REFUND" : "VENUE_BOOKING",
+            subCategory: isRefund
+              ? "RESCHEDULE_REFUND"
+              : op.rescheduleAdjustment
+                ? isPaystackReschedule
+                  ? "RESCHEDULE_PLATFORM"
+                  : "RESCHEDULE_DIRECT"
+                : isManualBooking
+                  ? "MANUAL_BOOKING"
+                  : "DIRECT_PAYMENT",
+            date: p.at || op.updatedAt || new Date(),
+            amount: netMinor / 100,
+            currency,
+            type: isRefund ? "out" : "in",
+            status: "COMPLETED",
+            reference: p.reference || p.id,
+            customerName: guestName,
+          };
+        });
+    });
+    const payoutHistory = payoutRecords
+      .filter((p) => p.status !== "CANCELLED")
+      .map((p) => {
+        const venueTitle = p.booking?.eventCenter?.venueName || "Venue booking";
+        const normalizedStatus =
+          p.status === "SUCCESS"
+            ? "COMPLETED"
+            : p.status === "FAILED" || p.status === "NEEDS_ATTENTION"
+              ? "FAILED"
+              : "PENDING";
+        return {
+          id: String(p._id),
+          title: `Bank Payout - ${venueTitle}`,
+          category: "VENUE_PAYOUT",
+          date: p.updatedAt || p.createdAt,
+          amount: (p.amountMinor || 0) / 100,
+          currency: p.currency || "NGN",
+          type: "out",
+          status: normalizedStatus,
+          rawStatus: p.status,
+          reference: p.reference || `PAY_${String(p._id).slice(-6)}`,
+        };
+      });
+    const allTransactions = [
+      ...formattedVenueTransactions,
+      ...formattedTicketTransactions,
+      ...refundTransactions,
+      ...manualOpeningTransactions,
+      ...operationsTransactions,
+    ]
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())
-      .slice(0, 20);
+      .slice(0, 30);
 
     // No withdrawable wallet ledger exists; earnings are not a bank balance.
     const availableBalance = null;
@@ -373,7 +517,8 @@ const getFinanceStats = async (req, res) => {
         },
         venueFinance,
         venueMoneyByCurrency: venueMoneyData.currencies,
-        reportingBasis: "Net receipts for bookings created in each period, restated for recorded refunds.",
+        venueMoneyBreakdown: venueMoneyData.breakdown,
+        reportingBasis: "All amounts shown are your net organiser earnings (Munasaba platform fees excluded), adjusted for recorded refunds.",
         breakdown: {
           ticketRevenue: ticketData.totalRevenue || 0,
           ticketSalesCount: ticketData.completedTicketsCount || 0,
@@ -382,6 +527,9 @@ const getFinanceStats = async (req, res) => {
         },
         weeklyTrends,
         transactions: allTransactions,
+        payouts: [...payoutHistory, ...refundTransactions].sort(
+          (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime(),
+        ),
         payoutMethod: user.bankDetails && user.vendorAccountCode ? user.bankDetails : null,
       },
     });
@@ -490,7 +638,7 @@ const setupSubaccount = async (req, res) => {
     // Determine platform fee percent from platform settings
     const PlatformFees = require("../../models/management/platformFees.schema");
     const fees = await PlatformFees.findOne({ key: "platform_fees" }).lean();
-    const platformFeePercent = Number(fees?.eventCommission ?? fees?.eventCenterCommission ?? 10);
+    const platformFeePercent = Number(fees?.eventCenterCommission ?? fees?.eventCommission ?? 10);
 
     // Create vendor account via payment gateway
     const vendorData = await gateway.createVendorAccount({

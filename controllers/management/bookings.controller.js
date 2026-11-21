@@ -401,9 +401,109 @@ const updateBookingStatus = async (req, res) => {
       paymentStatus: booking.paymentStatus,
     };
 
-    if (status) booking.status = status;
+    if (booking.status === status) {
+      return res.status(200).json({ success: true, message: "Booking already in requested status" });
+    }
 
-    await booking.save();
+    if (type === "event-center") {
+      if (booking.status === "CANCELLED") {
+        return res.status(409).json({
+          success: false,
+          message: "Cancelled venue bookings cannot be reactivated because their calendar slots and refunds have been released.",
+        });
+      }
+      if (status === "CANCELLED") {
+        if (booking.paymentStatus === "PENDING") {
+          await mongoose.connection.transaction(async (session) => {
+            const pendingBooking = await EventCenterBooking.findOne({ _id: id, paymentStatus: "PENDING" }).session(session);
+            if (!pendingBooking) throw Object.assign(new Error("Booking state changed. Refresh and try again."), { statusCode: 409 });
+            await EventCenter.updateOne(
+              { _id: pendingBooking.eventCenter },
+              {
+                $pull: {
+                  "availability.unavailableDates": { bookingId: String(id) },
+                  "availability.unavailableSlots": { bookingId: String(id) },
+                },
+              },
+              { session },
+            );
+            pendingBooking.status = "CANCELLED";
+            pendingBooking.paymentStatus = "FAILED";
+            pendingBooking.inventoryReserved = false;
+            await pendingBooking.save({ session });
+            await require("../../services/venueBookingEvents.service").recordVenueEvent(
+              pendingBooking,
+              "CANCELLED",
+              req.user?.id || null,
+              session,
+              { reason: reason || "Cancelled by administrator before payment completion." },
+            );
+          });
+        } else if (booking.status === "PENDING_REVIEW") {
+          await require("../../services/venueLifecycle.service").cancelVenueBooking(id, {
+            actor: req.user?.id || booking.organiser,
+            mode: "decline",
+            reason: reason || "Cancelled by administrator while awaiting review",
+          });
+        } else if (["ACTIVE", "CONFIRMED"].includes(booking.status)) {
+          await require("../../services/venueCancellation.service").cancel(id, {
+            actor: booking.organiser,
+            guest: false,
+            reason: reason || "Cancelled by administrator",
+            adminOverride: true,
+          });
+        } else {
+          return res.status(409).json({
+            success: false,
+            message: `Cannot cancel a venue booking in ${booking.status} state.`,
+          });
+        }
+      } else if (status === "CONFIRMED") {
+        if (booking.status !== "PENDING_REVIEW") {
+          return res.status(409).json({
+            success: false,
+            message: "Only bookings awaiting host review can be transitioned to CONFIRMED.",
+          });
+        }
+        await require("../../services/venuePayout.service").confirmReviewBooking(id, booking.organiser);
+      } else if (status === "COMPLETED") {
+        if (!["ACTIVE", "CONFIRMED"].includes(booking.status) || booking.paymentStatus !== "COMPLETED" || booking.paymentResolutionRequired) {
+          return res.status(409).json({
+            success: false,
+            message: "Only active or confirmed paid bookings without payment exceptions can be marked completed.",
+          });
+        }
+        const sessions = require("../../services/bookingAttendance.service").bookingSessions(booking);
+        if (!sessions.length || sessions.some((s) => new Date(s.endsAt) > new Date())) {
+          return res.status(409).json({
+            success: false,
+            message: "Venue bookings cannot be marked completed before all booked sessions have ended.",
+          });
+        }
+        await mongoose.connection.transaction(async (session) => {
+          const current = await EventCenterBooking.findById(id).session(session);
+          current.status = "COMPLETED";
+          await current.save({ session });
+          await require("../../services/venueBookingEvents.service").recordVenueEvent(current, "COMPLETED", req.user?.id || null, session, { reason });
+        });
+      } else {
+        return res.status(409).json({
+          success: false,
+          message: `Transition from ${booking.status} to ${status} is not permitted.`,
+        });
+      }
+    } else {
+      if (booking.status === "CANCELLED" && status !== "CANCELLED") {
+        return res.status(409).json({
+          success: false,
+          message: "Cancelled event orders cannot be reactivated.",
+        });
+      }
+      booking.status = status;
+      await booking.save();
+    }
+
+    const updatedBooking = await Model.findById(id).select("status paymentStatus").lean();
 
     await recordAdminAction({
       req,
@@ -412,8 +512,8 @@ const updateBookingStatus = async (req, res) => {
       targetId: booking._id,
       previousValue,
       newValue: {
-        status: booking.status,
-        paymentStatus: booking.paymentStatus,
+        status: updatedBooking?.status || status,
+        paymentStatus: updatedBooking?.paymentStatus || booking.paymentStatus,
       },
       metadata: { reason, bookingType: type },
     });
@@ -421,9 +521,10 @@ const updateBookingStatus = async (req, res) => {
     res.status(200).json({ success: true, message: "Booking updated" });
   } catch (error) {
     console.error("[ADMIN UPDATE BOOKING STATUS ERROR]", error);
+    const statusCode = error.statusCode || error.status || 500;
     res
-      .status(500)
-      .json({ success: false, message: "Server error updating booking" });
+      .status(statusCode)
+      .json({ success: false, message: statusCode !== 500 ? error.message : "Server error updating booking" });
   }
 };
 

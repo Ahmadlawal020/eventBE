@@ -1,14 +1,14 @@
 # Map provider setup
 
 EventMDB > Platform Configuration > Maps & Location controls maps throughout Munasaba.
-Existing installations default to Leaflet (OpenStreetMap). Address search and reverse
-geocoding continue to use Photon / the existing device geocoder with either provider.
+Existing installations default to Leaflet (OpenStreetMap). Address search follows the selected provider: Google Places for Google Maps,
+or Photon for Leaflet. Reverse geocoding continues to use the device geocoder.
 
 ## Enable Google Maps
 
-1. In Google Cloud, enable billing and the **Maps JavaScript API**.
+1. In Google Cloud, enable billing, **Maps JavaScript API** and **Places API (New)**.
 2. Create a browser API key. Apply **Websites** restrictions allowing the API server
-   origin, e.g. `https://api.example.com/*`. Restrict the key to **Maps JavaScript API**.
+   origin, e.g. `https://api.example.com/*`. Restrict the key to **Maps JavaScript API** and **Places API (New)**.
    Google loads inside `/api/maps/google` on that host, including on Android and iOS.
    Include your development server origin when testing locally.
 3. Create a **JavaScript** map ID. `DEMO_MAP_ID` is supported for testing only.
@@ -36,3 +36,8 @@ with `X-Frame-Options: SAMEORIGIN` or a conflicting CSP.
 Official setup: https://developers.google.com/maps/documentation/javascript/advanced-markers/start
 Key restrictions: https://developers.google.com/maps/api-security-best-practices
 CSP: https://developers.google.com/maps/documentation/javascript/content-security-policy
+
+Address suggestions use the hosted `/api/maps/google?mode=places` page on web and native.
+Country filters, selected-place details, and autocomplete session tokens use Google Places.
+Google search failures show an error; they do not switch to Photon.
+Autocomplete setup: https://developers.google.com/maps/documentation/javascript/place-autocomplete-data

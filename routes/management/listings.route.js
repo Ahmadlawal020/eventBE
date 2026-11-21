@@ -1,6 +1,7 @@
 const express = require("express");
 const router = express.Router();
 const verifyAdmin = require("../../middleware/management/verifyAdmin");
+const { requireAdminRoles } = verifyAdmin;
 const {
   getListings,
   getListingDetails,
@@ -11,6 +12,6 @@ const {
 router.get("/", verifyAdmin, getListings);
 router.get("/:type/:id", verifyAdmin, getListingDetails);
 router.patch("/:type/:id/status", verifyAdmin, require("../../middleware/management/verifyModerator"), updateListingStatus);
-router.patch("/:type/:id", verifyAdmin, updateListing);
+router.patch("/:type/:id", verifyAdmin, requireAdminRoles(["admin", "super_admin", "superadmin"], "Administrator access required to edit listing details"), updateListing);
 
 module.exports = router;

@@ -109,6 +109,12 @@ test("public routes return only config and serve an embeddable, non-cached Googl
   assert.equal(response.headers["referrer-policy"], "strict-origin-when-cross-origin");
   assert.equal(response.headers["cache-control"], "no-store");
   assert.match(response.text, /maps.googleapis.com/);
+  response = await request(app).get("/api/maps/google?mode=places");
+  assert.equal(response.status, 200);
+  assert.match(response.text, /fetchAutocompleteSuggestions/);
+  assert.match(response.headers["content-security-policy"], /script-src 'nonce-/);
+  settings.mapProvider = "leaflet";
+  assert.equal((await request(app).get("/api/maps/google?mode=places")).status, 503);
 });
 
 test("Google bridge buffers state, fits spans, replaces overlays, handles presses and reports errors", () => {
@@ -170,4 +176,32 @@ test("map version changes only when map configuration changes", () => {
   assert.equal(service.publicMapConfig({...base,updatedAt:new Date("2026-02-01"),maintenanceMode:true}).mapVersion, original.mapVersion);
   assert.notEqual(service.publicMapConfig({...base,googleMapsApiKey:"replacement-key"}).mapVersion, original.mapVersion);
   assert.notEqual(service.publicMapConfig({...base,googleMapsMapId:"replacement-id"}).mapVersion, original.mapVersion);
+});
+
+
+test("Google Places bridge filters by country, resolves selected details and reports errors", async () => {
+  const { googlePlacesHtml } = require("../services/googlePlacesHtml");
+  const posts = [], calls = [], fields = [];
+  const prediction = { placeId: "id", text: { toString: () => "Lagos" }, toPlace: () => ({
+    fetchFields: async options => fields.push(options), addressComponents: [], formattedAddress: "Lagos",
+    location: { lat: () => 6, lng: () => 3 },
+  }) };
+  const context = {
+    window: { parent: {}, ReactNativeWebView: { postMessage: value => posts.push(JSON.parse(value)) }, addEventListener() {} },
+    document: { createElement: () => ({}), head: { appendChild() {} } },
+    google: { maps: { places: {
+      AutocompleteSessionToken: function() {},
+      AutocompleteSuggestion: { fetchAutocompleteSuggestions: async options => { calls.push(options); return { suggestions: [{ placePrediction: prediction }] }; } },
+    } } },
+  };
+  const html = googlePlacesHtml({ apiKey: "key", nonce: "nonce" });
+  vm.runInNewContext(html.match(/<script[^>]*>([\s\S]*?)<\/script>/)[1], context);
+  context.window.initPlaces(); assert.equal(posts.at(-1).type, "placesReady");
+  await context.window.placesRequest({ type: "placesRequest", id: 1, action: "search", query: "Lagos", countryCode: "NG" });
+  assert.equal(calls[0].includedRegionCodes[0], "ng"); assert.ok(calls[0].sessionToken);
+  assert.equal(posts.at(-1).result[0].id, "id");
+  await context.window.placesRequest({ type: "placesRequest", id: 2, action: "details", placeId: "id" });
+  assert.ok(fields[0].fields.includes("addressComponents")); assert.equal(posts.at(-1).result.latitude, 6);
+  await context.window.placesRequest({ type: "placesRequest", id: 3, action: "details", placeId: "missing" });
+  assert.equal(posts.at(-1).error, true); assert.equal(posts.at(-1).id, 3);
 });

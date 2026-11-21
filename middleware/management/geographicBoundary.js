@@ -3,6 +3,7 @@ const { isGlobal, isOwner } = require("../../services/management/geographicPolic
 module.exports = (req, res, next) => {
   if (req.path === "/geography" || req.path.startsWith("/geography/")) return next();
   if (req.path === "/listings" || req.path.startsWith("/listings/")) return next();
+  if (req.path === "/content-moderation" || req.path.startsWith("/content-moderation/")) return next();
   if (!isGlobal(req.managementStaff) || req.managementStaff.dataRestrictions?.length) {
     return res.status(403).json({ success: false, code: "REGIONAL_WORKSPACE_REQUIRED", message: "Use the regional workspace. This module requires unrestricted platform access." });
   }

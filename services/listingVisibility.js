@@ -1,7 +1,12 @@
 exports.canViewListing = (listing, user) => {
-  if (listing.status === "LISTED") return true;
+  const isPubliclyVisible =
+    listing.status === "LISTED" &&
+    !listing.archivedAt &&
+    !["UNLISTED", "CANCELLED"].includes(listing.moderation?.status);
+  if (isPubliclyVisible) return true;
   if (!user?.id) return false;
-  if ((user.roles || []).some(role => ["admin", "superadmin", "super_admin", "moderator", "modarator"].includes(role))) return true;
+  if ((user.roles || []).some(role => ["admin", "superadmin", "super_admin", "moderator"].includes(role))) return true;
+  if (listing.archivedAt) return false;
   return [listing.createdBy, ...(listing.coOrganisers || []), ...(listing.staff || [])]
     .some(person => person && String(person._id || person) === String(user.id));
 };

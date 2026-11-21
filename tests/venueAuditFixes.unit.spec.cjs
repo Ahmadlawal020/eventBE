@@ -71,7 +71,19 @@ test("full provider refunds and manual partial refunds reconcile without mixing 
   const money = manualMoney(booking, { openingPaidMinor: 20000, payments: [
     { kind: "PAYMENT", amountMinor: 5000 }, { kind: "REFUND", amountMinor: 10000 }, { kind: "SECURITY_DEPOSIT", amountMinor: 30000 },
   ] });
-  assert.deepEqual(money, { grossCollectedMinor: 25000, refundedMinor: 10000, confirmedRefundMinor: 0, approvedRefundMinor: 0, netCollectedMinor: 15000 });
+  assert.deepEqual(money, { grossCollectedMinor: 25000, refundedMinor: 10000, confirmedRefundMinor: 0, approvedRefundMinor: 0, netCollectedMinor: 15000, refundDueMinor: 0 });
   const [manual] = venueMoney([], [], [{ ...booking, manualFinance: money }]);
   assert.equal(manual.netReceipts, 150); assert.equal(manual.refundLiability, 150);
+});
+
+test("manual reschedule refund liability includes money owed before installment approval without double counting", () => {
+ const booking = { status: "CONFIRMED", totalPrice: { amount: 60, currency: "NGN" } };
+ const record = { openingPaidMinor: 10000, agreedPrice: { amount: 60 }, payments: [], refunds: [] };
+ const money = manualMoney(booking, record);
+ assert.equal(venueMoney([], [], [{ ...booking, manualFinance: money }])[0].refundLiability, 40);
+ record.refunds = [{ status: "APPROVED", amountMinor: 2000 }];
+ assert.equal(venueMoney([], [], [{ ...booking, manualFinance: manualMoney(booking, record) }])[0].refundLiability, 40);
+ record.payments = [{ kind: "REFUND", amountMinor: 2000 }];
+ record.refunds = [{ status: "SENT", amountMinor: 2000 }];
+ assert.equal(venueMoney([], [], [{ ...booking, manualFinance: manualMoney(booking, record) }])[0].refundLiability, 20);
 });

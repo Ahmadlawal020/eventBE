@@ -45,9 +45,18 @@ async function confirm(id, actor, settlementId) {
     r.set("managementCase.status", "RESOLVED"); r.set("managementCase.resolvedAt", new Date());
     r.set("managementCase.resolution", "Buyer confirmed receipt of this payment.");
     await r.save({ session });
-    await queueNotices([{ key: `refund-confirmed:${r._id}:${settlementId || "legacy"}`, recipient: r.organiser, sender: actor, type: "SYSTEM",
+    const venue = r.eventCenterId
+      ? await require("../models/client/eventCenter.schema").findById(r.eventCenterId).select("coOrganisers").session(session).lean()
+      : null;
+    const hostRecipients = [...new Set([r.organiser, ...(venue?.coOrganisers || [])].filter(Boolean).map(String))];
+    await queueNotices(hostRecipients.map((recipient) => ({
+      key: recipient === String(r.organiser)
+        ? `refund-confirmed:${r._id}:${settlementId || "legacy"}`
+        : `refund-confirmed:${r._id}:${settlementId || "legacy"}:${recipient}`,
+      recipient, sender: actor, type: "SYSTEM",
       title: complete ? "Refund received in full" : "Refund installment received", message: `The buyer confirmed ${r.currency} ${(amount / 100).toFixed(2)}.`,
-      data: { bookingId: String(r.bookingId), refundId: String(r._id), screen: "OrganiserVenueRefund" } }], session);
+      data: { bookingId: String(r.bookingId), refundId: String(r._id), screen: "OrganiserVenueRefund" },
+    })), session);
     return r;
   });
 }

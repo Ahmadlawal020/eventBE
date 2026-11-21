@@ -1,12 +1,17 @@
 const mongoose = require("mongoose");
 const Event = require("../../models/client/event.schema");
 const EventCenter = require("../../models/client/eventCenter.schema");
+const User = require("../../models/client/user.schema");
+const geo = require("../../services/management/geography.service");
 const models = { event: Event, "event-center": EventCenter };
 const decisions = ["APPROVED", "UNLISTED", "CANCELLED"];
-const eligible = { $or: [
-  { status: { $in: ["LISTED", "ACTION_REQUIRED", "UNLISTED", "COMPLETED"] } },
-  { "moderation.reviewedAt": { $exists: true } },
-] };
+const eligible = {
+  archivedAt: null,
+  $or: [
+    { status: { $in: ["LISTED", "ACTION_REQUIRED", "UNLISTED", "COMPLETED"] } },
+    { "moderation.reviewedAt": { $exists: true } },
+  ],
+};
 const statusExpression = { $ifNull: ["$moderation.status", "PENDING"] };
 const serialize = (item, type) => ({
   ...item, listingType: type,
@@ -28,6 +33,13 @@ exports.getQueue = async (req, res, next) => {
         !["all", "PENDING", ...decisions].includes(status) || typeof search !== "string") {
       return res.status(400).json({ success: false, message: "Invalid moderation filter" });
     }
+    const workingLocation = req.query.location || req.headers["x-working-location"];
+    let geoFilter = {};
+    try {
+      geoFilter = await geo.recordFilter(req.managementStaff, workingLocation, "records.read");
+    } catch (err) {
+      return res.status(err.status || 403).json({ success: false, message: err.message });
+    }
     const page = Number(req.query.page || 1);
     if (!Number.isSafeInteger(page) || page < 1 || page > 50000) return res.status(400).json({ success: false, message: "Invalid page number" });
     const limit = 20;
@@ -36,7 +48,8 @@ exports.getQueue = async (req, res, next) => {
     const regex = new RegExp(search.slice(0, 150).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
     const results = await Promise.all(types.map(async listingType => {
       const model = models[listingType];
-      const base = search ? { $and: [eligible, { [listingType === "event" ? "title" : "venueName"]: regex }] } : eligible;
+      const eligibleWithGeo = Object.keys(geoFilter).length ? { $and: [eligible, geoFilter] } : eligible;
+      const base = search ? { $and: [eligibleWithGeo, { [listingType === "event" ? "title" : "venueName"]: regex }] } : eligibleWithGeo;
       const query = status === "all" ? base : { $and: [base,
         { $expr: { $eq: [statusExpression, status] } },
       ] };
@@ -61,7 +74,14 @@ exports.getReview = async (req, res, next) => {
   try {
     const model = identity(req, res);
     if (!model) return;
-    const item = await model.findOne({ $and: [{ _id: req.params.id }, eligible] })
+    const workingLocation = req.query.location || req.headers["x-working-location"];
+    let geoFilter = {};
+    try {
+      geoFilter = await geo.recordFilter(req.managementStaff, workingLocation, "records.read");
+    } catch (err) {
+      return res.status(err.status || 403).json({ success: false, message: err.message });
+    }
+    const item = await model.findOne({ $and: [{ _id: req.params.id }, eligible, geoFilter] })
       .select("-availability.unavailableDates -availability.unavailableSlots").select("+moderation.history")
       .populate("createdBy", "firstName surname email")
       .populate("moderation.history.reviewer", "firstName surname")
@@ -79,7 +99,14 @@ exports.decide = async (req, res, next) => {
         (decision !== "APPROVED" && !reason.trim()) || typeof updatedAt !== "string" || !Number.isFinite(Date.parse(updatedAt))) {
       return res.status(400).json({ success: false, message: "Choose a valid decision, provide a reason for removal, and reload the current listing." });
     }
-    const item = await model.findOne({ $and: [{ _id: req.params.id }, eligible] }).lean();
+    const workingLocation = req.query.location || req.headers["x-working-location"];
+    let geoFilter = {};
+    try {
+      geoFilter = await geo.recordFilter(req.managementStaff, workingLocation, "records.unlist");
+    } catch (err) {
+      return res.status(err.status || 403).json({ success: false, message: err.message });
+    }
+    const item = await model.findOne({ $and: [{ _id: req.params.id }, eligible, geoFilter] }).lean();
     if (!item) return res.status(404).json({ success: false, message: "Submitted listing not found" });
     if (req.params.type === "event" && item.status === "CANCELLED") {
       return res.status(409).json({ success: false, message: "A cancelled event cannot be restored through moderation. Its buyer refund records must remain intact." });
@@ -96,6 +123,34 @@ exports.decide = async (req, res, next) => {
         changes: { ticketGuide: item.ticketGuide },
       });
       if (errors.length) return res.status(400).json({ success: false, message: errors[0], errors });
+    }
+    if (decision === "APPROVED" && req.params.type === "event-center") {
+      const {
+        getEventCenterSettings,
+        validateVenuePayload,
+        payoutReadinessError,
+      } = require("../../services/eventCenterSettings.service");
+      const settings = await getEventCenterSettings();
+      const errors = validateVenuePayload({ ...item, status: "LISTED" }, settings, {
+        publishing: true,
+        requireComplete: true,
+        existing: true,
+      });
+      if (errors.length) return res.status(400).json({ success: false, message: errors[0], errors });
+      const owner = await User.findById(item.createdBy).select("isIdentityVerified vendorAccountCode bankDetails").lean();
+      if (settings.publishing?.requireIdentityVerification !== false && !owner?.isIdentityVerified) {
+        return res.status(409).json({
+          success: false,
+          message: "The venue owner must complete identity verification (KYC) before this listing can be approved.",
+        });
+      }
+      const payoutErr = payoutReadinessError(owner, item);
+      if (payoutErr) {
+        return res.status(409).json({
+          success: false,
+          message: payoutErr,
+        });
+      }
     }
     const listingStatus = decision === "APPROVED" ? "LISTED" : "UNLISTED";
     const now = new Date();

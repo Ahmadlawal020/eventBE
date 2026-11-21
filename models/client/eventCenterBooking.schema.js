@@ -6,6 +6,8 @@ bookingCancellationPolicy.path("maxReschedules").default(undefined);
 
 const eventCenterTicketSchema = new mongoose.Schema(
   {
+    rescheduleCheckoutId: { type: mongoose.Schema.Types.ObjectId, ref: "VenueRescheduleCheckout", default: null },
+    rescheduledPrice: { amount: Number, currency: String },
     buyer: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -80,7 +82,7 @@ const eventCenterTicketSchema = new mongoose.Schema(
       enum: ["PENDING", "COMPLETED", "FAILED", "REFUNDED", "FAILED_REFUND"],
       default: "PENDING",
     },
-    cancellation: { at: Date, actor: { type: mongoose.Schema.Types.ObjectId, ref: "User" }, reason: String, refundMode: { type: String, enum: ["DIRECT"] } },
+    cancellation: { at: Date, actor: { type: mongoose.Schema.Types.ObjectId, ref: "User" }, mode: { type: String, enum: ["cancel", "decline", "expire", "withdraw"] }, reason: String, refundMode: { type: String, enum: ["DIRECT"] } },
     refund: {
       state: { type: String, enum: ["QUEUED", "SUBMITTING", "PENDING", "PROCESSED", "NEEDS_ATTENTION"] },
       requestedAt: Date, amountMinor: Number, providerId: String, leaseUntil: Date,
@@ -95,6 +97,14 @@ const eventCenterTicketSchema = new mongoose.Schema(
     checkoutAccessCode: {type:String, select:false},
     checkoutUrl: {type:String, select:false},
     paymentResolutionRequired: {type:Boolean, default:false},
+    paymentResolution: {
+      owner: { type: mongoose.Schema.Types.ObjectId, ref: "Staff" },
+      claimedAt: Date,
+      resolvedAt: Date,
+      resolvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "Staff" },
+      settlementReference: String,
+      notes: String,
+    },
     reconciliation: { attempts: { type: Number, default: 0 }, nextAttemptAt: Date, lastError: String },
     reservationExpiresAt: {type:Date, index:true},
     inventoryReserved: {type:Boolean, default:false},

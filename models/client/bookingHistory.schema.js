@@ -55,6 +55,11 @@ const bookingHistorySchema = new mongoose.Schema(
     guestName: { type: String },
     guestDetails: { fullName: String, email: String, phoneNumber: String },
     reason: { type: String },
+    scheduleWarnings: [{ _id: false, code: String, date: String, message: String }],
+    previousPrice: { amount: Number, currency: String },
+    priceDifferenceMinor: Number,
+    balanceMinor: Number,
+    refundMinor: Number,
     totalPrice: {
       amount: { type: Number },
       currency: { type: String, default: "NGN" },

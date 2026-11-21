@@ -218,6 +218,19 @@ const getUnifiedBookings = async (req, res) => {
       guestPhone: t.guestDetails?.phoneNumber || "",
       dates: t.selectedDates || [],
       totalPrice: t.totalPrice,
+      subtotalPrice: t.subtotalPrice,
+      rescheduledPrice: t.rescheduledPrice,
+      organiserPayoutAmount:
+        t.organiserPayoutAmount ??
+        t.subtotalPrice?.amount ??
+        Math.max(0, Number(t.totalPrice?.amount || 0) - Number(t.platformFeeAmount || 0)),
+      organiserNetAmount:
+        (t.rescheduledPrice?.amount != null
+          ? Math.max(0, Number(t.rescheduledPrice.amount) - Number(t.platformFeeAmount || 0))
+          : null) ??
+        t.organiserPayoutAmount ??
+        t.subtotalPrice?.amount ??
+        Math.max(0, Number(t.totalPrice?.amount || 0) - Number(t.platformFeeAmount || 0)),
       bookingUnit: t.bookingUnit,
       duration: t.duration,
       paymentStatus: t.paymentStatus,
@@ -328,7 +341,7 @@ const getBookingFullDetails = async (req, res) => {
     if (mongoose.Types.ObjectId.isValid(bookingId)) {
       // Platform booking — fetch from EventCenterBooking
       booking = await EventCenterBooking.findById(bookingId)
-        .populate("buyer", "firstName surname email phoneNumber")
+        .populate("buyer", "firstName surname email phoneNumber profilePicture isVerified isEmailVerified isPhoneVerified createdAt")
         .populate("eventCenter", "venueName images location")
         .populate("checkIn.checkedInBy", "firstName surname")
         .lean();
@@ -368,18 +381,43 @@ const getBookingFullDetails = async (req, res) => {
       }
     }
 
-    // Fetch activity timeline
-    const activity = await BookingHistory.find({ bookingId, eventCenter: eventCenterId })
-      .populate("performedBy", "firstName surname")
-      .sort({ createdAt: 1 })
-      .lean();
+    // Fetch activity timeline and payment summary
+    const [activity, opsRecord] = await Promise.all([
+      BookingHistory.find({ bookingId, eventCenter: eventCenterId })
+        .populate("performedBy", "firstName surname")
+        .sort({ createdAt: 1 })
+        .lean(),
+      eventCenterId
+        ? require("../../models/client/bookingOperations.schema")
+            .findById(`${eventCenterId}:${booking._id || bookingId}`)
+            .lean()
+        : null,
+    ]);
+    const paymentSummary = require("../../services/bookingOperations.service").paymentSummary(
+      booking,
+      opsRecord || {},
+    );
+    const organiserNetAmount = isPlatform
+      ? (booking.rescheduledPrice?.amount != null
+          ? Math.max(0, Number(booking.rescheduledPrice.amount) - Number(booking.platformFeeAmount || 0))
+          : null) ??
+        booking.organiserPayoutAmount ??
+        booking.subtotalPrice?.amount ??
+        Math.max(0, Number(booking.totalPrice?.amount || 0) - Number(booking.platformFeeAmount || 0))
+      : booking.rescheduledPrice?.amount ?? booking.totalPrice?.amount ?? 0;
 
     res.status(200).json({
       success: true,
       data: {
-        booking,
+        booking: {
+          ...booking,
+          organiserNetAmount,
+        },
         activity,
         isPlatform,
+        paymentSummary,
+        hasRescheduleAdjustment: Boolean(opsRecord?.rescheduleAdjustment),
+        isCustomerLinked: Boolean(opsRecord?.customerId),
       },
     });
   } catch (err) {

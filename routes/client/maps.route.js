@@ -3,6 +3,7 @@ const { randomBytes } = require("node:crypto");
 const PlatformSettings = require("../../models/management/platformSettings.schema");
 const { publicMapConfig } = require("../../services/mapSettings.service");
 const { googleMapHtml } = require("../../services/googleMapHtml");
+const { googlePlacesHtml } = require("../../services/googlePlacesHtml");
 const defaultOrigins = require("../../config/allowedOrigins");
 const router = express.Router();
 
@@ -13,7 +14,7 @@ router.get("/config", async (_req, res, next) => {
   } catch (error) { next(error); }
 });
 
-router.get("/google", async (_req, res, next) => {
+router.get("/google", async (req, res, next) => {
   try {
     const settings = await PlatformSettings.findOne({ key: "platform_settings" }).lean();
     if (publicMapConfig(settings).mapProvider !== "google") {
@@ -42,7 +43,7 @@ router.get("/google", async (_req, res, next) => {
         "frame-ancestors 'self' " + origins.join(" "),
       ].join("; "),
     });
-    res.type("html").send(googleMapHtml({
+    res.type("html").send((req.query.mode === "places" ? googlePlacesHtml : googleMapHtml)({
       apiKey: settings.googleMapsApiKey, mapId: settings.googleMapsMapId, nonce,
     }));
   } catch (error) { next(error); }

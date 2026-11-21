@@ -9,9 +9,10 @@ function refundOutcome(refund, booking) {
   if (["pending", "processing"].includes(refund.status)) return "PENDING";
   return "NEEDS_ATTENTION";
 }
-async function processVenueRefund(id) {
+async function processVenueRefund(id, Booking = require("../models/client/eventCenterBooking.schema")) {
   const token = randomUUID();
-  const booking = await Booking.findOneAndUpdate({ _id: id, status: "CANCELLED",
+  const booking = await Booking.findOneAndUpdate({
+    _id: id, status: "CANCELLED",
     "refund.state": { $in: ["QUEUED", "SUBMITTING", "PENDING", "NEEDS_ATTENTION"] },
     $or: [{ "refund.leaseUntil": { $exists: false } }, { "refund.leaseUntil": { $lte: new Date() } }],
   }, { $set: { "refund.leaseUntil": new Date(Date.now() + 120000), "refund.leaseToken": token } }, { new: true });
@@ -43,20 +44,23 @@ async function processVenueRefund(id) {
     state = state === "QUEUED" ? "QUEUED" : "NEEDS_ATTENTION";
   }
   await mongoose.connection.transaction(async session => {
-    const result = await Booking.updateOne(filter, { $set: {
-      "refund.state": state, "refund.providerId": providerId, "refund.lastError": lastError || "",
-      "refund.leaseUntil": new Date(Date.now() + (state === "NEEDS_ATTENTION" ? 15 : 1) * 60000),
-      paymentStatus: state === "PROCESSED" ? "REFUNDED" : state === "NEEDS_ATTENTION" ? "FAILED_REFUND" : "COMPLETED",
-      paymentResolutionRequired: state !== "PROCESSED",
-    } }, { session });
+    const result = await Booking.updateOne(filter, {
+      $set: {
+        "refund.state": state, "refund.providerId": providerId, "refund.lastError": lastError || "",
+        "refund.leaseUntil": new Date(Date.now() + (state === "NEEDS_ATTENTION" ? 15 : 1) * 60000),
+        paymentStatus: state === "PROCESSED" ? "REFUNDED" : state === "NEEDS_ATTENTION" ? "FAILED_REFUND" : "COMPLETED",
+        paymentResolutionRequired: state !== "PROCESSED",
+      }
+    }, { session });
     if (result.modifiedCount && state === "PROCESSED") await require("./eventCenterRefundNotifications.service").queueNotices([{
       key: "venue-refunded:" + id, recipient: booking.buyer, type: "SYSTEM", title: "Refund completed",
-      message: "The payment provider confirmed your venue booking refund.", data: { screen: "BookingDetails", ticketId: String(id) },
+      message: "The payment provider confirmed your venue booking refund.", data: { screen: "TicketDetails", ticketId: String(booking.booking || id), bookingId: String(id) },
     }], session);
   });
 }
 async function processVenueRefunds() {
-  const due = await Booking.find({ "refund.state": { $in: ["QUEUED", "SUBMITTING", "PENDING", "NEEDS_ATTENTION"] },
+  const due = await Booking.find({
+    "refund.state": { $in: ["QUEUED", "SUBMITTING", "PENDING", "NEEDS_ATTENTION"] },
     $or: [{ "refund.leaseUntil": { $exists: false } }, { "refund.leaseUntil": { $lte: new Date() } }],
   }).select("_id").limit(100).lean();
   let failed = 0;

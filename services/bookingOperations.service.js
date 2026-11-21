@@ -2,8 +2,8 @@ const { bookingSessions, dayOf } = require("./bookingAttendance.service");
 const fail = (status, message) => { throw Object.assign(new Error(message), { status }); };
 const minor = amount => Math.round(Number(amount || 0) * 100);
 function paymentSummary(booking, record = {}) {
-  const totalMinor = minor(booking.totalPrice?.amount);
-  const openingPaidMinor = record.openingPaidMinor ?? (booking.paymentStatus === "COMPLETED" ? totalMinor : minor(booking.depositAmount));
+  const totalMinor = minor(record.agreedPrice?.amount ?? booking.rescheduledPrice?.amount ?? booking.totalPrice?.amount);
+  const openingPaidMinor = record.openingPaidMinor ?? (booking.paymentStatus === "COMPLETED" ? minor(booking.totalPrice?.amount) : minor(booking.depositAmount));
   let paidMinor = openingPaidMinor, securityMinor = 0;
   for (const payment of record.payments || []) {
     if (payment.kind === "PAYMENT") paidMinor += payment.amountMinor;
@@ -12,7 +12,19 @@ function paymentSummary(booking, record = {}) {
     if (payment.kind === "SECURITY_RETURN") securityMinor -= payment.amountMinor;
   }
   const balanceMinor = booking.status === "CANCELLED" ? 0 : Math.max(0, totalMinor - paidMinor);
-  return { totalMinor, paidMinor, balanceMinor, securityMinor, openingPaidMinor,
+  const isManual = booking.bookingType === "MANUAL" || String(booking._id || booking.bookingId || "").startsWith("manual-");
+  const basePlatformFeeMinor = isManual
+    ? 0
+    : booking.platformFeeAmount != null
+      ? minor(booking.platformFeeAmount)
+      : booking.subtotalPrice?.amount != null && booking.totalPrice?.amount != null
+        ? Math.max(0, minor(booking.totalPrice.amount) - minor(booking.subtotalPrice.amount))
+        : 0;
+  const platformFeeMinor = basePlatformFeeMinor + (isManual ? 0 : Number(record.rescheduleBuyerFeesMinor || 0));
+  const organiserTotalMinor = Math.max(0, totalMinor - platformFeeMinor);
+  const organiserPaidMinor = Math.max(0, paidMinor - (booking.paymentStatus === "COMPLETED" || record.openingPaidMinor != null ? platformFeeMinor : 0));
+  return { totalMinor, paidMinor, balanceMinor, refundDueMinor: booking.status === "CANCELLED" ? paidMinor : Math.max(0, paidMinor - totalMinor), securityMinor, openingPaidMinor,
+    organiserTotalMinor, organiserPaidMinor, platformFeeMinor,
     currency: booking.totalPrice?.currency || "NGN", overdue: booking.status !== "CANCELLED" && balanceMinor > 0 && !!record.paymentDueDate && dayOf(record.paymentDueDate) < dayOf(new Date()) };
 }
 function applyOperation(booking, record, payload, actor, now = new Date()) {
@@ -35,10 +47,10 @@ function applyOperation(booking, record, payload, actor, now = new Date()) {
       if (next.paymentDueDate && (Number.isNaN(next.paymentDueDate.getTime()) || next.paymentDueDate.toISOString().slice(0, 10) !== payload.paymentDueDate)) fail(400, "Invalid due date.");
     }
   } else if (payload.action === "REFUND_APPROVE") {
-    if (booking.bookingType !== "MANUAL") fail(400, "Use the online refund workflow for this booking.");
+    if (booking.bookingType !== "MANUAL" && (!record.rescheduleAdjustment || booking.status === "CANCELLED")) fail(400, "Use the online refund workflow for this booking.");
     if (!/^[a-zA-Z0-9-]{8,100}$/.test(payload.id || "") || !reason) fail(400, "A refund key and reason are required.");
     if (next.refunds.some(r => r.id === payload.id)) return record;
-    const amountMinor = minor(payload.amount), available = paymentSummary(booking, next).paidMinor - next.refunds.filter(r => r.status === "APPROVED").reduce((n,r) => n + r.amountMinor, 0);
+    const amountMinor = minor(payload.amount), available = (record.rescheduleAdjustment && booking.status !== "CANCELLED" ? paymentSummary(booking, next).refundDueMinor : paymentSummary(booking, next).paidMinor) - next.refunds.filter(r => r.status === "APPROVED").reduce((n,r) => n + r.amountMinor, 0);
     if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0 || amountMinor > available) fail(400, "Approval exceeds unallocated collections.");
     next.refunds.push({ id: payload.id, amountMinor, reason, status: "APPROVED", approvedAt: now, approvedBy: actor });
   } else if (payload.action === "REFUND_CONFIRM") {
@@ -53,7 +65,9 @@ function applyOperation(booking, record, payload, actor, now = new Date()) {
     if (typeof id !== "string" || !/^[a-zA-Z0-9-]{8,100}$/.test(id)) fail(400, "A payment reference key is required.");
     if (next.payments.some(entry => entry.id === id)) return record;
     if (!["PAYMENT", "REFUND", "SECURITY_DEPOSIT", "SECURITY_RETURN"].includes(kind)) fail(400, "Invalid payment type.");
-    if (["PAYMENT", "REFUND"].includes(kind) && booking.bookingType !== "MANUAL") fail(400, "Online booking payments and refunds are managed by the payment service.");
+    if (["PAYMENT", "REFUND"].includes(kind) && booking.bookingType !== "MANUAL" && !record.rescheduleAdjustment) fail(400, "Online booking payments and refunds are managed by the payment service.");
+    if (record.rescheduleAdjustment && ["PAYMENT", "REFUND"].includes(kind) && !String(payload.reference || "").trim()) fail(400, "Enter the receipt or transfer reference.");
+    if (record.rescheduleAdjustment && booking.bookingType !== "MANUAL" && booking.status === "CANCELLED" && kind === "REFUND") fail(409, "Use the cancellation refund workflow.");
     if (kind === "PAYMENT" && booking.status === "CANCELLED") fail(400, "Cannot collect payment for a cancelled booking.");
     if (!["CASH", "BANK_TRANSFER", "POS", "OTHER"].includes(method)) fail(400, "Choose a payment method.");
     const amountMinor = minor(payload.amount);
@@ -103,6 +117,13 @@ async function saveOperation(venueId, booking, payload, actor) {
       // Also serialize refunds for removed bookings against calendar edits.
       await Venue.updateOne({ _id: venueId }, { $currentDate: { updatedAt: true } }, { session });
     }
+    if (booking.bookingType !== "MANUAL" && ["PAYMENT", "REFUND_APPROVE", "REFUND_CONFIRM"].includes(payload.action)) {
+      const Model = require("../models/client/eventCenterBooking.schema");
+      booking = await Model.findById(booking._id).session(session).lean();
+      if (!booking) fail(404, "Booking not found.");
+      await Model.updateOne({ _id: booking._id }, { $currentDate: { updatedAt: true } }, { session });
+    }
+    if (booking.rescheduleCheckoutId) fail(409, "Finish or check the pending reschedule payment before changing payments.");
     const record = await getRecord(venueId, booking, session);
     if (payload.action === "PAYMENT" && record.payments.some(payment => payment.id === payload.id)) return record;
     if (payload.expectedRevision !== record.revision) fail(409, "Booking details changed. Refresh and try again.");
@@ -123,14 +144,59 @@ async function saveOperation(venueId, booking, payload, actor) {
         { $set: { [`availability.${field}.$[booking].depositAmount`]: summary.paidMinor / 100, [`availability.${field}.$[booking].paymentStatus`]: status } },
         { arrayFilters: [{ "booking.bookingId": String(booking._id) }], session });
     }
-    if (booking.bookingType === "MANUAL" && ["PAYMENT", "REFUND_APPROVE", "REFUND_CONFIRM"].includes(payload.action)) {
+    if ((booking.bookingType === "MANUAL" || record.rescheduleAdjustment) && ["PAYMENT", "REFUND_APPROVE", "REFUND_CONFIRM"].includes(payload.action)) {
       const venue = await require("../models/client/eventCenter.schema").findById(venueId).session(session).lean();
-      const recipients = [...new Set([String(venue.createdBy), ...(record.customerId ? [String(record.customerId)] : [])])];
-      await require("./eventCenterRefundNotifications.service").queueNotices(recipients.map(recipient => ({
-        key: `manual-finance:${record._id}:${saved.revision}:${recipient}`, recipient, type: "SYSTEM", title: "Booking payment update",
-        message: `${venue.venueName || "Venue"}: a payment or refund update was recorded for ${booking._id}.`,
-        data: { screen: recipient === String(venue.createdBy) ? "VenueBookingOperations" : "ManualVenueBooking", venueId: String(venueId), bookingId: String(booking._id) },
-      })),session);
+      const venueLabel = venue?.venueName || "Venue";
+      const hostRecipients = [...new Set([venue?.createdBy, ...(venue?.coOrganisers || [])].filter(Boolean).map(String))];
+      const customerRecipient = record.customerId ? String(record.customerId) : null;
+      const currency = booking.totalPrice?.currency || "NGN";
+      const formattedAmount = payload.amount != null
+        ? `${currency} ${Number(payload.amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        : "";
+      const customerScreen = booking.bookingType === "MANUAL" ? "ManualVenueBooking" : "TicketDetails";
+      const notices = [];
+      if (payload.action === "REFUND_APPROVE" && customerRecipient) {
+        notices.push({
+          key: `manual-finance:${record._id}:${saved.revision}:${customerRecipient}`,
+          recipient: customerRecipient,
+          type: "SYSTEM",
+          title: "Reschedule refund approved",
+          message: `${venueLabel}: a refund of ${formattedAmount} was approved. Open your ticket to share your bank details if you haven't already.`,
+          data: { screen: customerScreen, ticketId: String(booking._id), venueId: String(venueId), bookingId: String(booking._id) },
+        });
+      } else if (payload.action === "PAYMENT" && payload.kind === "REFUND" && customerRecipient) {
+        notices.push({
+          key: `manual-finance:${record._id}:${saved.revision}:${customerRecipient}`,
+          recipient: customerRecipient,
+          type: "SYSTEM",
+          title: "Refund marked as sent",
+          message: `${venueLabel}: your refund of ${formattedAmount} was marked as sent. Open your ticket to check payment proof and confirm receipt.`,
+          data: { screen: customerScreen, ticketId: String(booking._id), venueId: String(venueId), bookingId: String(booking._id) },
+        });
+      } else if (payload.action === "PAYMENT" && payload.kind === "PAYMENT" && customerRecipient) {
+        notices.push({
+          key: `manual-finance:${record._id}:${saved.revision}:${customerRecipient}`,
+          recipient: customerRecipient,
+          type: "SYSTEM",
+          title: "Payment recorded",
+          message: `${venueLabel}: your payment of ${formattedAmount} was recorded.`,
+          data: { screen: customerScreen, ticketId: String(booking._id), venueId: String(venueId), bookingId: String(booking._id) },
+        });
+      } else if (payload.action === "REFUND_CONFIRM") {
+        for (const recipient of hostRecipients) {
+          notices.push({
+            key: `manual-finance:${record._id}:${saved.revision}:${recipient}`,
+            recipient,
+            type: "SYSTEM",
+            title: "Refund receipt confirmed",
+            message: `${venueLabel}: the client confirmed receiving their refund.`,
+            data: { screen: "VenueBookingOperations", ticketId: String(booking._id), venueId: String(venueId), bookingId: String(booking._id) },
+          });
+        }
+      }
+      if (notices.length) {
+        await require("./eventCenterRefundNotifications.service").queueNotices(notices, session);
+      }
     }
     return saved;
   });

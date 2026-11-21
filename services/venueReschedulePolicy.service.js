@@ -19,7 +19,7 @@ function rescheduleTerms(booking, now = new Date()) {
   const validNotice = Number.isInteger(noticeHours) && noticeHours >= 0 && noticeHours <= 8760;
   const deadline = startsAt && validNotice ? new Date(+startsAt - noticeHours * 3600000) : null;
   const active = ["ACTIVE", "CONFIRMED"].includes(booking.status) && booking.paymentStatus === "COMPLETED" &&
-    !booking.paymentResolutionRequired && !booking.refund?.state && !booking.checkIn?.isCheckedIn;
+    !booking.rescheduleCheckoutId && !booking.paymentResolutionRequired && !booking.refund?.state && !booking.checkIn?.isCheckedIn;
   const future = startsAt && now < startsAt;
   const pending = booking.rescheduleRequest?.status === "PENDING";
   const canRequest = Boolean(allowed && active && future && deadline && now <= deadline && !pending && !allowance.limitReached);

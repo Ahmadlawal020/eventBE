@@ -22,6 +22,7 @@ async function cancelVenueBooking(id, { actor = null, mode = "cancel", reason, e
     if (!booking) throw fail("Booking not found.", 404);
     if (mode === "withdraw" && String(booking.buyer) !== String(actor)) throw fail("Only the guest can withdraw this request.", 403);
     if (booking.status === "CANCELLED") return booking;
+    if (booking.rescheduleCheckoutId) throw fail("Finish or check the pending reschedule payment before cancelling.", 409);
     if (mode === "cancel") {
       if (!["ACTIVE", "CONFIRMED"].includes(booking.status)) throw fail("Only active or confirmed bookings can be cancelled.", 409);
       assertFutureBooking(booking);
@@ -38,6 +39,13 @@ async function cancelVenueBooking(id, { actor = null, mode = "cancel", reason, e
     const refundMinor = booking.paymentStatus === "COMPLETED" && booking.paymentReference ? Math.round(booking.totalPrice.amount * 100) : 0;
     if (expectedRefundMinor !== undefined && expectedRefundMinor !== refundMinor) throw fail("The refund amount changed. Review cancellation again.", 409);
     booking.status = "CANCELLED";
+    booking.cancellation = {
+      ...(booking.cancellation?.toObject ? booking.cancellation.toObject() : booking.cancellation || {}),
+      at: new Date(),
+      ...(actor ? { actor } : {}),
+      mode,
+      ...(reason ? { reason } : {}),
+    };
     require("./venueReschedulePolicy.service").closeCancelledBookingRequest(booking, actor);
     booking.reviewedAt = new Date();
     if (refundMinor) booking.paymentResolutionRequired = true;
@@ -47,18 +55,44 @@ async function cancelVenueBooking(id, { actor = null, mode = "cancel", reason, e
       "availability.unavailableDates": { bookingId: String(id) },
       "availability.unavailableSlots": { bookingId: String(id) },
     } }, { session });
-    await history(booking, mode === "decline" ? "DECLINED" : "CANCELLED", actor, session, { reason });
-    await require("./eventCenterRefundNotifications.service").queueNotices([{
+    await history(booking, mode === "decline" ? "DECLINED" : mode === "expire" ? "EXPIRED" : "CANCELLED", actor, session, { reason });
+    const notices = [{
       key: "venue-cancelled:" + id, recipient: booking.buyer, type: "BOOKING_CANCELLED",
-      title: "Booking cancelled", message: refundMinor ? "Your booking was cancelled. Your refund has been queued; completion will be confirmed separately." : "Your booking was cancelled.",
-      data: { screen: "BookingDetails", ticketId: String(id) },
-    }], session);
+      title: mode === "decline" ? "Booking request declined" : mode === "expire" ? "Booking request expired" : "Booking cancelled",
+      message: refundMinor
+        ? mode === "decline"
+          ? "Your booking request was declined. Your refund has been queued; completion will be confirmed separately."
+          : mode === "expire"
+            ? "Your booking request expired before approval. Your refund has been queued; completion will be confirmed separately."
+            : "Your booking was cancelled. Your refund has been queued; completion will be confirmed separately."
+        : "Your booking was cancelled.",
+      data: { screen: "TicketDetails", ticketId: String(id), bookingId: String(id) },
+    }];
+    if (mode === "withdraw" || mode === "expire") {
+      const venueDoc = await Venue.findById(booking.eventCenter).select("coOrganisers").session(session).lean();
+      const hostRecipients = [...new Set([booking.organiser, ...(venueDoc?.coOrganisers || [])].filter(Boolean).map(String))]
+        .filter(r => r !== String(booking.buyer));
+      for (const recipient of hostRecipients) {
+        notices.push({
+          key: `venue-${mode}:${id}:${recipient}`,
+          recipient,
+          type: "BOOKING_CANCELLED",
+          title: mode === "withdraw" ? "Booking request withdrawn" : "Booking request expired",
+          message: mode === "withdraw"
+            ? "The guest withdrew their pending booking request. The held dates have been released."
+            : "A pending booking request expired before approval. The held dates have been released.",
+          data: { screen: "VenueBookingOperations", bookingId: String(id), ticketId: String(id), venueId: String(booking.eventCenter) },
+        });
+      }
+    }
+    await require("./eventCenterRefundNotifications.service").queueNotices(notices, session);
     return booking;
   });
 }
 // Both the organiser preview and final transactional approval use these checks.
 // Only this booking's own reservations may be excluded from conflict detection.
-async function quoteReschedule(booking, venue, dates) {
+async function quoteReschedule(booking, venue, dates, { allowPriceChange = false, allowAvailabilityOverride = false } = {}) {
+  if (booking?.rescheduleCheckoutId) throw fail("Finish or check the pending reschedule payment first.", 409);
   if (!booking || !["ACTIVE", "CONFIRMED"].includes(booking.status) || booking.paymentStatus !== "COMPLETED")
     throw fail("Only paid active bookings can be rescheduled.", 409);
   if (booking.paymentResolutionRequired || booking.refund?.state)
@@ -70,17 +104,21 @@ async function quoteReschedule(booking, venue, dates) {
   const candidate = venue.toObject ? venue.toObject() : { ...venue, availability: { ...venue.availability } };
   for (const key of ["unavailableDates", "unavailableSlots"])
     candidate.availability[key] = (candidate.availability[key] || []).filter(entry => String(entry.bookingId) !== String(booking._id));
-  const quote = venueQuote(candidate, { selectedDates: dates, bookingUnit: booking.bookingUnit });
-  await require("./venueCalendarMutation.service").validateManualBookingWindow(quote.selectedDates);
-  if (quote.duration !== booking.duration || quote.currency !== booking.totalPrice.currency || Math.round(quote.subtotalAmount * 100) !== Math.round((booking.subtotalPrice?.amount ?? NaN) * 100))
-    throw fail("Rescheduling must preserve the paid duration and price. Cancel and rebook to change the price or duration.", 409);
-  return { candidate, quote };
+  const quote = venueQuote(candidate, { selectedDates: dates, bookingUnit: booking.bookingUnit }, { organiserOverride: allowAvailabilityOverride });
+  const warnings = allowAvailabilityOverride ? await require("./organiserScheduleWarnings.service").getWarnings(candidate, quote.selectedDates, booking.bookingUnit) : [];
+  if (!allowAvailabilityOverride) await require("./venueCalendarMutation.service").validateManualBookingWindow(quote.selectedDates);
+  if (quote.duration !== booking.duration) throw fail(`Rescheduling must preserve the original duration of ${booking.duration} ${booking.bookingUnit}s.`, 409);
+  if (quote.currency !== booking.totalPrice.currency) throw fail("Rescheduling cannot change the booking currency.", 409);
+  if (!allowPriceChange && Math.round(quote.subtotalAmount * 100) !== Math.round((booking.subtotalPrice?.amount ?? NaN) * 100))
+    throw fail("Review the new booking price before accepting this reschedule.", 409);
+  return { candidate, quote, warnings };
 }
-async function rescheduleVenueBooking(id, dates, actor, requestId) {
+async function rescheduleVenueBooking(id, dates, actor, requestId, options = {}) {
   return mongoose.connection.transaction(async session => {
     const booking = await Booking.findById(id).session(session);
     if (!booking || !["ACTIVE", "CONFIRMED"].includes(booking.status) || booking.paymentStatus !== "COMPLETED") throw fail("Only paid active bookings can be rescheduled.", 409);
     assertFutureBooking(booking);
+    if (booking.rescheduledPrice?.amount != null && !options.reviewToken) throw fail("Review the current dates and price before rescheduling again.", 409);
     const venue = await Venue.findById(booking.eventCenter).session(session);
     if (!venue || venue.status !== "LISTED") throw fail("Venue is not accepting bookings.", 409);
     await require("./venueAccess.service").requireVenuePermission(actor, venue, ["MANAGE_CALENDAR"]);
@@ -88,7 +126,17 @@ async function rescheduleVenueBooking(id, dates, actor, requestId) {
     if (requestId) dates = booking.rescheduleRequest.dates.map(d => d.toObject());
     // Re-read and validate inside the transaction; a review preview never reserves inventory.
     // Saving the same venue document as checkout forces concurrent writers to retry.
-    const { candidate, quote } = await quoteReschedule(booking, venue, dates);
+    const { candidate, quote, warnings } = await quoteReschedule(booking, venue, dates, { allowPriceChange: !!options.reviewToken, allowAvailabilityOverride: !!options.reviewToken });
+    let priceReview;
+    if (options.reviewToken) {
+      await require("./venueAccess.service").requireVenuePermission(actor, venue, ["VIEW_FINANCES"]);
+      const finance = require("./venueRescheduleFinance.service");
+      const record = await require("./bookingOperations.service").getRecord(venue._id, booking, session);
+      priceReview = finance.review(booking, venue, quote, record, warnings);
+      finance.assertReview(priceReview, options.reviewToken);
+      await finance.saveAgreement(booking, priceReview, actor, session);
+      booking.rescheduledPrice = { amount: priceReview.newPriceMinor / 100, currency: quote.currency };
+    }
     const previousDates = booking.selectedDates.map(d => d.toObject());
     booking.selectedDates = quote.selectedDates;
     booking.rescheduleCount = (booking.rescheduleCount ?? 0) + 1;
@@ -105,7 +153,30 @@ async function rescheduleVenueBooking(id, dates, actor, requestId) {
     venue.availability[field].push(...quote.selectedDates.map(d => ({ ...d, type: "BOOKED", bookingId: String(id), clientName: booking.guestDetails?.fullName, clientPhone: booking.guestDetails?.phoneNumber, clientEmail: booking.guestDetails?.email })));
     await venue.save({ session });
     await booking.save({ session });
-    await require("./venueBookingEvents.service").recordVenueEvent(booking, "RESCHEDULED", actor, session, { previousDates });
+    await require("./venueBookingEvents.service").recordVenueEvent(booking, "RESCHEDULED", actor, session, { previousDates, ...(priceReview ? { scheduleWarnings: priceReview.warnings, previousPrice: { amount: priceReview.previousPriceMinor / 100, currency: priceReview.currency }, totalPrice: booking.rescheduledPrice, priceDifferenceMinor: priceReview.priceDifferenceMinor, balanceMinor: priceReview.balanceMinor, refundMinor: priceReview.refundMinor, reason: options.reason || (requestId ? booking.rescheduleRequest?.reason : null) || "Organiser approved rescheduling with direct settlement" } : { previousPrice: booking.totalPrice }) });
+    if (booking.buyer) {
+      const venueLabel = venue.venueName || "Venue";
+      const fmt = (minor, curr) => `${curr} ${(minor / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+      const title = priceReview?.refundMinor > 0
+        ? "Reschedule approved — refund due"
+        : priceReview?.balanceMinor > 0
+          ? "Reschedule approved — balance due"
+          : "Reschedule approved";
+      const message = priceReview?.refundMinor > 0
+        ? `${venueLabel}: your new dates are confirmed and a refund of ${fmt(priceReview.refundMinor, priceReview.currency)} is due. Open your ticket to submit your bank details.`
+        : priceReview?.balanceMinor > 0
+          ? `${venueLabel}: your new dates are confirmed with a remaining balance of ${fmt(priceReview.balanceMinor, priceReview.currency)}. Open your ticket for details.`
+          : `${venueLabel}: your booking dates have been updated. Open your ticket to view your new schedule.`;
+      await require("./eventCenterRefundNotifications.service").queueNotices([{
+        key: `reschedule-approved:${booking._id}:${booking.rescheduleCount}`,
+        recipient: String(booking.buyer),
+        sender: actor,
+        type: "SYSTEM",
+        title,
+        message,
+        data: { screen: "TicketDetails", bookingId: String(booking._id), ticketId: String(booking._id), venueId: String(venue._id) },
+      }], session);
+    }
     return booking;
   });
 }

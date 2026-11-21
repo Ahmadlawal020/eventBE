@@ -69,6 +69,7 @@ const sendMessageSchema = Joi.object({
     then: Joi.optional().allow(null, ""),
     otherwise: Joi.required(),
   }),
+  recipientId: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).optional().allow(null, ""),
 });
 
 const sendStaffMessageSchema = Joi.object({

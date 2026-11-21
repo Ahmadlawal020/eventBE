@@ -4,9 +4,11 @@ function reminderCandidates(venue, bookings, records = [], now = new Date()) {
   const result = [];
   const add = (booking, recipient, kind, suffix, message, client = false) => {
     if (!recipient) return;
-    result.push({ key: `${venue._id}:${booking._id}:${recipient}:${kind}:${suffix}`, recipient: String(recipient),
+    result.push({
+      key: `${venue._id}:${booking._id}:${recipient}:${kind}:${suffix}`, recipient: String(recipient),
       type: kind, title: kind === "VENUE_PAYMENT_DUE" ? "Booking payment due" : kind === "VENUE_ATTENDANCE_FOLLOWUP" ? "Confirm session attendance" : "Upcoming venue booking",
-      message, data: { screen: client ? booking.bookingType === "MANUAL" ? "ManualVenueBooking" : "TicketDetails" : "VenueBookingOperations", type: "EVENT_CENTER", bookingId: String(booking._id), ticketId: String(booking._id), venueId: String(venue._id) } });
+      message, data: { screen: client ? booking.bookingType === "MANUAL" ? "ManualVenueBooking" : "TicketDetails" : "VenueBookingOperations", type: "EVENT_CENTER", bookingId: String(booking._id), ticketId: String(booking._id), venueId: String(venue._id) }
+    });
   };
   for (const booking of bookings) {
     if (!["ACTIVE", "CONFIRMED", "COMPLETED"].includes(booking.status)) continue;
@@ -18,7 +20,7 @@ function reminderCandidates(venue, bookings, records = [], now = new Date()) {
         add(booking, venue.createdBy, "VENUE_SESSION_REMINDER", suffix, message);
         if (booking.buyer && String(booking.buyer) !== String(venue.createdBy)) add(booking, booking.buyer, "VENUE_SESSION_REMINDER", suffix, message, true);
       }
-      if (session.status === "UNCONFIRMED" && now - new Date(session.endsAt) <= 7 * 86400000) {
+      if (session.status === "UNCONFIRMED" && !(booking.attendance?.summary?.attended > 0) && now - new Date(session.endsAt) <= 7 * 86400000) {
         add(booking, venue.createdBy, "VENUE_ATTENDANCE_FOLLOWUP", session.sessionId, `${venue.venueName}: confirm attendance for the session on ${session.date}.`);
       }
     }

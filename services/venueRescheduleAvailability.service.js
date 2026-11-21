@@ -28,7 +28,7 @@ function rescheduleAvailability(booking, venue, settings, month, now = new Date(
     if (date >= today && date <= maxDate) for (const hour of booking.bookingUnit === "hour" ? Array.from({ length: 24 }, (_, i) => i) : [null]) {
       try {
         const quote = venueQuote(candidate, { bookingUnit: booking.bookingUnit, selectedDates: [{ date, ...(hour === null ? {} : { startTime: clock(hour), endTime: clock(hour + 1) }) }] });
-        available = true; rateMinor = Math.round(quote.subtotalAmount * 100);
+        available = true; if (rateMinor === null) rateMinor = Math.round(quote.subtotalAmount * 100);
         if (hour !== null) hours.push(hour);
       } catch (error) { if (![400, 409].includes(error.statusCode || error.status)) throw error; }
     }

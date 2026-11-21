@@ -43,7 +43,7 @@ test("manual-transfer buyer checkout is rejected before accessing the database",
   app.post("/", (req, res, next) => { req.user = { id: "buyer" }; next(); }, require("../controllers/client/eventCenterTicket.controller").createTicket);
   assert.equal((await request(app).post("/").send({ paymentMethod: "transfer" })).status, 400);
 });
-test("calendar-view permission cannot reschedule bookings", async () => {
+test("rescheduling without a price review cannot reach the mutation", async () => {
   const fs = require("node:fs"), vm = require("node:vm");
   const venueId = "507f1f77bcf86cd799439011";
   const sandbox = { exports: {}, console, require(name) {
@@ -57,5 +57,5 @@ test("calendar-view permission cannot reschedule bookings", async () => {
   vm.runInNewContext(fs.readFileSync(require.resolve("../controllers/client/eventCenterBooking.controller"), "utf8"), sandbox);
   const res = { status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
   await sandbox.exports.rescheduleBooking({ params: { bookingId: "b" }, user: { id: "viewer" }, body: { newDates: [] } }, res);
-  assert.equal(res.code, 403);
+  assert.equal(res.code, 409);
 });

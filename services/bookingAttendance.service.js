@@ -135,13 +135,61 @@ async function checkInCurrentSession({ booking, eventCenterId, actor, method = "
   const now = new Date();
   const session = bookingSessions(booking).find(item => new Date(item.startsAt) <= now && now < new Date(item.endsAt));
   if (!session) fail(400, "No session is currently ongoing. Use booking attendance to record a past visit.");
-  return saveAttendance({ eventCenterId, bookingId: String(booking._id), sessionId: session.sessionId, status: "ATTENDED", expectedRevision: 0, actor, method, proofVerified, booking, now });
+  const Attendance = require("../models/client/bookingAttendance.schema");
+  const existing = await Attendance.findById(`${eventCenterId}:${booking._id}:${session.sessionId}`).select("status revision").lean();
+  if (existing?.status === "ATTENDED") fail(409, "This booking session has already been checked in.");
+  return saveAttendance({
+    eventCenterId,
+    bookingId: String(booking._id),
+    sessionId: session.sessionId,
+    status: "ATTENDED",
+    expectedRevision: existing?.revision || 0,
+    reason: existing?.status === "NO_SHOW" ? "Checked in via scanner after earlier no-show mark" : "",
+    actor,
+    method,
+    proofVerified,
+    booking,
+    now,
+  });
 }
 async function currentSessionCheckIn(booking, eventCenterId) {
   const records = await require("../models/client/bookingAttendance.schema").find({ eventCenter: eventCenterId, bookingId: String(booking._id) }).lean();
-  const session = attendanceFor(booking, records).sessions.find(item => item.phase === "ONGOING");
+  const att = attendanceFor(booking, records);
+  const session = att.sessions.find(item => item.phase === "ONGOING");
   const last = session?.audit[session.audit.length - 1];
-  return { isCheckedIn: session?.status === "ATTENDED", checkedInAt: last?.at };
+  const isCheckedIn = Boolean(session?.status === "ATTENDED");
+  const canCheckIn = Boolean(session && !isCheckedIn);
+  let entryReason = null;
+  let entryClosed = false;
+  if (!session) {
+    const hasUpcoming = att.sessions.some(item => item.phase === "UPCOMING");
+    const allEnded = att.sessions.length > 0 && att.sessions.every(item => item.phase === "ENDED");
+    if (allEnded) {
+      entryClosed = true;
+      entryReason = "All booked sessions for this pass have already ended.";
+    } else if (hasUpcoming) {
+      entryReason = "This booking session has not started yet. Check the booked dates and times below.";
+    } else {
+      entryReason = "No active booking session is scheduled right now.";
+    }
+  }
+  return {
+    isCheckedIn,
+    checkedInAt: last?.at,
+    canCheckIn,
+    entryReason,
+    entryClosed,
+    summary: att.summary,
+    sessions: att.sessions.map((s) => ({
+      sessionId: s.sessionId,
+      date: s.date,
+      startTime: s.startTime,
+      endTime: s.endTime,
+      allDay: s.allDay,
+      phase: s.phase,
+      status: s.status,
+    })),
+  };
 }
 async function attendanceForBookings(bookings) {
   const venues = [...new Set(bookings.map(b => String(b.eventCenter?._id || b.eventCenter)))];

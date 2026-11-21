@@ -15,11 +15,13 @@ const { rescheduleVenueBooking } = require("../services/venueLifecycle.service")
 const oid = () => new mongoose.Types.ObjectId();
 const day = offset => new Date(Date.now() + offset * 86400000).toISOString().slice(0, 10);
 const dates = (unit, offset) => [{ date: day(offset), ...(unit === "hour" ? { startTime: "10:00", endTime: "12:00" } : {}) }];
-const checkout = (venue, selectedDates) => ({ buyer: oid(), organiser: venue.createdBy,
+const checkout = (venue, selectedDates) => ({
+  buyer: oid(), organiser: venue.createdBy,
   bookingUnit: venue.basePrice.unit, duration: venue.basePrice.unit === "hour" ? 2 : 1, selectedDates,
   totalPrice: { amount: venue.basePrice.unit === "hour" ? 200 : 100, currency: "NGN" },
   subtotalPrice: { amount: venue.basePrice.unit === "hour" ? 200 : 100, currency: "NGN" },
-  paymentReference: String(oid()), bookingMode: "INSTANT", paymentStatus: "PENDING" });
+  paymentReference: String(oid()), bookingMode: "INSTANT", paymentStatus: "PENDING"
+});
 async function invoke(fn, actor, booking, body = {}) {
   const res = { code: 200, status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };
   await fn({ user: { id: String(actor) }, params: { id: String(booking._id) }, body }, res);
@@ -34,10 +36,12 @@ test("reschedule review and approval protect existing reservations", { timeout: 
     await mongoose.connect(db.getUri(), { dbName: "isolated_reschedule_approval" });
     await Promise.all([Venue.init(), Booking.init(), History.init(), Outbox.init()]);
     async function fixture(unit = "day", maxReschedules = 1) {
-      const venue = await Venue.create({ createdBy: oid(), venueName: "Reschedule test venue", status: "LISTED",
-        cancellationPolicy: { maxReschedules },
+      const venue = await Venue.create({
+        createdBy: oid(), venueName: "Reschedule test venue", status: "LISTED",
+        cancellationPolicy: { allowGuestReschedule: true, maxReschedules },
         basePrice: { amount: 100, currency: "NGN", unit },
-        availability: { unavailableDates: [], unavailableSlots: [] } });
+        availability: { unavailableDates: [], unavailableSlots: [] }
+      });
       const booking = await reserveVenueCheckout(venue._id, venue.updatedAt, checkout(venue, dates(unit, 20)));
       await Booking.updateOne({ _id: booking._id }, { $set: { paymentStatus: "COMPLETED" } });
       const requested = await invoke(controller.request, booking.buyer, booking, { dates: dates(unit, 21), reason: "Change plans" });
@@ -179,9 +183,13 @@ test("reschedule review and approval protect existing reservations", { timeout: 
       const f = await fixture();
       assert.equal((await invoke(controller.get, oid(), f.booking)).code, 403);
       assert.equal((await invoke(controller.get, f.booking.buyer, f.booking)).body.approval, undefined);
-      await Venue.updateOne({ _id: f.venue._id }, { $push: { "availability.unavailableDates": {
-        date: day(21), type: "MANUAL", bookingId: "manual-other", clientName: "Private Guest", clientEmail: "private@example.test",
-      } } });
+      await Venue.updateOne({ _id: f.venue._id }, {
+        $push: {
+          "availability.unavailableDates": {
+            date: day(21), type: "MANUAL", bookingId: "manual-other", clientName: "Private Guest", clientEmail: "private@example.test",
+          }
+        }
+      });
       const response = await invoke(controller.get, f.venue.createdBy, f.booking);
       assert.equal(response.body.data.status, "CANCELLED");
       assert.doesNotMatch(JSON.stringify(response.body), /Private Guest|private@example|manual-other/);
@@ -190,29 +198,43 @@ test("reschedule review and approval protect existing reservations", { timeout: 
       await t.test(`hourly review and approval respect ${kind} occupancy`, async () => {
         const f = await fixture("hour");
         const field = kind === "all-day" ? "unavailableDates" : "unavailableSlots";
-        const entry = { date: day(21), type: kind === "manual" ? "MANUAL" : "BLOCKED",
+        const entry = {
+          date: day(21), type: kind === "manual" ? "MANUAL" : "BLOCKED",
           ...(kind === "all-day" ? {} : { startTime: kind === "preparation" ? "12:00" : "11:00", endTime: "13:00" }),
-          bookingId: "other-reservation" };
-        await Venue.updateOne({ _id: f.venue._id }, { $push: { [`availability.${field}`]: entry },
-          ...(kind === "preparation" ? { $set: { "availability.preparationTime": 1 } } : {}) });
+          bookingId: "other-reservation"
+        };
+        await Venue.updateOne({ _id: f.venue._id }, {
+          $push: { [`availability.${field}`]: entry },
+          ...(kind === "preparation" ? { $set: { "availability.preparationTime": 1 } } : {})
+        });
         const before = calendar(await Venue.findById(f.venue._id));
         const review = await invoke(controller.get, f.venue.createdBy, f.booking);
         if (kind === "manual") assert.equal(review.body.data.status, "CANCELLED");
-        else assert.equal(review.body.approval.canApprove, false);
+        else if (kind === "preparation") {
+          assert.equal(review.body.approval.canApprove, true);
+          assert.ok(review.body.approval.priceReview.warnings.some(w => w.code === "PREPARATION_TIME"));
+        } else assert.equal(review.body.approval.canApprove, false);
         const accepted = await invoke(controller.resolve, f.venue.createdBy, f.booking, { action: "ACCEPTED", requestId: f.requestId });
         {
           assert.ok([400, 409].includes(accepted.code));
           assert.deepEqual(calendar(await Venue.findById(f.venue._id)), before);
         }
+        if (kind === "preparation") {
+          const approved = await invoke(controller.resolve, f.venue.createdBy, f.booking, { action: "ACCEPTED", requestId: f.requestId, reviewToken: review.body.approval.priceReview.reviewToken });
+          assert.equal(approved.code, 200, JSON.stringify(approved.body));
+          assert.notDeepEqual(calendar(await Venue.findById(f.venue._id)), before);
+        }
       });
     }
     const conflicts = require("../services/venueRescheduleConflict.service");
-    const block = async (f, extra = {}) => Venue.updateOne({ _id: f.venue._id }, { $push: {
-      [f.unit === "hour" ? "availability.unavailableSlots" : "availability.unavailableDates"]: {
-        date: day(21), type: "BOOKED", bookingId: "conflicting-reservation",
-        ...(f.unit === "hour" ? { startTime: "11:00", endTime: "12:00" } : {}), ...extra,
-      },
-    } });
+    const block = async (f, extra = {}) => Venue.updateOne({ _id: f.venue._id }, {
+      $push: {
+        [f.unit === "hour" ? "availability.unavailableSlots" : "availability.unavailableDates"]: {
+          date: day(21), type: "BOOKED", bookingId: "conflicting-reservation",
+          ...(f.unit === "hour" ? { startTime: "11:00", endTime: "12:00" } : {}), ...extra,
+        },
+      }
+    });
     await t.test("partial hourly availability is shown to both roles and a conflict decline explains exact hours", async () => {
       const f = await fixture("hour"); await block(f);
       for (const actor of [f.booking.buyer, f.venue.createdBy]) {
@@ -298,8 +320,10 @@ test("reschedule review and approval protect existing reservations", { timeout: 
     });
     await t.test("paid bookings awaiting organiser review cancel requests only when confirmed", async () => {
       const f = await fixture();
-      const other = await reserveOther(f, { bookingMode: "REVIEW", organiserPayoutAmount: 100,
-        payoutDestination: { accountName: "Test Host", accountNumber: "0000000000", bankCode: "001" } });
+      const other = await reserveOther(f, {
+        bookingMode: "REVIEW", organiserPayoutAmount: 100,
+        payoutDestination: { accountName: "Test Host", accountNumber: "0000000000", bankCode: "001" }
+      });
       await pay(other);
       assert.equal((await Booking.findById(other._id)).status, "PENDING_REVIEW");
       assert.equal((await invoke(controller.get, f.venue.createdBy, f.booking)).body.approval.canApprove, false);
@@ -311,9 +335,11 @@ test("reschedule review and approval protect existing reservations", { timeout: 
       const f = await fixture();
       const venue = await Venue.findById(f.venue._id);
       await require("../services/venueCalendarMutation.service").commitVenueUpdate(venue._id, {
-        availability: { ...venue.availability.toObject(), unavailableDates: [...venue.availability.unavailableDates.map(row => row.toObject()), {
-          date: day(21), type: "MANUAL", bookingId: "manual-instant", clientName: "Other Guest", totalPrice: 100, depositAmount: 0, paymentStatus: "pending",
-        }] },
+        availability: {
+          ...venue.availability.toObject(), unavailableDates: [...venue.availability.unavailableDates.map(row => row.toObject()), {
+            date: day(21), type: "MANUAL", bookingId: "manual-instant", clientName: "Other Guest", totalPrice: 100, depositAmount: 0, paymentStatus: "pending",
+          }]
+        },
       }, venue.updatedAt, venue.createdBy);
       assert.equal((await Booking.findById(f.booking._id)).rescheduleRequest.status, "CANCELLED");
     });

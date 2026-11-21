@@ -63,6 +63,9 @@ function controllerFixture(owner = true) {
     "../../models/client/eventCenterBooking.schema": { find: () => chain([{ _id: "client-1", status: "ACTIVE", paymentStatus: "COMPLETED", totalPrice: { amount: 500 }, checkIn: { isCheckedIn: true } }]) },
     "../../models/client/coOrganiserInvitation.schema": { findOne: () => chain({ permissions: ["VIEW_CALENDAR"] }) },
     "../../models/client/staffInvitation.schema": { findOne: () => chain(null) },
+    "../../models/client/bookingOperations.schema": { find: () => chain([]) },
+    "../../models/client/bookingHistory.schema": { find: () => chain([]) },
+    "../../services/bookingOperations.service": require("../services/bookingOperations.service"),
     mongoose: {},
   };
   mocks["../../services/venueMoney.service"] = require("../services/venueMoney.service");

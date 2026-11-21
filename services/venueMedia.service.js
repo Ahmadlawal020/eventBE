@@ -34,7 +34,7 @@ async function changeImages(id, actor, { publicId, toPosition }, remove = false)
     // Legacy unsigned assets are detached only: ownership cannot safely be proven.
     if (remove) await Media.updateOne({ publicId, eventCenterId: venue._id, state: "ATTACHED" },
       { $set: { cleanupAfter: new Date() } }, { session });
-    return venue.images;
+    return Object.assign(venue.images, { updatedAt: venue.updatedAt });
   });
 }
 module.exports = { attachVenueMedia, changeImages };

@@ -71,14 +71,6 @@ const VENUE_RULES = [
   "ALCOHOL_LICENSE_REQUIRED",
 ];
 
-const DISCOUNTS = [
-  "MULTI_DAY",
-  "EARLY_BIRD",
-  "OFF_PEAK",
-  "NON_PROFIT",
-  "LOYALTY",
-];
-
 /* ===================== SCHEMA ===================== */
 
 const eventCenterSchema = new mongoose.Schema(
@@ -421,13 +413,6 @@ const eventCenterSchema = new mongoose.Schema(
       },
     },
 
-    discounts: [
-      {
-        type: String,
-        enum: DISCOUNTS,
-      },
-    ],
-
     /* ===== RULES ===== */
 
     venueRules: [
@@ -479,6 +464,9 @@ const eventCenterSchema = new mongoose.Schema(
     handoverDetails: {
       type: String,
       trim: true,
+    },
+    entry: {
+      requireProfilePhoto: { type: Boolean, default: false },
     },
 
     /* ===== META ===== */

@@ -8,6 +8,10 @@ const handlePaymentWebhook=async(req,res)=>{
     if(!gateway.validateWebhookSignature(req.rawBody,req.headers))return res.status(400).send("Invalid signature");
     const event=gateway.parseWebhookEvent(req.body);
     if(event.event!=="charge.success" || event.status!=="success")return res.status(200).send("Ignored event");
+    if (event.reference?.startsWith("MNS-RS-")) {
+      await require("../../services/clientVenueReschedule.service").complete(event.reference, { reference: event.reference, status: event.status, amount: Math.round(event.amount * 100), currency: event.currency });
+      return res.status(200).send("Reschedule payment recorded");
+    }
     // The database determines booking type, buyer, inventory and price. Gateway
     // metadata is never a source of authority for issuing tickets.
     const result=await completePayment(event.reference,{reference:event.reference,status:event.status,amount:Math.round(event.amount*100),currency:event.currency,paid_at:event.paidAt});

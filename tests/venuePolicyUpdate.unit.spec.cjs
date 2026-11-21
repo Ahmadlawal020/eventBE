@@ -1,6 +1,8 @@
 const { test } = require("node:test"), assert = require("node:assert/strict");
 const { mergePolicyUpdate } = require("../services/venuePolicyUpdate.service");
-const { payoutReadinessError, ownerMeetsPublishingRequirements } = require("../services/eventCenterSettings.service");
+const { payoutReadinessError, ownerMeetsPublishingRequirements, validateVenuePayload } = require("../services/eventCenterSettings.service");
+const EventCenter = require("../models/client/eventCenter.schema");
+const EventCenterSettings = require("../models/management/eventCenterSettings.schema");
 const venue = { updatedAt: new Date("2030-01-01"), cancellationPolicy: { allowGuestCancellation: true, noticeHours: 24, maxReschedules: 1, refundDays: 7 } };
 test("policy patches retain other sections and require the version the organiser edited", () => {
   const saved = mergePolicyUpdate(venue, { maxReschedules: 3 }, "2030-01-01");
@@ -20,4 +22,41 @@ test("publishing payout requirements match the chosen checkout mode", () => {
   const settings = { publishing: { requireIdentityVerification: true, requirePayoutAccount: true } };
   assert.equal(ownerMeetsPublishingRequirements(bankOnly, settings, instant), false);
   assert.equal(ownerMeetsPublishingRequirements(bankOnly, settings, review), true);
+  assert.equal(ownerMeetsPublishingRequirements({ ...bankOnly, isIdentityVerified: false }, { publishing: { requireIdentityVerification: false } }, review), true);
+});
+test("venue schema accepts guest requirements and ignores removed discount fields", () => {
+  const doc = new EventCenter({
+    createdBy: "507f1f77bcf86cd799439011",
+    entry: { requireProfilePhoto: true },
+  });
+  assert.equal(doc.validateSync(), undefined);
+  assert.equal(doc.discounts, undefined);
+});
+test("listed venue updates protect required publishing fields and review currency rules", () => {
+  const settings = new EventCenterSettings().toObject();
+  settings.publishing.minimumSafetyItems = 2;
+  assert.match(
+    validateVenuePayload(
+      { bookingSettings: "REVIEW", basePrice: { amount: 10000, currency: "USD", unit: "day" } },
+      settings,
+      { existing: true, isListed: true, changes: { basePrice: { amount: 10000, currency: "USD", unit: "day" } } },
+    ).join("; "),
+    /NGN/,
+  );
+  assert.match(
+    validateVenuePayload(
+      { supportedEvents: [] },
+      settings,
+      { existing: true, isListed: true, changes: { supportedEvents: [] } },
+    ).join("; "),
+    /supported event/,
+  );
+  assert.match(
+    validateVenuePayload(
+      { safety: ["CCTV"] },
+      settings,
+      { existing: true, isListed: true, changes: { safety: ["CCTV"] } },
+    ).join("; "),
+    /safety/,
+  );
 });

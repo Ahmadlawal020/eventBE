@@ -54,6 +54,23 @@ async function validateTicketForTransfer(ticketId, ticketCategory, senderId) {
       if (String(exists.buyer) !== senderId) return { error: { status: 403, message: "You do not own this booking." } };
       return { error: { status: 400, message: `Cannot transfer a booking with status "${exists.status}".` } };
     }
+    if (ticket.checkIn?.isCheckedIn) {
+      return { error: { status: 409, message: "Checked-in bookings cannot be transferred." } };
+    }
+    if (ticket.rescheduleCheckoutId) {
+      return { error: { status: 409, message: "Finish or wait for your pending reschedule payment to expire before transferring this booking." } };
+    }
+    if (ticket.rescheduleRequest?.status === "PENDING") {
+      return { error: { status: 409, message: "Withdraw your pending date-change request before transferring this booking." } };
+    }
+    if (ticket.paymentResolutionRequired || ticket.refund?.state) {
+      return { error: { status: 409, message: "Bookings with an unresolved payment or refund cannot be transferred." } };
+    }
+    try {
+      require("../../services/venueLifecycle.service").assertFutureBooking(ticket);
+    } catch {
+      return { error: { status: 409, message: "Bookings that have already started cannot be transferred." } };
+    }
 
     const eventTitle = ticket.eventCenter?.venueName || "a venue";
     return { ticket, eventTitle };
@@ -175,15 +192,19 @@ const acceptTransfer = async (req, res) => {
         { $set: { status: "ACCEPTED" } }, { new: true, session });
       if (!request) throw Object.assign(new Error("Transfer is unavailable or no longer pending."), { statusCode: 409 });
       const { Model, ownerField, prefix, qrType } = getModelInfo(request.ticketCategory);
-      const statusFilter = request.ticketCategory === "USER_EVENT" ? { status: "UNREDEEMED", refundHold: { $ne: true } } : { status: { $in: ["ACTIVE", "CONFIRMED"] } };
+      const statusFilter = request.ticketCategory === "USER_EVENT"
+        ? { status: "UNREDEEMED", refundHold: { $ne: true } }
+        : { status: { $in: ["ACTIVE", "CONFIRMED"] }, "checkIn.isCheckedIn": { $ne: true }, rescheduleCheckoutId: null, "rescheduleRequest.status": { $ne: "PENDING" } };
       const ticket = await Model.findOne({ _id: request.ticketId, [ownerField]: request.sender, ...statusFilter }).session(session).lean();
-      if (!ticket) throw Object.assign(new Error("Ticket was used, cancelled or transferred. Refresh your transfers."), { statusCode: 409 });
+      if (!ticket) throw Object.assign(new Error("Ticket was used, cancelled, has a pending date change, or was transferred. Refresh your transfers."), { statusCode: 409 });
       const entityId = request.ticketCategory === "USER_EVENT" ? ticket.eventId : ticket.eventCenter;
       if (request.ticketCategory === "USER_EVENT") {
         const event = await require("../../models/client/event.schema").findOneAndUpdate({ _id: entityId, status: { $in: ["LISTED", "UNLISTED"] } },
           { $inc: { saleVersion: 1 } }, { new: true, session });
         require("../../services/eventEntry.service").assertEntryOpen(event);
         require("../../services/eventOccurrence.service").assertTicketOccurrence(ticket, event);
+      } else {
+        require("../../services/venueLifecycle.service").assertFutureBooking(ticket);
       }
       const newTicketNumber = generateTicketNumber(prefix);
       const changes = { [ownerField]: userId, ticketNumber: newTicketNumber, qrPayload: generateQRPayload(newTicketNumber, entityId, qrType) };
@@ -194,6 +215,14 @@ const acceptTransfer = async (req, res) => {
       const updatedTicket = await Model.findOneAndUpdate({ _id: request.ticketId, ticketNumber: ticket.ticketNumber, [ownerField]: request.sender, ...statusFilter },
         { $set: changes, $push: { transferHistory: { fromUser: request.sender, toUser: userId, transferredAt: new Date(), previousTicketNumber: ticket.ticketNumber } } }, { new: true, session });
       if (!updatedTicket) throw Object.assign(new Error("Ticket changed. Refresh before accepting again."), { statusCode: 409 });
+      if (request.ticketCategory !== "USER_EVENT") {
+        const Operations = require("../../models/client/bookingOperations.schema");
+        await Operations.updateOne(
+          { _id: `${entityId}:${request.ticketId}` },
+          { $set: { customerId: userId } },
+          { session },
+        );
+      }
       await require("../../services/refundNotifications.service").queueNotices([{
         key: `ticket-transfer-accepted:${request._id}`, recipient: request.sender, sender: userId,
         type: NOTIFICATION_TYPES.TICKET_TRANSFER_ACCEPTED, title: "Ticket transfer accepted",

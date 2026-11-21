@@ -164,7 +164,7 @@ function parseContext(query, pref) {
   return context;
 }
 function escapeRegex(value) { return value.replace(/[.*+?^$\{\}()|[\]\\]/g, "\\$&"); }
-async function candidates(Model, base, fields, categoryField, interests, context, sort, strictLocation = true) {
+async function candidates(Model, base, fields, categoryField, interests, context, sort, strictLocation = true, poolLimit = 100) {
   const local = context.city ? { "location.city": { $regex: "^"+escapeRegex(context.city)+"$", $options: "i" } } : {};
   if (context.countryCode) {
     // Legacy published listings store the country name but predate countryCode.
@@ -183,7 +183,7 @@ async function candidates(Model, base, fields, categoryField, interests, context
   // Keep a local pool so nearby inventory survives the bounded global retrieval.
   const constraints = strictLocation ? local : {};
   const queries = [
-    Model.find({ ...base, ...constraints }).select(fields).sort(sort).limit(100).lean(),
+    Model.find({ ...base, ...constraints }).select(fields).sort(sort).limit(poolLimit).lean(),
     ...(!strictLocation && Object.keys(local).length ? [Model.find({ ...base, ...local }).select(fields).sort(sort).limit(80).lean()] : []),
     ...(interests.length ? [Model.find({ ...base, ...constraints, [categoryField]: { $in: interests } }).select(fields).sort(sort).limit(80).lean()] : []),
   ];
@@ -210,13 +210,17 @@ async function home(userId, query = {}) {
   const now = new Date(), pref = await preferences(userId);
   const context = parseContext(query, pref);
   const strictLocation = query.city !== undefined || query.countryCode !== undefined;
+  const page = Math.max(1, parseInt(query.page, 10) || 1);
+  const limit = Math.min(50, Math.max(1, parseInt(query.limit, 10) || 24));
+  const skip = (page - 1) * limit;
+  const poolLimit = Math.max(100, skip + limit + 50);
   const user = userId ? await User.findById(userId).select("dob wishlistEvents wishlistEventCenters").lean() : null;
   const { profile } = await initialProfile(userId, pref, user, now);
   const eventInterests = [...new Set([...(pref.eventTypes || []), ...Object.keys(profile.events)])];
   const venueInterests = [...new Set([...(pref.venueTypes || []), ...Object.keys(profile.venues)])];
   const [events, venues] = await Promise.all([
-    candidates(Event, { ...BASE, "schedule.from": { $gt: now } }, EVENT_FIELDS, "eventType", eventInterests, context, { "schedule.from": 1, _id: 1 }, strictLocation),
-    candidates(Venue, { ...BASE, archivedAt: null }, VENUE_FIELDS, "venueType", venueInterests, context, { createdAt: -1, _id: -1 }, strictLocation),
+    candidates(Event, { ...BASE, "schedule.from": { $gt: now } }, EVENT_FIELDS, "eventType", eventInterests, context, { "schedule.from": 1, _id: 1 }, strictLocation, poolLimit),
+    candidates(Venue, { ...BASE, archivedAt: null }, VENUE_FIELDS, "venueType", venueInterests, context, { createdAt: -1, _id: -1 }, strictLocation, poolLimit),
   ]);
   const [tickets, counts, owned] = await Promise.all([
     TicketType.find({ eventId: { $in: events.map(e => e._id) }, salesStartAt: { $lte: now }, salesEndAt: { $gt: now } })
@@ -230,7 +234,7 @@ async function home(userId, query = {}) {
   const eventCards = [];
   for (const event of events) {
     const key = event._id+":"+(event.occurrence || 0);
-    if (!P.eventEligible(event,now) || !P.ageEligible(event,user?.dob,now) || P.managed(event,userId) ||
+    if (!P.eventEligible(event,now) || !P.ageEligible(event,user?.dob,now) ||
       ownedSet.has(key)) continue;
     const remaining = event.capacity == null ? Infinity : event.capacity - (counts.get(key) || 0);
     if (remaining < 1) continue;
@@ -245,17 +249,20 @@ async function home(userId, query = {}) {
     eventCards.push({ ...event, ...P.rank(event,"Event",profile,pref,context,now), type:"event",
       price:P.priceFor(options), admission });
   }
-  const venueCards = venues.filter(v => P.publicListing(v) && !P.managed(v,userId) &&
+  const venueCards = venues.filter(v => P.publicListing(v) &&
     Number.isFinite(v.basePrice?.amount) && v.basePrice.amount > 0 &&
     ["day","hour"].includes(v.basePrice?.unit) && currencies.includes(v.basePrice.currency))
     .map(v => ({ ...v, ...P.rank(v,"EventCenter",profile,pref,context,now), type:"eventCenter",
       price:{ amount:v.basePrice.amount, currency:v.basePrice.currency, unit:v.basePrice.unit }, admission:"CHECK_AVAILABILITY" }));
   const sorted = list => list.sort((a,b) => b.score-a.score || String(a._id).localeCompare(String(b._id)));
-  // One shared ranking and limit: no type quotas or forced event/venue alternation.
+  // One shared ranking across events and venues with pagination support.
+  const rankedAll = sorted([...eventCards, ...venueCards]);
+  const total = rankedAll.length;
+  const pageItems = rankedAll.slice(skip, skip + limit);
   const sections = [{
     id:"for-you",
     title:pref.eventTypes?.length || pref.venueTypes?.length ? "Based on your interests" : "Recommended for you",
-    items:sorted([...eventCards, ...venueCards]).slice(0,24),
+    items:pageItems,
   }];
   // Recheck publication after profile/inventory work; do not serialize stale moderation state.
   const selectedEvents = sections.flatMap(s => s.items).filter(i => i.type === "event");
@@ -287,6 +294,8 @@ async function home(userId, query = {}) {
   });
   return { success:true, requestId, algorithmVersion:P.VERSION, trackingEnabled,
     preferenceRevision:pref.revision, locationLabel:[context.city,context.countryCode].filter(Boolean).join(", "),
-    generatedAt:now, expiresAt, sections:sections.filter(s => s.items.length).map(s => ({ ...s, items:s.items.map(card) })) };
+    generatedAt:now, expiresAt,
+    pagination: { total, page, limit, pages: Math.ceil(total / limit), hasMore: skip + pageItems.length < total },
+    sections:sections.filter(s => s.items.length).map(s => ({ ...s, items:s.items.map(card) })) };
 }
 module.exports = { preferences, preferenceResponse, updatePreferences, ingest, recordSave, initialProfile, parseContext, home };

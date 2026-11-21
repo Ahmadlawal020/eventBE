@@ -5,7 +5,7 @@ const mongoose = require("mongoose");
   await mongoose.connect(process.env.DATABASE_URI, { autoIndex: false, autoCreate: false, serverSelectionTimeoutMS: 10000 });
   try {
     const results = [];
-    for (const file of ["refundWorkerHealth", "eventCenterRefundWorkerHealth", "notificationOutbox", "eventCenterRefundOutbox", "operationalAlert", "eventCenterBooking"]) {
+    for (const file of ["refundWorkerHealth", "eventCenterRefundWorkerHealth", "notificationOutbox", "eventCenterRefundOutbox", "operationalAlert", "eventCenterBooking", "venueRescheduleCheckout"]) {
       const Model = require("../models/client/" + file + ".schema");
       if (process.argv.includes("--apply")) await Model.createIndexes();
       let actual = []; try { actual = await Model.collection.indexes(); } catch (error) { if (error.code !== 26) throw error; }

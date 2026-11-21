@@ -28,7 +28,7 @@ const minutes = (value, end = false) => {
   const [h,m] = value.split(":").map(Number);
   return h * 60 + m;
 };
-const venueQuote = (venue, input) => {
+const venueQuote = (venue, input, { organiserOverride = false } = {}) => {
   const base = venue.pricing?.basePrice || venue.basePrice;
   const unit = base?.unit || "day";
   if (!["day", "hour"].includes(input.bookingUnit) || input.bookingUnit !== unit) throw fail("Booking unit does not match the venue price");
@@ -37,15 +37,20 @@ const venueQuote = (venue, input) => {
   if (input.totalPrice?.currency && input.totalPrice.currency !== currency) throw fail("Booking currency does not match the venue");
   const seen = new Set();
   let subtotalCents = 0, duration = 0;
+  const todayKey = require("./bookingAttendance.service").dayOf(new Date());
   const dates = input.selectedDates.map(slot => {
     const date = dayKey(slot?.date);
-    if (date < new Date().toISOString().slice(0,10)) throw fail("Cannot book a past date");
+    if (date < todayKey) throw fail("Cannot book a past date");
     if (seen.has(date)) throw fail("Duplicate booking dates are not allowed");
     seen.add(date);
     const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
     const weekend = venue.pricing?.weekendPrice || venue.weekendPrice;
-    const override = (venue.availability?.customPrices || venue.pricing?.customPrices || []).find(p => dayKey(p.date) === date);
-    const amount = Number(override?.amount ?? override?.price ?? ([0,6].includes(weekday) && Number(weekend?.amount) > 0 ? weekend.amount : base?.amount));
+    const hasWeekend = venue.weekendPricingEnabled !== false && Number(weekend?.amount) > 0;
+    const customPrices = venue.availability?.customPrices || venue.pricing?.customPrices || [];
+    const defaultDayAmount = Number([0,6].includes(weekday) && hasWeekend ? weekend.amount : base?.amount);
+    const dayOverride = customPrices.find(p => !String(p.date || "").includes("T") && dayKey(p.date) === date) ||
+      (unit === "day" ? customPrices.find(p => dayKey(p.date) === date) : null);
+    const amount = Number(dayOverride?.amount ?? dayOverride?.price ?? defaultDayAmount);
     if (!Number.isFinite(amount) || amount <= 0) throw fail("Venue price must be a positive amount");
     let units = 1;
     if (unit === "hour") {
@@ -53,18 +58,35 @@ const venueQuote = (venue, input) => {
       if (end <= start || start % 60 || end % 60) throw fail("Select whole-hour slots with an end after the start");
       const open = minutes(venue.availability?.operationalHours?.open || "00:00");
       const close = minutes(venue.availability?.operationalHours?.close || "24:00", true);
-      if (start < open || end > close) throw fail("Selected time is outside venue operating hours");
+      if (!organiserOverride && (start < open || end > close)) throw fail("Selected time is outside venue operating hours");
       units = (end - start) / 60;
       const required = require("./venuePricingRules.service").minimumDuration(venue, date);
-      if (units < required) throw fail("Select at least " + required + " hours on " + date + ".");
+      if (!organiserOverride && units < required) throw fail("Select at least " + required + " hours on " + date + ".");
+      const startHour = start / 60, endHour = end / 60;
+      for (let h = startHour; h < endHour; h++) {
+        const hourOverride = customPrices.find(p => {
+          if (dayKey(p.date) !== date) return false;
+          const raw = typeof p.date === "string" ? p.date : new Date(p.date).toISOString();
+          if (raw.includes("T")) {
+            const m = raw.match(/T(\d{2}):/);
+            const parsedHour = m ? Number(m[1]) : new Date(p.date).getUTCHours();
+            return parsedHour === h;
+          }
+          return false;
+        });
+        const hourAmount = Number(hourOverride?.amount ?? hourOverride?.price ?? amount);
+        if (!Number.isFinite(hourAmount) || hourAmount <= 0) throw fail("Venue price must be a positive amount");
+        subtotalCents += Math.round(hourAmount * 100);
+      }
+    } else {
+      subtotalCents += Math.round(amount * 100) * units;
     }
     duration += units;
-    subtotalCents += Math.round(amount * 100) * units;
     return {date, ...(unit === "hour" ? {startTime:slot.startTime, endTime:minutes(slot.endTime,true) === 1440 ? "24:00" : slot.endTime} : {})};
   }).sort((a,b)=>a.date.localeCompare(b.date));
-  require("./venueBookingRules.service").assertVenueSchedule(venue, dates, unit);
+  require("./venueBookingRules.service").assertVenueSchedule(organiserOverride ? { ...venue, availability: { ...venue.availability, preparationTime: 0 } } : venue, dates, unit, { checkTiming: !organiserOverride });
   const min = venue.availability?.minDuration || 1, max = venue.availability?.maxDuration || 365;
-  if (duration < min || duration > max) throw fail(`Booking duration must be between ${min} and ${max} ${unit}s`);
+  if (!organiserOverride && (duration < min || duration > max)) throw fail(`Booking duration must be between ${min} and ${max} ${unit}s`);
   return {subtotalAmount:subtotalCents/100, currency, duration, selectedDates:dates};
 };
 

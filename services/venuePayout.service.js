@@ -6,27 +6,30 @@ const Venue=require("../models/client/eventCenter.schema");
 const {getPaymentGateway}=require("./payment");
 const {fail}=require("./checkoutSafety.service");
 const {generateTicketNumber,generateQRPayload}=require("../utils/qr");
-async function confirmReviewBooking(id,organiserId){
+async function confirmReviewBooking(id,actorId){
  return mongoose.connection.transaction(async session=>{
   const booking=await Booking.findById(id).select("+payoutDestination").session(session);
   if(!booking)throw fail("Booking not found",404);
-  if(String(booking.organiser)!==String(organiserId))throw fail("Not authorised to accept this booking",403);
+  const venue=await Venue.findById(booking.eventCenter).session(session);
+  const isOwner=String(booking.organiser)===String(actorId);
+  const isCoOrganiser=(venue?.coOrganisers||[]).some(c=>String(c)===String(actorId));
+  if(!isOwner && !isCoOrganiser)throw fail("Not authorised to accept this booking",403);
   if(booking.status==="CONFIRMED")return {booking,changed:false};
   if(booking.status!=="PENDING_REVIEW" || booking.paymentStatus!=="COMPLETED" || booking.paymentResolutionRequired)throw fail("Only paid bookings awaiting review can be accepted",409);
   require("./venueReviewPolicy.service").assertReviewOpen(booking);
-  const venue=await Venue.findById(booking.eventCenter).session(session);
   const ownBlocks=booking.bookingUnit==="day"?venue?.availability?.unavailableDates:venue?.availability?.unavailableSlots;
   if(!booking.selectedDates.every(d=>(ownBlocks||[]).some(b=>String(b.bookingId)===String(booking._id)&&new Date(b.date).toISOString().slice(0,10)===new Date(d.date).toISOString().slice(0,10))))throw fail("The booking dates are no longer reserved. Contact the guest to resolve this booking.",409);
-  const destination=booking.payoutDestination || (await User.findById(organiserId).session(session))?.bankDetails;
+  const ownerId=booking.organiser;
+  const destination=booking.payoutDestination || (await User.findById(ownerId).session(session))?.bankDetails;
   if(!destination?.accountNumber || !destination?.bankCode)throw fail("Add a valid payout bank account before accepting this booking",409);
   if(booking.totalPrice.currency!=="NGN")throw fail("Automatic review-booking payouts currently require NGN",409);
   if(!Number.isFinite(booking.organiserPayoutAmount))throw fail("This legacy booking requires payout reconciliation before approval",409);
   const amountMinor=Math.round(booking.organiserPayoutAmount*100);
-  await Payout.create([{booking:booking._id,organiser:organiserId,reference:`venue-${booking._id}`,amountMinor,currency:booking.totalPrice.currency,destination,status:amountMinor===0?"SUCCESS":"READY"}],{session});
+  await Payout.create([{booking:booking._id,organiser:ownerId,reference:`venue-${booking._id}`,amountMinor,currency:booking.totalPrice.currency,destination,status:amountMinor===0?"SUCCESS":"READY"}],{session});
   booking.status="CONFIRMED";booking.reviewedAt=new Date();booking.referralQualifiedAt=new Date();
   booking.ticketNumber=generateTicketNumber("MNS");booking.qrPayload=generateQRPayload(booking.ticketNumber,booking.eventCenter,"EVENT_CENTER");
   await booking.save({session});
-  await require("./venueBookingEvents.service").recordVenueEvent(booking, "ACCEPTED", organiserId, session);
+  await require("./venueBookingEvents.service").recordVenueEvent(booking, "ACCEPTED", actorId, session);
   return {booking,changed:true};
  });
 }

@@ -4,18 +4,20 @@ const Upload = require("../models/client/manualRefundUpload.schema"), cloudinary
 const { fail, hasVenuePermission } = require("./venueAccess.service");
 const { normalizeRefundBankDetails } = require("./eventCenterRefundBankDetails.service");
 async function access(venueId, bookingId, actor, session = null) {
-  if (!mongoose.isValidObjectId(venueId) || !/^manual-[a-zA-Z0-9_-]{1,100}$/.test(bookingId || "")) throw fail(400,"Invalid manual booking.");
+  if (!mongoose.isValidObjectId(venueId) || (!/^manual-[a-zA-Z0-9_-]{1,100}$/.test(bookingId || "") && !mongoose.isValidObjectId(bookingId))) throw fail(400,"Invalid manual booking.");
   const venue = await Venue.findById(venueId).session(session).lean();
   if (!venue) throw fail(404,"Venue not found.");
   const record = await Operations.findById(`${venueId}:${bookingId}`).session(session);
   if (!record) throw fail(404,"Booking payment record not found.");
+  if (!String(bookingId).startsWith("manual-") && !record.rescheduleAdjustment) throw fail(404,"Reschedule payment record not found.");
   const customer = String(record.customerId || "") === String(actor);
   const manager = await hasVenuePermission(actor,venue,["VIEW_FINANCES"]) && await hasVenuePermission(actor,venue,["MANAGE_BOOKINGS"]);
   if (!customer && !manager) throw fail(403,"This refund belongs to another booking or requires finance access.");
-  return { venue, record, customer, manager };
+  const booking = record.rescheduleAdjustment ? await require("./bookingAttendance.service").loadBooking(venueId, bookingId) : null;
+  return { venue, record, customer, manager, booking };
 }
-function publicDetails({record,customer,manager}) {
-  return { revision: record.revision, customer, canManage: manager, linked: Boolean(record.customerId), account: record.refundAccount,
+function publicDetails({record,customer,manager,booking}) {
+  return { payments: record.rescheduleAdjustment ? (record.payments || []).filter(p => ["PAYMENT", "REFUND"].includes(p.kind)).map(p => ({ id: p.id, kind: p.kind, amountMinor: p.amountMinor, reference: p.reference, at: p.at })) : undefined, summary: booking && !(booking.status === "CANCELLED" && !String(record.bookingId).startsWith("manual-")) ? require("./bookingOperations.service").paymentSummary(booking, record.toObject ? record.toObject() : record) : undefined, revision: record.revision, customer, canManage: manager, linked: Boolean(record.customerId), account: record.refundAccount,
     refunds: record.refunds.map(f => ({ id:f.id, amountMinor:f.amountMinor, reason:f.reason, status:f.status, sentAt:f.sentAt, confirmedAt:f.confirmedAt,
       settlement:f.settlement, receipt:f.receipt?.uploadedAt ? {uploadedAt:f.receipt.uploadedAt} : undefined })) };
 }
@@ -26,13 +28,53 @@ function editable(f,settlementId) {
 async function commit(context,action,actor,session,reason) {
   const {venue,record}=context;
   if(venue.archivedAt)throw fail(409,"This venue is archived.");
+  if (!String(record.bookingId).startsWith("manual-") && await require("../models/client/eventCenterBooking.schema").exists({ _id: record.bookingId, rescheduleCheckoutId: { $ne: null } }).session(session)) throw fail(409,"Finish or check the pending reschedule payment before changing refund details.");
   await Venue.updateOne({_id:venue._id},{$inc:{bookingVersion:1}},{session});
   record.revision += 1;record.audit.push({action,actor,at:new Date(),reason:reason || "Manual refund updated"});
   await record.save({session});
-  await require("./eventCenterRefundNotifications.service").queueNotices([...new Set([String(venue.createdBy),...(record.customerId?[String(record.customerId)]:[])])].map(recipient=>({
-    key:`manual-refund:${record._id}:${record.revision}:${recipient}`,recipient,type:"SYSTEM",title:"Manual refund update",message:`${venue.venueName || "Venue"}: open booking ${record.bookingId} for the latest refund details.`,
-    data:{screen:recipient===String(venue.createdBy)?"VenueBookingOperations":"ManualVenueBooking",venueId:String(venue._id),bookingId:record.bookingId},
-  })),session);
+  const hostRecipients = [...new Set([venue.createdBy, ...(venue.coOrganisers || [])].filter(Boolean).map(String))];
+  const customerRecipient = record.customerId ? String(record.customerId) : null;
+  const venueLabel = venue.venueName || "Venue";
+  const notices = [];
+  if (action === "BANK_DETAILS") {
+    for (const recipient of hostRecipients) {
+      notices.push({
+        key: `manual-refund:${record._id}:${record.revision}:${recipient}`,
+        recipient,
+        type: "SYSTEM",
+        title: "Refund bank details submitted",
+        message: `${venueLabel}: a client submitted their bank details for a reschedule refund. Tap to review and settle.`,
+        data: { screen: "VenueBookingOperations", venueId: String(venue._id), bookingId: record.bookingId, ticketId: record.bookingId },
+      });
+    }
+  } else if ((action === "PREPARE" || action === "REFUND_RECEIPT") && customerRecipient) {
+    notices.push({
+      key: `manual-refund:${record._id}:${record.revision}:${customerRecipient}`,
+      recipient: customerRecipient,
+      type: "SYSTEM",
+      title: action === "REFUND_RECEIPT" ? "Refund payment proof uploaded" : "Refund payment being prepared",
+      message: action === "REFUND_RECEIPT"
+        ? `${venueLabel}: payment proof was uploaded for your refund. Open your booking to review.`
+        : `${venueLabel}: your refund payment is being prepared. Open your booking for the latest status.`,
+      data: { screen: String(record.bookingId).startsWith("manual-") ? "ManualVenueBooking" : "TicketDetails", venueId: String(venue._id), bookingId: record.bookingId, ticketId: record.bookingId },
+    });
+  } else {
+    const allRecipients = [...new Set([...hostRecipients, ...(customerRecipient ? [customerRecipient] : [])])];
+    for (const recipient of allRecipients) {
+      const isHost = hostRecipients.includes(recipient);
+      notices.push({
+        key: `manual-refund:${record._id}:${record.revision}:${recipient}`,
+        recipient,
+        type: "SYSTEM",
+        title: "Refund arrangement updated",
+        message: `${venueLabel}: open your booking for the latest refund details.`,
+        data: { screen: isHost ? "VenueBookingOperations" : String(record.bookingId).startsWith("manual-") ? "ManualVenueBooking" : "TicketDetails", venueId: String(venue._id), bookingId: record.bookingId, ticketId: record.bookingId },
+      });
+    }
+  }
+  if (notices.length) {
+    await require("./eventCenterRefundNotifications.service").queueNotices(notices, session);
+  }
 }
 async function update(venueId,bookingId,actor,payload) {
   return mongoose.connection.transaction(async session=>{

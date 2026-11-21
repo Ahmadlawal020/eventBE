@@ -66,14 +66,6 @@ const SAFETY_CONSIDERATIONS = [
   ["INCIDENT_REPORTING", "Incident reporting"],
 ];
 
-const DISCOUNTS = [
-  ["MULTI_DAY", "Multi-day"],
-  ["EARLY_BIRD", "Early bird"],
-  ["OFF_PEAK", "Off-peak"],
-  ["NON_PROFIT", "Non-profit"],
-  ["LOYALTY", "Loyalty"],
-];
-
 const optionSchema = new Schema(
   {
     key: { type: String, required: true },
@@ -194,6 +186,5 @@ EventCenterSettings.AMENITIES = AMENITIES;
 EventCenterSettings.VENUE_RULES = VENUE_RULES;
 EventCenterSettings.SAFETY_OPTIONS = SAFETY_OPTIONS;
 EventCenterSettings.SAFETY_CONSIDERATIONS = SAFETY_CONSIDERATIONS;
-EventCenterSettings.DISCOUNTS = DISCOUNTS;
 
 module.exports = EventCenterSettings;

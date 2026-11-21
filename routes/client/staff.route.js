@@ -53,6 +53,10 @@ router.get("/listing/:listingType/:listingId/stats", requireRole("staff"), staff
 router.post("/scanner/:listingType/:listingId/verify", requireRole("staff"), staffScannerController.verifyTicketStaff);
 router.post("/scanner/:listingType/:listingId/validate", requireRole("staff"), staffScannerController.validateTicketStaff);
 
+router.get("/bookings/venue/:eventCenterId/reschedule-balances", requireRole("staff", "organiser"), async (req, res) => {
+  try { res.json({ success: true, data: await require("../../services/rescheduleBalances.service").list(req.params.eventCenterId, req.user.id) }); }
+  catch (error) { res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Could not load reschedule payments." }); }
+});
 router.get("/bookings/:bookingId/operations", requireRole("staff", "organiser"), eventCenterBookingController.getBookingOperations);
 router.patch("/bookings/:bookingId/operations", requireRole("staff", "organiser"), eventCenterBookingController.updateBookingOperations);
 router.get("/bookings/search/:eventCenterId", requireRole("staff", "organiser"), eventCenterBookingController.searchBooking);
@@ -66,6 +70,7 @@ router.post("/bookings/:bookingId/organiser-check-in", requireRole("organiser"),
 router.post("/bookings/:bookingId/check-in", requireRole("staff", "organiser"), eventCenterBookingController.manualCheckIn);
 router.get("/bookings/:bookingId/cancellation-preview", requireRole("staff", "organiser"), eventCenterBookingController.getCancellationPreview);
 router.post("/bookings/:bookingId/cancel", requireRole("staff", "organiser"), eventCenterBookingController.cancelBooking);
+router.post("/bookings/:bookingId/reschedule-preview", requireRole("staff", "organiser"), eventCenterBookingController.previewReschedule);
 router.patch("/bookings/:bookingId/reschedule", requireRole("staff", "organiser"), eventCenterBookingController.rescheduleBooking);
 
 router.get("/tickets/search/:eventId", requireRole("staff"), staffTicketController.searchStaffTickets);

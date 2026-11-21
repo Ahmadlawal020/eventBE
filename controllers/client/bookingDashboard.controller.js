@@ -201,6 +201,7 @@ const getOrganiserBookingStats = async (req, res) => {
     agg.refundsConfirmed = finance?.refundsConfirmed ?? null;
     agg.refundLiability = finance?.refundLiability ?? null;
     agg.moneyByCurrency = venueMoney.currencies;
+    agg.moneyBreakdownByCurrency = venueMoney.breakdown;
     facetData.revenueByCurrency = venueMoney.currencies.map(r => ({ _id: r.currency, revenue: r.netReceipts }));
     facetData.revenueByBookingUnit = venueMoney.byUnit;
     const attendanceBookings = await attendanceForBookings([
@@ -301,33 +302,160 @@ const getOrganiserBookingStats = async (req, res) => {
       };
     });
 
-    // 4. Fetch pending review bookings across all venues
-    const pendingRequests = await EventCenterBooking.find({
-      eventCenter: { $in: venueIds },
-      status: "PENDING_REVIEW",
-    })
-      .populate("buyer", "firstName surname email profileImage")
-      .populate("eventCenter", "venueName")
-      .sort({ createdAt: -1 })
-      .limit(20)
-      .lean();
+    // 4. Fetch pending review bookings and pending reschedule requests across all venues
+    const [pendingRequests, pendingReschedules] = await Promise.all([
+      EventCenterBooking.find({
+        eventCenter: { $in: venueIds },
+        status: "PENDING_REVIEW",
+      })
+        .populate("buyer", "firstName surname email profilePicture profileImage")
+        .populate("eventCenter", "venueName")
+        .sort({ createdAt: -1 })
+        .limit(20)
+        .lean(),
+      EventCenterBooking.find({
+        eventCenter: { $in: venueIds },
+        status: { $in: ["ACTIVE", "CONFIRMED"] },
+        "rescheduleRequest.status": "PENDING",
+      })
+        .populate("buyer", "firstName surname email profilePicture profileImage")
+        .populate("eventCenter", "venueName")
+        .sort({ "rescheduleRequest.requestedAt": -1, updatedAt: -1 })
+        .limit(20)
+        .lean(),
+    ]);
+
+    const extractAvatar = (buyer) => {
+      if (!buyer) return null;
+      if (typeof buyer.profilePicture === "string") return buyer.profilePicture;
+      if (typeof buyer.profilePicture?.url === "string") return buyer.profilePicture.url;
+      if (typeof buyer.profileImage === "string") return buyer.profileImage;
+      return null;
+    };
 
     const pendingRequestsList = pendingRequests.map((t) => ({
       bookingId: String(t._id),
       guestName: t.guestDetails?.fullName || (t.buyer ? `${t.buyer.firstName} ${t.buyer.surname}` : ""),
       guestEmail: t.guestDetails?.email || t.buyer?.email || "",
-      guestImage: t.buyer?.profileImage || null,
+      guestImage: extractAvatar(t.buyer),
       venueName: t.eventCenter?.venueName || "",
       venueId: t.eventCenter?._id || t.eventCenter,
       selectedDates: t.selectedDates || [],
       bookingUnit: t.bookingUnit,
       duration: t.duration,
       totalPrice: t.totalPrice,
+      subtotalPrice: t.subtotalPrice,
+      organiserPayoutAmount:
+        t.organiserPayoutAmount ??
+        t.subtotalPrice?.amount ??
+        Math.max(0, Number(t.totalPrice?.amount || 0) - Number(t.platformFeeAmount || 0)),
       reviewDeadline: t.reviewDeadline,
       createdAt: t.createdAt,
     }));
 
+    const pendingRescheduleList = pendingReschedules.map((t) => ({
+      bookingId: String(t._id),
+      requestId: t.rescheduleRequest?.id || "",
+      guestName: t.guestDetails?.fullName || (t.buyer ? `${t.buyer.firstName} ${t.buyer.surname}` : ""),
+      guestEmail: t.guestDetails?.email || t.buyer?.email || "",
+      guestImage: extractAvatar(t.buyer),
+      venueName: t.eventCenter?.venueName || "",
+      venueId: t.eventCenter?._id || t.eventCenter,
+      currentDates: t.selectedDates || [],
+      requestedDates: t.rescheduleRequest?.dates || [],
+      bookingUnit: t.bookingUnit,
+      reason: t.rescheduleRequest?.reason || "",
+      requestedAt: t.rescheduleRequest?.requestedAt || t.updatedAt,
+    }));
+
     const totalPendingReview = pendingRequestsList.length;
+    const totalPendingReschedules = pendingRescheduleList.length;
+
+    // 5. Fetch outstanding reschedule refunds & balances across venues with finance permission
+    let pendingRescheduleSettlements = [];
+    if (financeVenueIds.length > 0) {
+      const BookingOperations = require("../../models/client/bookingOperations.schema");
+      const { outstanding } = require("../../services/rescheduleBalances.service");
+      const opsRecords = await BookingOperations.find({
+        eventCenter: { $in: financeVenueIds },
+        rescheduleAdjustment: true,
+      })
+        .sort({ updatedAt: -1 })
+        .limit(30)
+        .lean();
+
+      if (opsRecords.length > 0) {
+        const platformIds = opsRecords
+          .map((r) => r.bookingId)
+          .filter((id) => mongoose.isValidObjectId(id));
+        const platformBookings = platformIds.length
+          ? await EventCenterBooking.find({
+              _id: { $in: platformIds },
+              eventCenter: { $in: financeVenueIds },
+            }).lean()
+          : [];
+        const bookingsById = new Map([
+          ...platformBookings.map((b) => [String(b._id), b]),
+          ...manualBookings.map((b) => [String(b._id), b]),
+        ]);
+        const venueNameById = new Map(venues.map((v) => [String(v._id), v.venueName || ""]));
+
+        for (const record of opsRecords) {
+          const booking = bookingsById.get(String(record.bookingId));
+          const item = booking && outstanding(booking, record);
+          if (!item) continue;
+          const vId = String(record.eventCenter);
+          pendingRescheduleSettlements.push({
+            ...item,
+            venueId: vId,
+            venueName: venueNameById.get(vId) || "",
+            hasBankDetails: Boolean(record.refundAccount?.accountNumber),
+            refundAccount: record.refundAccount?.accountNumber
+              ? {
+                  accountName: record.refundAccount.accountName || "",
+                  accountNumber: record.refundAccount.accountNumber || "",
+                  bankCode: record.refundAccount.bankCode || "",
+                }
+              : null,
+            updatedAt: record.updatedAt,
+          });
+        }
+      }
+    }
+    const pendingRescheduleSettlementCount = pendingRescheduleSettlements.length;
+
+    // 6. Fetch pending direct cancellation refunds across venues with finance permission
+    let pendingCancellationRefunds = [];
+    if (financeVenueIds.length > 0) {
+      const EventCenterRefund = require("../../models/client/eventCenterRefund.schema");
+      const rawRefunds = await EventCenterRefund.find({
+        eventCenterId: { $in: financeVenueIds },
+        status: { $ne: "CONFIRMED_BY_BUYER" },
+        ticketId: { $exists: true },
+      })
+        .populate("buyer", "firstName surname email profilePicture profileImage")
+        .populate("eventCenterId", "venueName")
+        .sort({ dueAt: 1, createdAt: -1 })
+        .limit(20)
+        .lean();
+
+      pendingCancellationRefunds = rawRefunds.map((r) => ({
+        refundId: String(r._id),
+        bookingId: String(r.bookingId || r.ticketId),
+        venueId: String(r.eventCenterId?._id || r.eventCenterId),
+        venueName: r.eventCenterId?.venueName || r.resourceTitle || "",
+        guestName: r.buyer ? `${r.buyer.firstName || ""} ${r.buyer.surname || ""}`.trim() || "Guest" : "Guest",
+        guestImage: extractAvatar(r.buyer),
+        amountMinor: r.amountMinor || 0,
+        remainingMinor: Math.max(0, (r.amountMinor || 0) - (r.sentMinor || 0)),
+        currency: r.currency || "NGN",
+        status: r.status,
+        hasBankDetails: Boolean(r.bankDetailsSubmittedAt),
+        markedPaidAt: r.markedPaidAt || null,
+        dueAt: r.dueAt || null,
+      }));
+    }
+    const pendingCancellationRefundCount = pendingCancellationRefunds.length;
 
     res.status(200).json({
       success: true,
@@ -346,6 +474,12 @@ const getOrganiserBookingStats = async (req, res) => {
           hasGlobalFinancePerm: financeVenueIds.length > 0,
           pendingReviewCount: totalPendingReview,
           pendingRequests: pendingRequestsList,
+          pendingRescheduleCount: totalPendingReschedules,
+          pendingRescheduleRequests: pendingRescheduleList,
+          pendingRescheduleSettlementCount,
+          pendingRescheduleSettlements,
+          pendingCancellationRefundCount,
+          pendingCancellationRefunds,
         },
         venues: venueList,
       },
@@ -401,12 +535,70 @@ const getSingleVenueBookingStats = async (req, res) => {
     const manualBookings = await getManualBookings([venue]);
     const bookings = (await attendanceForBookings([...platformBookings.map(booking => ({ ...booking, bookingType: "PLATFORM" })), ...manualBookings]))
       .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0));
+    const [opsRecords, cancelHistory] = await Promise.all([
+      require("../../models/client/bookingOperations.schema")
+        .find({ eventCenter: venue._id })
+        .select("bookingId agreedPrice openingPaidMinor payments refunds rescheduleAdjustment")
+        .lean(),
+      require("../../models/client/bookingHistory.schema")
+        .find({ eventCenter: venue._id, action: { $in: ["DECLINED", "EXPIRED", "CANCELLED"] } })
+        .select("bookingId action reason createdAt")
+        .sort({ createdAt: -1 })
+        .lean(),
+    ]);
+    const opsByBookingId = new Map(opsRecords.map((r) => [String(r.bookingId), r]));
+    const cancelHistoryByBookingId = new Map();
+    for (const entry of cancelHistory) {
+      const key = String(entry.bookingId);
+      if (!cancelHistoryByBookingId.has(key)) cancelHistoryByBookingId.set(key, entry);
+    }
+    const resolveCancellationOutcome = (b) => {
+      if (b.status !== "CANCELLED") return null;
+      const mode = b.cancellation?.mode;
+      if (mode === "expire") return "EXPIRED";
+      if (mode === "decline") return "DECLINED";
+      if (mode === "withdraw") return "WITHDRAWN";
+      const hist = cancelHistoryByBookingId.get(String(b._id));
+      if (hist?.action === "EXPIRED") return "EXPIRED";
+      if (hist?.action === "DECLINED") return "DECLINED";
+      const actorId = b.cancellation?.actor ? String(b.cancellation.actor) : null;
+      const buyerId = b.buyer?._id ? String(b.buyer._id) : b.buyer ? String(b.buyer) : null;
+      if (actorId && buyerId && actorId === buyerId) return "GUEST_CANCELLED";
+      if (actorId && buyerId && actorId !== buyerId) return "HOST_CANCELLED";
+      if (b.bookingMode === "REVIEW" && b.reviewDeadline && new Date(b.reviewedAt || b.updatedAt || 0) >= new Date(b.reviewDeadline)) {
+        return "EXPIRED";
+      }
+      return b.bookingType === "MANUAL" ? "HOST_CANCELLED" : "CANCELLED";
+    };
+    const { paymentSummary } = require("../../services/bookingOperations.service");
     const bookingsList = bookings.map(b => {
+      const ops = opsByBookingId.get(String(b._id));
+      const summary = paymentSummary(b, ops || {});
+      const hasOutstandingBalance = summary.balanceMinor > 0;
+      const cancellationOutcome = resolveCancellationOutcome(b);
+      const organiserNetAmount =
+        b.bookingType === "MANUAL"
+          ? b.rescheduledPrice?.amount ?? b.totalPrice?.amount ?? 0
+          : (b.rescheduledPrice?.amount != null
+              ? Math.max(0, Number(b.rescheduledPrice.amount) - Number(b.platformFeeAmount || 0))
+              : null) ??
+            b.organiserPayoutAmount ??
+            b.subtotalPrice?.amount ??
+            Math.max(0, Number(b.totalPrice?.amount || 0) - Number(b.platformFeeAmount || 0));
+      const balanceFields = {
+        hasOutstandingBalance,
+        hasRescheduleAdjustment: Boolean(ops?.rescheduleAdjustment),
+        outstandingBalanceMinor: hasFinancePerm ? summary.balanceMinor : undefined,
+        outstandingCurrency: summary.currency || b.totalPrice?.currency || "NGN",
+        organiserNetAmount: hasFinancePerm ? organiserNetAmount : null,
+        cancellationOutcome,
+      };
       if (!hasFinancePerm) {
         return {
           ...b,
+          ...balanceFields,
           depositAmount: null,
-          manualFinance: undefined, subtotalPrice: undefined, platformFeeAmount: undefined, buyerFeeAmount: undefined,
+          manualFinance: undefined, rescheduledPrice: undefined, subtotalPrice: undefined, platformFeeAmount: undefined, buyerFeeAmount: undefined,
           organiserFeeAmount: undefined, organiserPayoutAmount: undefined, feePercentage: undefined, refund: undefined,
           totalPrice: {
             ...b.totalPrice,
@@ -414,12 +606,17 @@ const getSingleVenueBookingStats = async (req, res) => {
           }
         };
       }
-      return b;
+      return { ...b, ...balanceFields };
     });
 
     const refundRecords = hasFinancePerm ? await require("../../models/client/eventCenterRefund.schema")
       .find({ eventCenterId: venue._id }).select("amountMinor currency markedPaidAt status").lean() : [];
+    if (hasFinancePerm) {
+      const adjustments = opsRecords.filter((r) => r.rescheduleAdjustment);
+      for (const booking of platformBookings) booking.rescheduleLedger = adjustments.find(a => a.bookingId === String(booking._id));
+    }
     const financeRows = hasFinancePerm ? require("../../services/venueMoney.service").venueMoney(platformBookings, refundRecords, manualBookings) : [];
+    for (const booking of platformBookings) delete booking.rescheduleLedger;
     // Aggregate stats for this specific venue
     const stats = {
       total: bookings.length,

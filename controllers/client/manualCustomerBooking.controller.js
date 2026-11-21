@@ -1,11 +1,12 @@
 const mongoose = require("mongoose"), crypto = require("crypto");
 const Operations = require("../../models/client/bookingOperations.schema"), Venue = require("../../models/client/eventCenter.schema");
-const { fail } = require("../../services/venueAccess.service");
+const { fail, requireVenuePermission } = require("../../services/venueAccess.service");
 const hash = value => crypto.createHash("sha256").update(value).digest("hex");
 const handle = fn => async (req,res) => { try { await fn(req,res); } catch(e) { const status = e.status || e.statusCode || (e.code === 11000 ? 409 : e.name === "CastError" ? 400 : 500); res.status(status).json({ message: status === 500 ? "Could not update the manual booking." : e.code === 11000 ? "This booking is already linked or changed. Refresh before trying again." : e.message }); } };
 exports.invite = handle(async (req,res) => {
   const v = await Venue.findById(req.params.venueId).lean();
-  if (!v || String(v.createdBy) !== String(req.user.id)) throw fail(403,"Only the venue owner can link a customer.");
+  if (!v) throw fail(404, "Venue not found.");
+  await requireVenuePermission(req.user.id, v, ["MANAGE_BOOKINGS"]);
   const b = await require("../../services/bookingAttendance.service").loadBooking(v._id, req.params.bookingId);
   if (b.bookingType !== "MANUAL") throw fail(400,"Only manual bookings can be linked.");
   const token = crypto.randomBytes(24).toString("hex");

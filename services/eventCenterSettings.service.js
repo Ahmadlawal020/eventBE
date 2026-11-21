@@ -8,7 +8,7 @@ const getEventCenterSettings = () => EventCenterSettings.getSingleton();
 const validateVenuePayload = (
   payload,
   settings,
-  { publishing = false, requireComplete = publishing, existing = false, changes = payload } = {},
+  { publishing = false, requireComplete = publishing, existing = false, isListed = false, changes = payload } = {},
 ) => {
   const errors = [];
   if (payload.location?.countryCode) {
@@ -24,13 +24,16 @@ const validateVenuePayload = (
     else {
       if (typeof policy.allowGuestCancellation !== "boolean") errors.push("Choose whether guests can cancel.");
       if (!Number.isInteger(policy.noticeHours) || policy.noticeHours < 0 || policy.noticeHours > 8760) errors.push("Cancellation notice must be 0-8760 whole hours.");
+      if (policy.rescheduleApprovalRequired !== undefined && typeof policy.rescheduleApprovalRequired !== "boolean") errors.push("Choose whether rescheduling requires organiser approval.");
       if (policy.allowGuestReschedule !== undefined && typeof policy.allowGuestReschedule !== "boolean") errors.push("Choose whether guests can request rescheduling.");
       if (policy.rescheduleNoticeHours !== undefined && (!Number.isInteger(policy.rescheduleNoticeHours) || policy.rescheduleNoticeHours < 0 || policy.rescheduleNoticeHours > 8760)) errors.push("Rescheduling notice must be 0-8760 whole hours.");
       if (policy.maxReschedules !== undefined && (!Number.isInteger(policy.maxReschedules) || policy.maxReschedules < 1 || policy.maxReschedules > 100)) errors.push("Reschedule limit must be a whole number from 1 to 100.");
       for (const field of ["noticeUnit", "rescheduleNoticeUnit"]) {
         if (policy[field] !== undefined && !["hours", "days"].includes(policy[field])) errors.push("Choose hours or days for the notice period.");
       }
+      if (policy.refundMinDays !== undefined && (!Number.isInteger(policy.refundMinDays) || policy.refundMinDays < 1 || policy.refundMinDays > 90)) errors.push("Minimum refund deadline must be 1-90 whole days.");
       if (!Number.isInteger(policy.refundDays) || policy.refundDays < 1 || policy.refundDays > 90) errors.push("Refund deadline must be 1-90 whole days.");
+      if (Number.isInteger(policy.refundMinDays) && Number.isInteger(policy.refundDays) && policy.refundMinDays > policy.refundDays) errors.push("Refund deadline minimum days cannot exceed maximum days.");
       if (typeof policy.refundInstructions !== "string" || policy.refundInstructions.length > 2000) errors.push("Refund instructions must be at most 2000 characters.");
     }
   }
@@ -106,6 +109,14 @@ const validateVenuePayload = (
   ) {
     errors.push("Request-to-book is currently disabled");
   }
+  if (
+    (shouldValidate("bookingSettings") || shouldValidate("basePrice")) &&
+    payload.bookingSettings === "REVIEW" &&
+    payload.basePrice?.currency &&
+    payload.basePrice.currency !== "NGN"
+  ) {
+    errors.push("Review bookings require NGN pricing. Change the currency or use instant booking.");
+  }
 
   if (shouldValidate("capacity") && payload.capacity?.max !== undefined &&
       (!Number.isInteger(payload.capacity.max) || payload.capacity.max <= 0)) {
@@ -136,54 +147,61 @@ const validateVenuePayload = (
     }
   }
 
-  if (requireComplete) {
+  const requireFieldComplete = (field) =>
+    requireComplete || (isListed && Object.prototype.hasOwnProperty.call(changes, field));
+
+  if (requireFieldComplete("location")) {
     if (!payload.location?.addressString || !isValidCoordinates(payload.location?.coordinates))
       errors.push("A mapped venue address is required before publishing.");
+  }
+  if (requireFieldComplete("basePrice")) {
     if (!payload.basePrice || !Number.isFinite(payload.basePrice.amount) || payload.basePrice.amount <= 0 || !["hour", "day"].includes(payload.basePrice.unit))
       errors.push("A positive hourly or daily price is required before publishing.");
-    for (const [field, label] of [
-      ["venueName", "Venue name"], ["venueType", "Venue type"],
-      ["shortDescription", "Short description"], ["description", "Description"],
-    ]) {
-      if (typeof payload[field] !== "string" || !payload[field].trim()) {
-        errors.push(label + " is required before publishing");
-      }
+  }
+  for (const [field, label] of [
+    ["venueName", "Venue name"], ["venueType", "Venue type"],
+    ["shortDescription", "Short description"], ["description", "Description"],
+  ]) {
+    if (requireFieldComplete(field) && (typeof payload[field] !== "string" || !payload[field].trim())) {
+      errors.push(label + " is required before publishing");
     }
-    if (!Array.isArray(payload.supportedEvents) || !payload.supportedEvents.length) {
-      errors.push("At least one supported event type is required before publishing");
-    }
-    if (!Number.isInteger(payload.capacity?.max) || payload.capacity.max <= 0) {
-      errors.push("A valid maximum capacity is required before publishing");
-    }
-    if (
-      !Array.isArray(payload.images) ||
-      payload.images.length < settings.publishing.minimumImages
-    ) {
+  }
+  if (requireFieldComplete("supportedEvents") && (!Array.isArray(payload.supportedEvents) || !payload.supportedEvents.length)) {
+    errors.push("At least one supported event type is required before publishing");
+  }
+  if (requireFieldComplete("capacity") && (!Number.isInteger(payload.capacity?.max) || payload.capacity.max <= 0)) {
+    errors.push("A valid maximum capacity is required before publishing");
+  }
+  if (
+    requireFieldComplete("images") &&
+    (!Array.isArray(payload.images) ||
+      payload.images.length < settings.publishing.minimumImages)
+  ) {
+    errors.push(
+      `At least ${settings.publishing.minimumImages} property images are required before publishing`,
+    );
+  }
+  if (
+    requireFieldComplete("safety") &&
+    (!Array.isArray(payload.safety) ||
+      payload.safety.length < settings.publishing.minimumSafetyItems)
+  ) {
+    errors.push(
+      `At least ${settings.publishing.minimumSafetyItems} safety & security items are required before publishing`,
+    );
+  }
+  if (requireFieldComplete("basePrice") && payload.basePrice?.amount !== undefined) {
+    const amount = payload.basePrice?.amount;
+    const currency = payload.basePrice?.currency || "NGN";
+    const minRequired =
+      settings.pricing?.minimumBasePrices?.[currency] ??
+      settings.pricing?.minimumBasePrices?.get?.(currency) ??
+      settings.pricing?.minimumBasePrice ??
+      0;
+    if (!Number.isFinite(amount) || amount < minRequired) {
       errors.push(
-        `At least ${settings.publishing.minimumImages} property images are required before publishing`,
+        `Base price for ${currency} must be at least ${minRequired}`,
       );
-    }
-    if (
-      !Array.isArray(payload.safety) ||
-      payload.safety.length < settings.publishing.minimumSafetyItems
-    ) {
-      errors.push(
-        `At least ${settings.publishing.minimumSafetyItems} safety & security items are required before publishing`,
-      );
-    }
-    if (payload.basePrice?.amount !== undefined) {
-      const amount = payload.basePrice?.amount;
-      const currency = payload.basePrice?.currency || "NGN";
-      const minRequired =
-        settings.pricing?.minimumBasePrices?.[currency] ??
-        settings.pricing?.minimumBasePrices?.get?.(currency) ??
-        settings.pricing?.minimumBasePrice ??
-        0;
-      if (!Number.isFinite(amount) || amount < minRequired) {
-        errors.push(
-          `Base price for ${currency} must be at least ${minRequired}`,
-        );
-      }
     }
   }
 
@@ -198,7 +216,7 @@ const payoutReadinessError = (user, venue) => {
   return null;
 };
 const ownerMeetsPublishingRequirements = (user, settings, venue) => {
-  if (!user?.isIdentityVerified) return false;
+  if (settings?.publishing?.requireIdentityVerification !== false && !user?.isIdentityVerified) return false;
   if (venue) return !payoutReadinessError(user, venue);
   return Boolean(user?.vendorAccountCode || (user?.bankDetails?.accountNumber && user?.bankDetails?.bankCode));
 };

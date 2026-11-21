@@ -23,8 +23,8 @@ exports.handlers = authorize => ({
       const record = await getRecord(venueId, booking);
       const canFinance = await financeAccess(req.user.id, venue);
       const summary = canFinance ? paymentSummary(booking, record) : null;
-      const safe = canFinance ? { ...record, refunds: (record.refunds || []).map(f => ({ ...f, receipt: f.receipt?.uploadedAt ? { uploadedAt: f.receipt.uploadedAt } : undefined })) } : { ...record, refundAccount: undefined, openingPaidMinor: undefined, bookingSnapshot: undefined, payments: [], refunds: [] };
-      return res.json({ success: true, data: { record: safe, summary, canFinance,
+      const safe = canFinance ? { ...record, refunds: (record.refunds || []).map(f => ({ ...f, receipt: f.receipt?.uploadedAt ? { uploadedAt: f.receipt.uploadedAt } : undefined })) } : { ...record, refundAccount: undefined, agreedPrice: undefined, openingPaidMinor: undefined, bookingSnapshot: undefined, payments: [], refunds: [] };
+      return res.json({ success: true, data: { bookingStatus: booking.status, venueName: venue?.venueName || "", guestName: booking.guestDetails?.fullName || booking.guestName || "Guest", record: safe, summary, canFinance,
         confirmation: canFinance ? confirmationText(booking, record, venue.venueName) : null,
         sessions: (await attendanceForBookings([booking]))[0].attendance.sessions } });
     } catch (error) { return handleError(res, error); }

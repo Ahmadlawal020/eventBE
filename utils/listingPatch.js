@@ -8,7 +8,7 @@ const EVENT_FIELDS = new Set([
 const VENUE_FIELDS = new Set([
     "venueType", "venueName", "shortDescription", "description", "supportedEvents",
     "amenities", "images", "availability", "capacity", "bookingSettings", "basePrice",
-    "weekendPrice", "discounts", "venueRules", "customVenueRules", "safety",
+    "weekendPrice", "venueRules", "customVenueRules", "safety",
     "safetyConsiderations", "location", "yearEstablished", "totalArea", "hallType",
     "venueSetting", "guestAccessDescription", "interactionDescription",
     "neighborhoodDescription", "transitDescription", "otherDetailsDescription",

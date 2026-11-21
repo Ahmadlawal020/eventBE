@@ -1,9 +1,17 @@
 const mongoose = require("mongoose");
 const EventCenterRefund = require("../../models/client/eventCenterRefund.schema");
+const EventCenter = require("../../models/client/eventCenter.schema");
 const { NOTIFICATION_TYPES } = require("../../constants/notificationTypes");
 const { queueNotices } = require("../../services/eventCenterRefundNotifications.service");
 
 const validId = (id) => mongoose.Types.ObjectId.isValid(id);
+
+async function refundHostRecipients(refund, session) {
+  const venue = refund?.eventCenterId
+    ? await EventCenter.findById(refund.eventCenterId).select("coOrganisers").session(session).lean()
+    : null;
+  return [...new Set([refund.organiser, ...(venue?.coOrganisers || [])].filter(Boolean).map(String))];
+}
 
 async function getMyRefunds(req, res) {
   const scope = {};
@@ -17,10 +25,13 @@ async function getMyRefunds(req, res) {
   return res.json({ success: true, data: refunds });
 }
 
-async function transitionRefund(filter, update, makeNotice) {
+async function transitionRefund(filter, update, makeNotices) {
   return mongoose.connection.transaction(async session => {
     const refund = await EventCenterRefund.findOneAndUpdate(filter, update, { new: true, runValidators: true, session });
-    if (refund && makeNotice) await queueNotices([makeNotice(refund)], session);
+    if (refund && makeNotices) {
+      const notices = await makeNotices(refund, session);
+      if (notices?.length) await queueNotices(notices, session);
+    }
     return refund;
   });
 }
@@ -36,12 +47,18 @@ async function submitBankDetails(req, res) {
     { $inc: { bankDetailsVersion: 1 }, $set: { bankDetails,
       status: "DUE_FROM_ORGANISER", bankDetailsSubmittedAt: new Date() },
       $unset: { markedPaidAt: 1, "receipt.uploadedAt": 1, pendingReceiptPublicId: 1 } },
-    refund => ({
-      key: `refund-details:${refund._id}:${refund.updatedAt?.getTime() || Date.now()}`,
-      recipient: refund.organiser, sender: req.user.id, type: NOTIFICATION_TYPES.ORGANISER_REFUND_DUE,
-      title: "Refund details received", message: "A buyer submitted or updated their cancellation refund bank details.",
-      data: { refundId: String(refund._id), bookingId: String(refund.bookingId), screen: "OrganiserVenueRefund" },
-    }),
+    async (refund, session) => {
+      const recipients = await refundHostRecipients(refund, session);
+      const stamp = refund.updatedAt?.getTime() || Date.now();
+      return recipients.map((recipient) => ({
+        key: recipient === String(refund.organiser)
+          ? `refund-details:${refund._id}:${stamp}`
+          : `refund-details:${refund._id}:${stamp}:${recipient}`,
+        recipient, sender: req.user.id, type: NOTIFICATION_TYPES.ORGANISER_REFUND_DUE,
+        title: "Refund details received", message: "A buyer submitted or updated their cancellation refund bank details.",
+        data: { refundId: String(refund._id), bookingId: String(refund.bookingId), screen: "OrganiserVenueRefund" },
+      }));
+    },
   );
   if (!refund) return res.status(409).json({ success: false, message: "Bank details are locked while settlement is being prepared, after proof is uploaded, or when the refund is closed. Contact support for corrections." });
   return res.json({ success: true, data: refund });
@@ -68,12 +85,18 @@ async function disputeRefund(req, res) {
   const refund = await transitionRefund({
     _id: req.params.refundId, buyer: req.user.id, ticketId: { $exists: true },
     $or: [{ status: "MARKED_PAID" }, { status: "OVERDUE", markedPaidAt: { $exists: true } }],
-  }, { $set: { status: "DISPUTED", disputeReason: reason.trim(), "managementCase.status": "OPEN" } }, refund => ({
-    key: `refund-disputed:${refund._id}`, recipient: refund.organiser, sender: req.user.id,
-    type: NOTIFICATION_TYPES.SYSTEM, title: "Buyer disputed a cancellation refund",
-    message: "The buyer says they have not received the refund. Review the payment and contact support.",
-    data: { bookingId: String(refund.bookingId), refundId: String(refund._id), screen: "OrganiserVenueRefund" },
-  }));
+  }, { $set: { status: "DISPUTED", disputeReason: reason.trim(), "managementCase.status": "OPEN" } }, async (refund, session) => {
+    const recipients = await refundHostRecipients(refund, session);
+    return recipients.map((recipient) => ({
+      key: recipient === String(refund.organiser)
+        ? `refund-disputed:${refund._id}`
+        : `refund-disputed:${refund._id}:${recipient}`,
+      recipient, sender: req.user.id,
+      type: NOTIFICATION_TYPES.SYSTEM, title: "Buyer disputed a cancellation refund",
+      message: "The buyer says they have not received the refund. Review the payment and contact support.",
+      data: { bookingId: String(refund.bookingId), refundId: String(refund._id), screen: "OrganiserVenueRefund" },
+    }));
+  });
   if (!refund) return res.status(409).json({ success: false, message: "Refund is not available for dispute." });
   return res.json({ success: true, data: refund });
 }
